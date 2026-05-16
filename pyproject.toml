@@ -5,7 +5,7 @@ description = "Python workspace root (uv)"
 requires-python = ">=3.11"
 
 [tool.uv.workspace]
-members = ["libs/python", "services/*"]
+members = ["libs/python/evs_common", "services/*"]
 
 [tool.ruff]
 line-length = 100

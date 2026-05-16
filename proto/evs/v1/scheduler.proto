@@ -1,0 +1,27 @@
+syntax = "proto3";
+package evs.v1;
+import "evs/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
+
+service SchedulerService {
+  rpc ScheduleJob(ScheduleJobRequest) returns (ScheduleJobResponse);
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+}
+
+message ScheduledJob {
+  string id = 1;
+  string tenant_id = 2;
+  string job_type = 3;
+  google.protobuf.Timestamp run_at = 4;
+  string status = 5;
+  bytes payload = 6;
+}
+
+message ScheduleJobRequest { string tenant_id = 1; ScheduledJob job = 2; }
+message ScheduleJobResponse { ScheduledJob job = 1; }
+message CancelJobRequest { string tenant_id = 1; string job_id = 2; }
+message CancelJobResponse {}
+message ListJobsRequest { string tenant_id = 1; PageRequest page = 2; }
+message ListJobsResponse { repeated ScheduledJob jobs = 1; PageResponse page = 2; }

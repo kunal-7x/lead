@@ -1,0 +1,14 @@
+{
+  "name": "@lead/pb",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Generated protobuf/Connect-ES TypeScript clients (buf generate output)",
+  "main": "./src/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit || true"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^1.9.0",
+    "@connectrpc/connect": "^1.4.0"
+  }
+}

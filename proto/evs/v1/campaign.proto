@@ -1,0 +1,34 @@
+syntax = "proto3";
+package evs.v1;
+import "evs/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
+
+service CampaignService {
+  rpc CreateCampaign(CreateCampaignRequest) returns (CreateCampaignResponse);
+  rpc GetCampaign(GetCampaignRequest) returns (GetCampaignResponse);
+  rpc ListCampaigns(ListCampaignsRequest) returns (ListCampaignsResponse);
+  rpc StartCampaign(StartCampaignRequest) returns (StartCampaignResponse);
+  rpc PauseCampaign(PauseCampaignRequest) returns (PauseCampaignResponse);
+}
+
+message Campaign {
+  string id = 1;
+  string tenant_id = 2;
+  string name = 3;
+  string channel = 4; // voice | whatsapp
+  string status = 5;
+  string script_id = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+message CreateCampaignRequest { string tenant_id = 1; Campaign campaign = 2; repeated string lead_ids = 3; }
+message CreateCampaignResponse { Campaign campaign = 1; }
+message GetCampaignRequest { string tenant_id = 1; string id = 2; }
+message GetCampaignResponse { Campaign campaign = 1; }
+message ListCampaignsRequest { string tenant_id = 1; PageRequest page = 2; }
+message ListCampaignsResponse { repeated Campaign campaigns = 1; PageResponse page = 2; }
+message StartCampaignRequest { string tenant_id = 1; string id = 2; }
+message StartCampaignResponse { Campaign campaign = 1; }
+message PauseCampaignRequest { string tenant_id = 1; string id = 2; }
+message PauseCampaignResponse { Campaign campaign = 1; }

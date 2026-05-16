@@ -1,0 +1,13 @@
+syntax = "proto3";
+package evs.v1;
+option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
+
+service SttRouterService {
+  rpc Transcribe(TranscribeRequest) returns (TranscribeResponse);
+  rpc StreamTranscribe(StreamTranscribeRequest) returns (stream StreamTranscribeChunk);
+}
+
+message TranscribeRequest { string tenant_id = 1; string call_session_id = 2; bytes audio = 3; string language_code = 4; string provider_hint = 5; }
+message TranscribeResponse { string transcript = 1; double confidence = 2; string provider_used = 3; string language_detected = 4; }
+message StreamTranscribeRequest { string tenant_id = 1; string call_session_id = 2; bytes audio_chunk = 3; string language_code = 4; bool is_final = 5; }
+message StreamTranscribeChunk { string text = 1; bool is_final = 2; double confidence = 3; }

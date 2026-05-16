@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package evs.events.v1;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/lead/libs/go/pb/evs/events/v1;eventsv1";
+
+// Envelope is the canonical wrapper for every NATS message in EVS.
+// Producers MUST publish this; consumers MUST validate it before unmarshaling payload.
+message Envelope {
+  string event_id = 1;     // ULID
+  string tenant_id = 2;
+  string event_type = 3;   // e.g. "lead.created.v1"
+  google.protobuf.Timestamp occurred_at = 4;
+  string version = 5;      // semver of the payload schema
+  google.protobuf.Any payload = 6;
+  TraceContext trace_context = 7;
+  string producer = 8;     // service name
+  string correlation_id = 9;
+}
+
+message TraceContext {
+  string traceparent = 1; // W3C
+  string tracestate = 2;
+  string baggage = 3;
+}

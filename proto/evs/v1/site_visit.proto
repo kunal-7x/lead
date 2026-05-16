@@ -1,0 +1,35 @@
+syntax = "proto3";
+package evs.v1;
+import "evs/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
+
+service SiteVisitService {
+  rpc ScheduleVisit(ScheduleVisitRequest) returns (ScheduleVisitResponse);
+  rpc RescheduleVisit(RescheduleVisitRequest) returns (RescheduleVisitResponse);
+  rpc CancelVisit(CancelVisitRequest) returns (CancelVisitResponse);
+  rpc CompleteVisit(CompleteVisitRequest) returns (CompleteVisitResponse);
+  rpc ListVisits(ListVisitsRequest) returns (ListVisitsResponse);
+}
+
+message SiteVisit {
+  string id = 1;
+  string tenant_id = 2;
+  string lead_id = 3;
+  string property_id = 4;
+  google.protobuf.Timestamp scheduled_at = 5;
+  string status = 6;
+  string assigned_user_id = 7;
+  string notes = 8;
+}
+
+message ScheduleVisitRequest { string tenant_id = 1; SiteVisit visit = 2; }
+message ScheduleVisitResponse { SiteVisit visit = 1; }
+message RescheduleVisitRequest { string tenant_id = 1; string visit_id = 2; google.protobuf.Timestamp new_time = 3; }
+message RescheduleVisitResponse { SiteVisit visit = 1; }
+message CancelVisitRequest { string tenant_id = 1; string visit_id = 2; string reason = 3; }
+message CancelVisitResponse { SiteVisit visit = 1; }
+message CompleteVisitRequest { string tenant_id = 1; string visit_id = 2; string outcome = 3; }
+message CompleteVisitResponse { SiteVisit visit = 1; }
+message ListVisitsRequest { string tenant_id = 1; PageRequest page = 2; }
+message ListVisitsResponse { repeated SiteVisit visits = 1; PageResponse page = 2; }

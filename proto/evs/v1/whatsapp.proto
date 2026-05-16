@@ -1,0 +1,20 @@
+syntax = "proto3";
+package evs.v1;
+import "evs/v1/common.proto";
+option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
+
+service WhatsAppService {
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+  rpc SendTemplate(SendTemplateRequest) returns (SendTemplateResponse);
+  rpc HandleInbound(HandleInboundRequest) returns (HandleInboundResponse);
+  rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
+}
+
+message SendMessageRequest { string tenant_id = 1; string contact_id = 2; string text = 3; }
+message SendMessageResponse { WhatsAppMessage message = 1; }
+message SendTemplateRequest { string tenant_id = 1; string contact_id = 2; string template_name = 3; map<string,string> params = 4; }
+message SendTemplateResponse { WhatsAppMessage message = 1; }
+message HandleInboundRequest { bytes body = 1; map<string,string> headers = 2; }
+message HandleInboundResponse {}
+message ListMessagesRequest { string tenant_id = 1; string contact_id = 2; PageRequest page = 3; }
+message ListMessagesResponse { repeated WhatsAppMessage messages = 1; PageResponse page = 2; }

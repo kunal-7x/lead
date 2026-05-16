@@ -1,0 +1,30 @@
+syntax = "proto3";
+package evs.v1;
+import "evs/v1/common.proto";
+option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
+
+service HandoffService {
+  rpc RequestHandoff(RequestHandoffRequest) returns (RequestHandoffResponse);
+  rpc AssignAgent(AssignAgentRequest) returns (AssignAgentResponse);
+  rpc CompleteHandoff(CompleteHandoffRequest) returns (CompleteHandoffResponse);
+  rpc GetHandoff(GetHandoffRequest) returns (GetHandoffResponse);
+}
+
+message Handoff {
+  string id = 1;
+  string tenant_id = 2;
+  string lead_id = 3;
+  string channel = 4;
+  string reason = 5;
+  string assigned_user_id = 6;
+  string status = 7;
+}
+
+message RequestHandoffRequest { string tenant_id = 1; Handoff handoff = 2; }
+message RequestHandoffResponse { Handoff handoff = 1; }
+message AssignAgentRequest { string tenant_id = 1; string handoff_id = 2; string user_id = 3; }
+message AssignAgentResponse { Handoff handoff = 1; }
+message CompleteHandoffRequest { string tenant_id = 1; string handoff_id = 2; string resolution = 3; }
+message CompleteHandoffResponse { Handoff handoff = 1; }
+message GetHandoffRequest { string tenant_id = 1; string handoff_id = 2; }
+message GetHandoffResponse { Handoff handoff = 1; }

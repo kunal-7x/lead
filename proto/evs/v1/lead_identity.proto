@@ -1,0 +1,26 @@
+syntax = "proto3";
+package evs.v1;
+import "evs/v1/common.proto";
+option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
+
+service LeadIdentityService {
+  rpc UpsertContact(UpsertContactRequest) returns (UpsertContactResponse);
+  rpc GetContact(GetContactRequest) returns (GetContactResponse);
+  rpc UpsertLead(UpsertLeadRequest) returns (UpsertLeadResponse);
+  rpc GetLead(GetLeadRequest) returns (GetLeadResponse);
+  rpc ListLeads(ListLeadsRequest) returns (ListLeadsResponse);
+  rpc DedupeContact(DedupeContactRequest) returns (DedupeContactResponse);
+}
+
+message UpsertContactRequest { string tenant_id = 1; Contact contact = 2; }
+message UpsertContactResponse { Contact contact = 1; bool created = 2; }
+message GetContactRequest { string tenant_id = 1; string contact_id = 2; }
+message GetContactResponse { Contact contact = 1; }
+message UpsertLeadRequest { string tenant_id = 1; Lead lead = 2; }
+message UpsertLeadResponse { Lead lead = 1; bool created = 2; }
+message GetLeadRequest { string tenant_id = 1; string lead_id = 2; }
+message GetLeadResponse { Lead lead = 1; }
+message ListLeadsRequest { string tenant_id = 1; string status = 2; PageRequest page = 3; }
+message ListLeadsResponse { repeated Lead leads = 1; PageResponse page = 2; }
+message DedupeContactRequest { string tenant_id = 1; string phone_e164 = 2; string email = 3; }
+message DedupeContactResponse { repeated Contact matches = 1; }

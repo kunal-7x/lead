@@ -1,0 +1,23 @@
+syntax = "proto3";
+package evs.v1;
+import "evs/v1/common.proto";
+option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
+
+service TenantAuthService {
+  rpc CreateTenant(CreateTenantRequest) returns (CreateTenantResponse);
+  rpc GetTenant(GetTenantRequest) returns (GetTenantResponse);
+  rpc IssueToken(IssueTokenRequest) returns (IssueTokenResponse);
+  rpc VerifyToken(VerifyTokenRequest) returns (VerifyTokenResponse);
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+}
+
+message CreateTenantRequest { string name = 1; string region = 2; }
+message CreateTenantResponse { Tenant tenant = 1; }
+message GetTenantRequest { string tenant_id = 1; }
+message GetTenantResponse { Tenant tenant = 1; }
+message IssueTokenRequest { string tenant_id = 1; string email = 2; string password = 3; }
+message IssueTokenResponse { string access_token = 1; string refresh_token = 2; int64 expires_in = 3; }
+message VerifyTokenRequest { string access_token = 1; }
+message VerifyTokenResponse { bool valid = 1; string tenant_id = 2; string user_id = 3; repeated string roles = 4; }
+message CreateUserRequest { string tenant_id = 1; string email = 2; string display_name = 3; repeated string roles = 4; }
+message CreateUserResponse { User user = 1; }

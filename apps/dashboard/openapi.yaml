@@ -1,0 +1,255 @@
+openapi: "3.1.0"
+info:
+  title: EVS BFF API
+  version: "1.0.0"
+  description: External REST surface served by the BFF (Backend For Frontend) at port 8080.
+
+servers:
+  - url: http://localhost:8080/api/v1
+
+security:
+  - BearerAuth: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:    { type: integer }
+        message: { type: string }
+
+    Tenant:
+      type: object
+      required: [id, name, status]
+      properties:
+        id:         { type: string }
+        name:       { type: string }
+        region:     { type: string }
+        status:     { type: string, enum: [active, suspended, deleted] }
+        created_at: { type: string, format: date-time }
+
+    Lead:
+      type: object
+      required: [id, tenant_id, contact_id, status]
+      properties:
+        id:             { type: string }
+        tenant_id:      { type: string }
+        contact_id:     { type: string }
+        source:         { type: string }
+        status:         { type: string }
+        assigned_user_id: { type: string }
+        created_at:     { type: string, format: date-time }
+        updated_at:     { type: string, format: date-time }
+        attributes:
+          type: object
+          additionalProperties: { type: string }
+
+    Contact:
+      type: object
+      required: [id, tenant_id]
+      properties:
+        id:         { type: string }
+        tenant_id:  { type: string }
+        phone_e164: { type: string }
+        email:      { type: string }
+        full_name:  { type: string }
+        attributes:
+          type: object
+          additionalProperties: { type: string }
+
+    PageMeta:
+      type: object
+      properties:
+        next_page_token: { type: string }
+        total_size:      { type: integer }
+
+paths:
+  /auth/token:
+    post:
+      summary: Issue JWT
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, tenant_id]
+              properties:
+                email:     { type: string }
+                password:  { type: string }
+                tenant_id: { type: string }
+      responses:
+        "200":
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:  { type: string }
+                  refresh_token: { type: string }
+                  expires_in:    { type: integer }
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /leads:
+    get:
+      summary: List leads
+      parameters:
+        - name: page_size
+          in: query
+          schema: { type: integer, default: 20 }
+        - name: page_token
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Lead list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  leads: { type: array, items: { $ref: "#/components/schemas/Lead" } }
+                  page:  { $ref: "#/components/schemas/PageMeta" }
+    post:
+      summary: Create lead
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contact_id, source]
+              properties:
+                contact_id: { type: string }
+                source:     { type: string }
+                attributes:
+                  type: object
+                  additionalProperties: { type: string }
+      responses:
+        "201":
+          description: Lead created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Lead" }
+
+  /leads/{lead_id}:
+    parameters:
+      - name: lead_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: Get lead
+      responses:
+        "200":
+          description: Lead
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Lead" }
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    patch:
+      summary: Update lead
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:           { type: string }
+                assigned_user_id: { type: string }
+                attributes:
+                  type: object
+                  additionalProperties: { type: string }
+      responses:
+        "200":
+          description: Updated lead
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Lead" }
+
+  /contacts:
+    get:
+      summary: List contacts
+      parameters:
+        - name: page_size
+          in: query
+          schema: { type: integer, default: 20 }
+        - name: page_token
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Contact list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  contacts: { type: array, items: { $ref: "#/components/schemas/Contact" } }
+                  page:     { $ref: "#/components/schemas/PageMeta" }
+    post:
+      summary: Create contact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone_e164]
+              properties:
+                phone_e164: { type: string }
+                email:      { type: string }
+                full_name:  { type: string }
+      responses:
+        "201":
+          description: Contact created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Contact" }
+
+  /campaigns/{campaign_id}/calls:
+    post:
+      summary: Trigger campaign call batch
+      parameters:
+        - name: campaign_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                lead_ids: { type: array, items: { type: string } }
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id: { type: string }

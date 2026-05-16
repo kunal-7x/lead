@@ -1,0 +1,20 @@
+syntax = "proto3";
+package evs.v1;
+import "evs/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
+
+service BillingService {
+  rpc GetUsage(GetUsageRequest) returns (GetUsageResponse);
+  rpc ListInvoices(ListInvoicesRequest) returns (ListInvoicesResponse);
+  rpc RecordUsage(RecordUsageRequest) returns (RecordUsageResponse);
+}
+
+message GetUsageRequest { string tenant_id = 1; google.protobuf.Timestamp period_start = 2; google.protobuf.Timestamp period_end = 3; }
+message GetUsageResponse { repeated UsageLine lines = 1; Money total = 2; }
+message UsageLine { string resource = 1; int64 quantity = 2; string unit = 3; Money cost = 4; }
+message ListInvoicesRequest { string tenant_id = 1; PageRequest page = 2; }
+message ListInvoicesResponse { repeated Invoice invoices = 1; PageResponse page = 2; }
+message Invoice { string id = 1; string tenant_id = 2; Money amount = 3; string status = 4; google.protobuf.Timestamp issued_at = 5; google.protobuf.Timestamp due_at = 6; }
+message RecordUsageRequest { string tenant_id = 1; string resource = 2; int64 quantity = 3; string unit = 4; }
+message RecordUsageResponse {}

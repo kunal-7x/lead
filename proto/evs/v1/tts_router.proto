@@ -1,0 +1,13 @@
+syntax = "proto3";
+package evs.v1;
+option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
+
+service TtsRouterService {
+  rpc Synthesize(SynthesizeRequest) returns (SynthesizeResponse);
+  rpc StreamSynthesize(StreamSynthesizeRequest) returns (stream StreamSynthesizeChunk);
+}
+
+message SynthesizeRequest { string tenant_id = 1; string text = 2; string voice_id = 3; string language_code = 4; string provider_hint = 5; string audio_format = 6; }
+message SynthesizeResponse { bytes audio = 1; string provider_used = 2; string audio_format = 3; }
+message StreamSynthesizeRequest { string tenant_id = 1; string text = 2; string voice_id = 3; string language_code = 4; string provider_hint = 5; }
+message StreamSynthesizeChunk { bytes audio_chunk = 1; bool is_final = 2; }

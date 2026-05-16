@@ -1,0 +1,19 @@
+syntax = "proto3";
+package evs.v1;
+import "evs/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
+
+service ScoringService {
+  rpc ScoreLead(ScoreLeadRequest) returns (ScoreLeadResponse);
+  rpc GetScore(GetScoreRequest) returns (GetScoreResponse);
+  rpc BatchScore(BatchScoreRequest) returns (BatchScoreResponse);
+}
+
+message ScoreLeadRequest { string tenant_id = 1; string lead_id = 2; map<string, string> features = 3; }
+message ScoreLeadResponse { LeadScore score = 1; }
+message GetScoreRequest { string tenant_id = 1; string lead_id = 2; }
+message GetScoreResponse { LeadScore score = 1; }
+message BatchScoreRequest { string tenant_id = 1; repeated string lead_ids = 2; }
+message BatchScoreResponse { repeated LeadScore scores = 1; }
+message LeadScore { string lead_id = 1; double score = 2; string band = 3; map<string, double> feature_weights = 4; google.protobuf.Timestamp scored_at = 5; }

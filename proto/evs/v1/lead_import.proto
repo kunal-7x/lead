@@ -1,0 +1,33 @@
+syntax = "proto3";
+package evs.v1;
+import "evs/v1/common.proto";
+option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
+
+service LeadImportService {
+  rpc ImportLeads(ImportLeadsRequest) returns (ImportLeadsResponse);
+  rpc GetImportJob(GetImportJobRequest) returns (GetImportJobResponse);
+  rpc ListImportJobs(ListImportJobsRequest) returns (ListImportJobsResponse);
+}
+
+message ImportLeadsRequest {
+  string tenant_id = 1;
+  string source = 2;
+  string format = 3; // "csv" | "json"
+  bytes payload = 4;
+  string spaces_object_key = 5;
+}
+message ImportLeadsResponse { string job_id = 1; }
+message GetImportJobRequest { string job_id = 1; string tenant_id = 2; }
+message GetImportJobResponse { ImportJob job = 1; }
+message ListImportJobsRequest { string tenant_id = 1; PageRequest page = 2; }
+message ListImportJobsResponse { repeated ImportJob jobs = 1; PageResponse page = 2; }
+
+message ImportJob {
+  string id = 1;
+  string tenant_id = 2;
+  string status = 3;
+  int32 total_rows = 4;
+  int32 succeeded = 5;
+  int32 failed = 6;
+  repeated string errors = 7;
+}

@@ -1,0 +1,20 @@
+syntax = "proto3";
+package evs.v1;
+import "evs/v1/common.proto";
+option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
+
+service ConsentService {
+  rpc RecordConsent(RecordConsentRequest) returns (RecordConsentResponse);
+  rpc RevokeConsent(RevokeConsentRequest) returns (RevokeConsentResponse);
+  rpc CheckConsent(CheckConsentRequest) returns (CheckConsentResponse);
+  rpc ListConsent(ListConsentRequest) returns (ListConsentResponse);
+}
+
+message RecordConsentRequest { string tenant_id = 1; ConsentRecord record = 2; AuditActor actor = 3; }
+message RecordConsentResponse { ConsentRecord record = 1; }
+message RevokeConsentRequest { string tenant_id = 1; string contact_id = 2; string channel = 3; AuditActor actor = 4; }
+message RevokeConsentResponse { ConsentRecord record = 1; }
+message CheckConsentRequest { string tenant_id = 1; string contact_id = 2; string channel = 3; }
+message CheckConsentResponse { bool granted = 1; ConsentRecord record = 2; }
+message ListConsentRequest { string tenant_id = 1; string contact_id = 2; PageRequest page = 3; }
+message ListConsentResponse { repeated ConsentRecord records = 1; PageResponse page = 2; }

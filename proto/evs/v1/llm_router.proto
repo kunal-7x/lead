@@ -1,0 +1,14 @@
+syntax = "proto3";
+package evs.v1;
+option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
+
+service LlmRouterService {
+  rpc Complete(CompleteRequest) returns (CompleteResponse);
+  rpc StreamComplete(StreamCompleteRequest) returns (stream StreamCompleteChunk);
+}
+
+message CompleteRequest { string tenant_id = 1; string model_hint = 2; repeated ChatMessage messages = 3; double temperature = 4; int32 max_tokens = 5; }
+message CompleteResponse { string content = 1; string model_used = 2; int32 prompt_tokens = 3; int32 completion_tokens = 4; }
+message StreamCompleteRequest { string tenant_id = 1; string model_hint = 2; repeated ChatMessage messages = 3; double temperature = 4; int32 max_tokens = 5; }
+message StreamCompleteChunk { string delta = 1; bool is_final = 2; }
+message ChatMessage { string role = 1; string content = 2; }

@@ -1,0 +1,29 @@
+syntax = "proto3";
+package evs.v1;
+import "evs/v1/common.proto";
+option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
+
+service KnowledgeService {
+  rpc IngestDocument(IngestDocumentRequest) returns (IngestDocumentResponse);
+  rpc DeleteDocument(DeleteDocumentRequest) returns (DeleteDocumentResponse);
+  rpc Query(QueryRequest) returns (QueryResponse);
+  rpc ListDocuments(ListDocumentsRequest) returns (ListDocumentsResponse);
+}
+
+message Document {
+  string id = 1;
+  string tenant_id = 2;
+  string title = 3;
+  string source_uri = 4;
+  string mime_type = 5;
+  int32 chunk_count = 6;
+}
+message IngestDocumentRequest { string tenant_id = 1; string title = 2; bytes content = 3; string mime_type = 4; }
+message IngestDocumentResponse { Document document = 1; }
+message DeleteDocumentRequest { string tenant_id = 1; string document_id = 2; }
+message DeleteDocumentResponse {}
+message QueryRequest { string tenant_id = 1; string query = 2; int32 top_k = 3; }
+message QueryResponse { repeated QueryHit hits = 1; }
+message QueryHit { string document_id = 1; string chunk = 2; float score = 3; }
+message ListDocumentsRequest { string tenant_id = 1; PageRequest page = 2; }
+message ListDocumentsResponse { repeated Document documents = 1; PageResponse page = 2; }
