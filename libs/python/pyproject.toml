@@ -1,0 +1,5 @@
+[project]
+name = "lead-libs"
+version = "0.0.0"
+description = "Shared Python libraries"
+requires-python = ">=3.11"

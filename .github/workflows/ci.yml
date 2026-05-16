@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Lint
+        run: pnpm run lint || true
+
+      - name: Build
+        run: pnpm run build || true
+
+      - name: Go build
+        run: go work sync && go build ./...
+
+      - name: SBOM (syft)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Vulnerability scan (grype)
+        uses: anchore/scan-action@v3
+        with:
+          sbom: sbom.spdx.json
+          fail-build: false
+
+      - name: Filesystem scan (trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          format: table
+          exit-code: "0"
+
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Login to DOCR
+        run: echo "DOCR login goes here (doctl registry login)"
+      - name: Build, sign, push
+        run: echo "docker build + cosign sign + docker push to DOCR (filled per-service)"

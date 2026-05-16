@@ -1,0 +1,53 @@
+# Env
+.env
+.env.local
+.env.*.local
+!.env.template
+
+# Go
+bin/
+*.exe
+*.test
+*.out
+vendor/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.uv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+.turbo/
+.pnpm-store/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Coverage
+coverage/
+*.lcov
