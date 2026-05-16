@@ -1,7 +1,9 @@
-go 1.22
+go 1.24.0
 
 use (
 	./libs/go
 	./services/bff
+	./services/lead-identity
+	./services/lead-import
 	./services/tenant-auth
 )

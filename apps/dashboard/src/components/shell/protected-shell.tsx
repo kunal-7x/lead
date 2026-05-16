@@ -9,6 +9,7 @@ import { toast } from "sonner";
 
 const NAV = [
   { label: "Dashboard", href: "/dashboard" },
+  { label: "Leads", href: "/leads" },
   { label: "Profile", href: "/settings/profile" },
   { label: "Team", href: "/settings/team" },
   { label: "API Keys", href: "/settings/api-keys" },
