@@ -2,4 +2,6 @@ go 1.22
 
 use (
 	./libs/go
+	./services/bff
+	./services/tenant-auth
 )

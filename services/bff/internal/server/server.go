@@ -1,0 +1,88 @@
+package server
+
+import (
+	"log/slog"
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
+	"github.com/lead/services/bff/internal/handler"
+	"github.com/lead/services/bff/internal/middleware"
+	"github.com/lead/services/bff/internal/tenantcache"
+)
+
+// Config holds runtime configuration for the BFF.
+type Config struct {
+	Addr           string
+	TenantAuthURL  string
+	RedisAddr      string
+	JWTSecret      string
+	AllowedOrigins []string
+}
+
+// New creates the chi router with the full middleware chain and returns it as
+// an http.Handler ready to be served.
+func New(cfg Config, logger *slog.Logger) (http.Handler, error) {
+	cache, err := tenantcache.New(cfg.RedisAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	authClient := handler.NewTenantAuthClient(cfg.TenantAuthURL)
+
+	r := chi.NewRouter()
+
+	// Observability / diagnostics
+	r.Use(middleware.RequestID)
+	r.Use(middleware.OTelTracing)
+	r.Use(chimiddleware.Recoverer)
+
+	// CORS
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   cfg.AllowedOrigins,
+		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Authorization", "Content-Type", "X-Request-Id"},
+		AllowCredentials: true,
+		MaxAge:           300,
+	}))
+
+	// Auth + tenant context
+	r.Use(middleware.Auth(cfg.JWTSecret))
+	r.Use(middleware.TenantContext(cache))
+
+	// Prometheus metrics (no auth required)
+	r.Handle("/metrics", middleware.MetricsHandler())
+
+	// Health endpoints (no auth required)
+	r.Get("/healthz", handler.Healthz)
+	r.Get("/readyz", handler.Readyz)
+
+	// WebSocket stream stub
+	r.Get("/v1/stream", handler.Stream(logger))
+
+	// Protected API routes
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireAuth)
+		r.Use(middleware.RateLimit)
+
+		// Auth pass-through
+		r.Post("/v1/auth/login", handler.Login(authClient))
+		r.Post("/v1/auth/refresh", handler.RefreshToken(authClient))
+		r.Post("/v1/auth/logout", handler.Logout(authClient))
+		r.Post("/v1/auth/2fa/enroll", handler.Enroll2FA(authClient))
+		r.Post("/v1/auth/2fa/verify", handler.Verify2FA(authClient))
+
+		// API-key management
+		r.Post("/v1/api-keys", handler.CreateAPIKey(authClient))
+		r.Delete("/v1/api-keys/{keyID}", handler.RevokeAPIKey(authClient))
+
+		// Tenant / team (RBAC gated in handlers)
+		r.Get("/v1/team", handler.ListTeam(authClient))
+
+		// Audit log
+		r.Get("/v1/audit-log", handler.QueryAuditLog(authClient))
+	})
+
+	return r, nil
+}
