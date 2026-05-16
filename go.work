@@ -4,6 +4,7 @@ use (
 	./libs/go
 	./services/bff
 	./services/consent-compliance
+	./services/knowledge
 	./services/lead-identity
 	./services/lead-import
 	./services/tenant-auth
