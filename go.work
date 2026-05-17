@@ -9,6 +9,7 @@ use (
 	./services/lead-identity
 	./services/lead-import
 	./services/scheduler
+	./services/telephony-adapter
 	./services/temporal-workers
 	./services/tenant-auth
 )
