@@ -1,0 +1,11 @@
+# Kamailio dispatcher.list — FreeSWITCH SIP node pool
+# Format: SET_ID  SIP_URI  FLAGS
+# Set 1: primary FreeSWITCH nodes
+# Flags: 0 = active
+#
+# Add one line per FreeSWITCH instance.
+# Kamailio health-checks via SIP OPTIONS every 10s (see kamailio.cfg).
+# Failed nodes (OPTIONS timeout) are automatically removed from active pool.
+#
+1 sip:freeswitch-1:5060 0
+1 sip:freeswitch-2:5060 0

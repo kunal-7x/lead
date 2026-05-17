@@ -5,6 +5,7 @@ use (
 	./services/bff
 	./services/campaign
 	./services/consent-compliance
+	./services/freeswitch-bridge
 	./services/knowledge
 	./services/lead-identity
 	./services/lead-import

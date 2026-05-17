@@ -1,0 +1,31 @@
+<include>
+  <context name="default">
+
+    <!--
+      Inbound from Jio SIP: record both legs, then connect audio stream WebSocket.
+      The voice agent handles the conversation; on hangup FreeSWITCH writes the WAV.
+    -->
+    <extension name="inbound-jio">
+      <condition field="network_addr" expression="${JIO_GATEWAY_IP}">
+        <action application="set" data="record_file=/tmp/recordings/${tenant_id}_${uuid}.wav"/>
+        <action application="record_session" data="/tmp/recordings/${tenant_id}_${uuid}.wav"/>
+        <action application="audio_stream" data="${VOICE_AGENT_WS_URL}?session_id=${uuid} async full"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
+    <!--
+      Outbound: originate via Jio gateway → on answer, stream audio to voice agent.
+      origination_uuid is set by the Go ESL control plane (PlaceCall).
+    -->
+    <extension name="outbound-jio">
+      <condition field="destination_number" expression="^\+?(\d+)$">
+        <action application="set" data="record_file=/tmp/recordings/${tenant_id}_${uuid}.wav"/>
+        <action application="record_session" data="/tmp/recordings/${tenant_id}_${uuid}.wav"/>
+        <action application="bridge" data="{origination_uuid=${uuid}}sofia/gateway/jio/$1"/>
+        <action application="audio_stream" data="${VOICE_AGENT_WS_URL}?session_id=${uuid} async full"/>
+      </condition>
+    </extension>
+
+  </context>
+</include>

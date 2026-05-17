@@ -223,6 +223,22 @@ func (f *Fake) WebhookEventCount() int {
 	return len(f.webhookEvents)
 }
 
+// AddRoutingRule replaces the routing rules with the provided rule set (for routing tests).
+// Call before building the router to control which rules are active.
+func (f *Fake) AddRoutingRule(r model.ProviderRoutingRule) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := r
+	f.routingRules = append(f.routingRules, &cp)
+}
+
+// ResetRoutingRules clears all routing rules.
+func (f *Fake) ResetRoutingRules() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.routingRules = nil
+}
+
 // AddProviderFailures adds synthetic failures for a provider (for routing tests).
 func (f *Fake) AddProviderFailures(providerID string, count int) {
 	f.mu.Lock()
