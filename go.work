@@ -8,5 +8,7 @@ use (
 	./services/knowledge
 	./services/lead-identity
 	./services/lead-import
+	./services/scheduler
+	./services/temporal-workers
 	./services/tenant-auth
 )
