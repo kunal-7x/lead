@@ -64,7 +64,16 @@ const messagesByThread: Record<
 export default function MessagesPage() {
   const [selectedThreadID, setSelectedThreadID] = useState('th-2');
   const [query, setQuery] = useState('');
-  const selectedThread = threads.find((thread) => thread.id === selectedThreadID) ?? threads[0];
+  const selectedThread = threads.find((thread) => thread.id === selectedThreadID) ??
+    threads[0] ?? {
+      id: '',
+      lead: '',
+      phone: '',
+      project: '',
+      last: '',
+      unread: 0,
+      status: '',
+    };
   const filteredThreads = useMemo(
     () =>
       threads.filter((thread) =>

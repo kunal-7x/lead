@@ -24,6 +24,7 @@
 | 8110 | webhook-router       |
 | 8112 | handoff              |
 | 8113 | notification         |
+| 8114 | site-visit           |
 
 ### AI plane (Python) 8201–8210
 | Port | Service              |

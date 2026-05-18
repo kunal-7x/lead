@@ -15,5 +15,6 @@ use (
 	./services/temporal-workers
 	./services/tenant-auth
 	./services/notification
+	./services/site-visit
 	./services/whatsapp-adapter
 )

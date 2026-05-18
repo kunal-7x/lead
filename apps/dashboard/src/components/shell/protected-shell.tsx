@@ -11,6 +11,7 @@ const NAV = [
   { label: 'Dashboard', href: '/dashboard' },
   { label: 'Leads', href: '/leads' },
   { label: 'Messages', href: '/messages' },
+  { label: 'Site Visits', href: '/site-visits' },
   { label: 'Profile', href: '/settings/profile' },
   { label: 'Team', href: '/settings/team' },
   { label: 'API Keys', href: '/settings/api-keys' },
