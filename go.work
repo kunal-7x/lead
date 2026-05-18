@@ -12,6 +12,8 @@ use (
 	./services/knowledge
 	./services/lead-identity
 	./services/lead-import
+	./services/internal-admin-api
+	./services/model-config
 	./services/scheduler
 	./services/telephony-adapter
 	./services/temporal-workers

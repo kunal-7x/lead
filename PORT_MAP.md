@@ -27,6 +27,8 @@
 | 8114 | site-visit           |
 | 8115 | billing-meter        |
 | 8116 | analytics-sink       |
+| 8117 | model-config         |
+| 8118 | internal-admin-api   |
 
 ### AI plane (Python) 8201–8210
 | Port | Service              |
