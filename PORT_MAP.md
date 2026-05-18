@@ -22,6 +22,8 @@
 | 8108 | billing-service      |
 | 8109 | analytics-ingest     |
 | 8110 | webhook-router       |
+| 8112 | handoff              |
+| 8113 | notification         |
 
 ### AI plane (Python) 8201–8210
 | Port | Service              |

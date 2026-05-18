@@ -6,6 +6,7 @@ use (
 	./services/campaign
 	./services/consent-compliance
 	./services/freeswitch-bridge
+	./services/handoff
 	./services/knowledge
 	./services/lead-identity
 	./services/lead-import
@@ -13,5 +14,6 @@ use (
 	./services/telephony-adapter
 	./services/temporal-workers
 	./services/tenant-auth
+	./services/notification
 	./services/whatsapp-adapter
 )
