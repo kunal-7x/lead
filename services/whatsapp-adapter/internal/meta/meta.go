@@ -286,6 +286,52 @@ func (f *FakeClient) SyncTemplates(context.Context, model.VaultCredential) ([]Re
 	return out, nil
 }
 
+type DemoClient struct {
+	mu              sync.Mutex
+	counter         int
+	IncomingReplies []string
+}
+
+func NewDemoClient() *DemoClient {
+	return &DemoClient{IncomingReplies: []string{"Interested", "Book site visit", "Call tomorrow"}}
+}
+
+func (d *DemoClient) SendTemplate(_ context.Context, _ model.VaultCredential, req SendTemplateRequest) (SendResponse, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.counter++
+	return SendResponse{MessageID: fmt.Sprintf("demo-wa-template-%03d", d.counter), Status: "delivered", Headers: http.Header{}}, nil
+}
+
+func (d *DemoClient) SendText(_ context.Context, _ model.VaultCredential, req SendTextRequest) (SendResponse, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.counter++
+	return SendResponse{MessageID: fmt.Sprintf("demo-wa-text-%03d", d.counter), Status: "delivered", Headers: http.Header{}}, nil
+}
+
+func (d *DemoClient) SendFlow(_ context.Context, _ model.VaultCredential, req SendFlowRequest) (SendResponse, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.counter++
+	return SendResponse{MessageID: fmt.Sprintf("demo-wa-flow-%03d", d.counter), Status: "delivered", Headers: http.Header{}}, nil
+}
+
+func (d *DemoClient) SyncTemplates(context.Context, model.VaultCredential) ([]RemoteTemplate, error) {
+	return []RemoteTemplate{
+		{Name: "demo_brochure", Language: "en_US", Category: model.TemplateCategoryMarketing, Status: "APPROVED", Body: "Demo brochure for {{1}}", RemoteID: "demo-template-001"},
+		{Name: "demo_visit_confirm", Language: "en_US", Category: model.TemplateCategoryUtility, Status: "APPROVED", Body: "Demo site visit confirmed for {{1}}", RemoteID: "demo-template-002"},
+	}, nil
+}
+
+func (d *DemoClient) ScriptedReplies() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]string, len(d.IncomingReplies))
+	copy(out, d.IncomingReplies)
+	return out
+}
+
 func Signature(secret string, body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write(body)

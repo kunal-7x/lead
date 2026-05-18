@@ -4,10 +4,13 @@ package routing
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/lead/services/telephony-adapter/internal/adapter"
+	"github.com/lead/services/telephony-adapter/internal/model"
 	"github.com/lead/services/telephony-adapter/internal/store"
 )
 
@@ -33,6 +36,22 @@ func New(s store.Store, adapters []adapter.Telephony) *Router {
 }
 
 func (r *Router) WithWindow(d time.Duration) *Router { r.window = d; return r }
+
+// SelectForCall enforces demo-mode isolation before falling back to normal
+// health/failure routing. Demo tenants and DEMO_MODE=1 can only use "mock".
+func (r *Router) SelectForCall(ctx context.Context, req model.CallRequest) (adapter.Telephony, error) {
+	if req.Demo || DemoMode(req.TenantID) {
+		mock, ok := r.adapters["mock"]
+		if !ok {
+			return nil, fmt.Errorf("routing: demo tenant requires mock provider")
+		}
+		if !mock.Healthy(ctx) {
+			return nil, fmt.Errorf("routing: demo mock provider unhealthy")
+		}
+		return mock, nil
+	}
+	return r.Select(ctx, req.Region)
+}
 
 // Select returns the best available adapter for the given region.
 // It evaluates routing rules in priority order and skips providers whose
@@ -77,4 +96,15 @@ func (r *Router) Select(ctx context.Context, region string) (adapter.Telephony, 
 	}
 
 	return nil, fmt.Errorf("routing: no healthy provider available for region %q", region)
+}
+
+func DemoMode(tenantID string) bool {
+	if os.Getenv("DEMO_MODE") == "1" {
+		return true
+	}
+	normalized := strings.ToLower(strings.TrimSpace(tenantID))
+	return normalized == "tenant-demo" ||
+		normalized == "demo" ||
+		strings.HasPrefix(normalized, "demo-") ||
+		strings.HasSuffix(normalized, "-demo")
 }

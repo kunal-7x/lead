@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { PauseCircle, PlayCircle, Trash2, UserRoundCheck } from 'lucide-react';
+import { PauseCircle, PlayCircle, RotateCcw, Trash2, UserRoundCheck } from 'lucide-react';
 import { tenants } from '@/lib/admin-data';
 
 export const metadata: Metadata = { title: 'Tenants - Capsy Admin' };
@@ -34,6 +34,13 @@ export default function TenantsPage() {
             <option value="active">Active</option>
             <option value="suspended">Suspended</option>
           </select>
+        </div>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <span>Demo tenant reset is audit-logged and re-seeds deterministic sandbox data.</span>
+          <button className="inline-flex h-9 items-center gap-2 rounded-md bg-amber-900 px-3 text-sm text-white">
+            <RotateCcw className="h-4 w-4" aria-hidden="true" />
+            Reset demo
+          </button>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[820px] text-left text-sm" aria-label="Tenant operations">

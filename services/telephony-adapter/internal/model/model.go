@@ -7,13 +7,14 @@ type ProviderCallID string
 
 // CallRequest describes a call to be placed.
 type CallRequest struct {
-	SessionID    string
-	TenantID     string
-	FromNumber   string
-	ToNumber     string
-	CallbackURL  string
-	Region       string
-	MaxDuration  int // seconds
+	SessionID   string
+	TenantID    string
+	FromNumber  string
+	ToNumber    string
+	CallbackURL string
+	Region      string
+	MaxDuration int // seconds
+	Demo        bool
 }
 
 // RecordingRef points to a stored recording.
@@ -76,11 +77,11 @@ type ProviderCredential struct {
 
 // ProviderHealthCheck records a single ping result.
 type ProviderHealthCheck struct {
-	ID          string
-	ProviderID  string
-	Healthy     bool
-	CheckedAt   time.Time
-	LatencyMs   int
+	ID         string
+	ProviderID string
+	Healthy    bool
+	CheckedAt  time.Time
+	LatencyMs  int
 }
 
 // ProviderFailure records a provider call failure.
@@ -93,21 +94,21 @@ type ProviderFailure struct {
 
 // ProviderRoutingRule controls which provider handles a call.
 type ProviderRoutingRule struct {
-	ID         string
-	ProviderID string
-	Region     string // empty = all regions
-	Priority   int    // lower = preferred
+	ID          string
+	ProviderID  string
+	Region      string  // empty = all regions
+	Priority    int     // lower = preferred
 	MaxFailRate float64 // 0-1; skip provider if rolling failure rate exceeds this
 }
 
 // WebhookEvent is a deduplicated inbound webhook.
 type WebhookEvent struct {
-	ID          string
+	ID           string
 	ProviderName string
-	EventType   string
-	RawPayload  []byte
-	ReceivedAt  time.Time
-	Published   bool
+	EventType    string
+	RawPayload   []byte
+	ReceivedAt   time.Time
+	Published    bool
 }
 
 // IdempotencyKey prevents duplicate processing.

@@ -23,6 +23,8 @@ type Mock struct {
 	events    []MockEvent
 	healthy   bool
 	counter   int
+	states    []string
+	audioLoop [][]byte
 }
 
 func NewMock() *Mock {
@@ -53,6 +55,9 @@ func (m *Mock) PlaceCall(_ context.Context, req model.CallRequest) (model.Provid
 	id := model.ProviderCallID(fmt.Sprintf("mock-call-%d", m.counter))
 	m.calls[id] = req
 	m.events = append(m.events, MockEvent{Action: "place", CallID: id, At: time.Now()})
+	if len(m.states) == 0 {
+		m.states = []string{"queued", "ringing", "answered", "completed"}
+	}
 	return id, nil
 }
 
@@ -105,4 +110,40 @@ func (m *Mock) CallCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.calls)
+}
+
+func (m *Mock) SetScriptedStates(states ...string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.states = append([]string(nil), states...)
+}
+
+func (m *Mock) ScriptedStates() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, len(m.states))
+	copy(out, m.states)
+	return out
+}
+
+func (m *Mock) SetAudioLoop(frames ...[]byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.audioLoop = make([][]byte, len(frames))
+	for i, frame := range frames {
+		m.audioLoop[i] = append([]byte(nil), frame...)
+	}
+}
+
+func (m *Mock) AudioLoop() [][]byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.audioLoop) == 0 {
+		return [][]byte{make([]byte, 320), make([]byte, 320)}
+	}
+	out := make([][]byte, len(m.audioLoop))
+	for i, frame := range m.audioLoop {
+		out[i] = append([]byte(nil), frame...)
+	}
+	return out
 }

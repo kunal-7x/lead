@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/lead/services/whatsapp-adapter/internal/consent"
@@ -24,10 +26,12 @@ var (
 )
 
 type Service struct {
-	store   store.Store
-	consent consent.Checker
-	meta    meta.Client
-	now     func() time.Time
+	store      store.Store
+	consent    consent.Checker
+	meta       meta.Client
+	demoMeta   meta.Client
+	demoTenant func(string) bool
+	now        func() time.Time
 }
 
 func New(st store.Store, checker consent.Checker, client meta.Client) *Service {
@@ -38,16 +42,30 @@ func New(st store.Store, checker consent.Checker, client meta.Client) *Service {
 		client = meta.NewFakeClient()
 	}
 	return &Service{
-		store:   st,
-		consent: checker,
-		meta:    client,
-		now:     func() time.Time { return time.Now().UTC() },
+		store:      st,
+		consent:    checker,
+		meta:       client,
+		demoMeta:   meta.NewDemoClient(),
+		demoTenant: defaultDemoTenant,
+		now:        func() time.Time { return time.Now().UTC() },
 	}
 }
 
 func (s *Service) SetNow(now func() time.Time) {
 	if now != nil {
 		s.now = now
+	}
+}
+
+func (s *Service) SetDemoMode(fn func(string) bool) {
+	if fn != nil {
+		s.demoTenant = fn
+	}
+}
+
+func (s *Service) SetDemoClient(client meta.Client) {
+	if client != nil {
+		s.demoMeta = client
 	}
 }
 
@@ -84,7 +102,7 @@ func (s *Service) SyncTemplates(ctx context.Context, tenantID string) ([]model.T
 	if err != nil {
 		return nil, err
 	}
-	remote, err := s.meta.SyncTemplates(ctx, cred)
+	remote, err := s.clientForTenant(tenantID).SyncTemplates(ctx, cred)
 	if err != nil {
 		s.enqueueRateLimitRetry(ctx, tenantID, "sync_templates", nil, err)
 		return nil, err
@@ -143,7 +161,7 @@ func (s *Service) SendTemplate(ctx context.Context, req model.SendTemplateReques
 	if err != nil {
 		return model.Message{}, err
 	}
-	resp, err := s.meta.SendTemplate(ctx, cred, meta.SendTemplateRequest{
+	resp, err := s.clientForTenant(req.TenantID).SendTemplate(ctx, cred, meta.SendTemplateRequest{
 		To:           req.Phone,
 		TemplateName: tmpl.MetaName,
 		Language:     req.Language,
@@ -212,7 +230,7 @@ func (s *Service) SendMessage(ctx context.Context, req model.SendMessageRequest)
 	if err != nil {
 		return model.Message{}, err
 	}
-	resp, err := s.meta.SendText(ctx, cred, meta.SendTextRequest{To: thread.Phone, Body: req.Body})
+	resp, err := s.clientForTenant(req.TenantID).SendText(ctx, cred, meta.SendTextRequest{To: thread.Phone, Body: req.Body})
 	if err != nil {
 		s.enqueueRateLimitRetry(ctx, req.TenantID, "send_message", map[string]any{"thread_id": req.ThreadID}, err)
 		return model.Message{}, err
@@ -240,7 +258,7 @@ func (s *Service) SendFlow(ctx context.Context, req model.SendFlowRequest) (mode
 	if err != nil {
 		return model.Message{}, err
 	}
-	resp, err := s.meta.SendFlow(ctx, cred, meta.SendFlowRequest{To: req.Phone, FlowID: req.FlowID, Payload: req.Payload})
+	resp, err := s.clientForTenant(req.TenantID).SendFlow(ctx, cred, meta.SendFlowRequest{To: req.Phone, FlowID: req.FlowID, Payload: req.Payload})
 	if err != nil {
 		s.enqueueRateLimitRetry(ctx, req.TenantID, "send_flow", map[string]any{"lead_id": req.LeadID, "flow_id": req.FlowID}, err)
 		return model.Message{}, err
@@ -332,6 +350,24 @@ func (s *Service) ensureCanContact(ctx context.Context, tenantID, leadID, phone 
 		return fmt.Errorf("%w: %s", ErrConsentBlocked, result.Reason)
 	}
 	return nil
+}
+
+func (s *Service) clientForTenant(tenantID string) meta.Client {
+	if s.demoTenant != nil && s.demoTenant(tenantID) {
+		return s.demoMeta
+	}
+	return s.meta
+}
+
+func defaultDemoTenant(tenantID string) bool {
+	if os.Getenv("DEMO_MODE") == "1" {
+		return true
+	}
+	normalized := strings.ToLower(strings.TrimSpace(tenantID))
+	return normalized == "tenant-demo" ||
+		normalized == "demo" ||
+		strings.HasPrefix(normalized, "demo-") ||
+		strings.HasSuffix(normalized, "-demo")
 }
 
 func (s *Service) threadForOutbound(ctx context.Context, tenantID, leadID, phone string) (model.Thread, error) {

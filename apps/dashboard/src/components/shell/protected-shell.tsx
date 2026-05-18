@@ -24,6 +24,7 @@ const NAV = [
 // Roles come from the JWT stored in a cookie; for SSR we use a client-side
 // store populated after hydration. For this shell stub we default to client_owner.
 const USER_ROLES: Role[] = ['client_owner'];
+const DEMO_TENANT = true;
 
 export function ProtectedShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -43,6 +44,14 @@ export function ProtectedShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen">
+      {DEMO_TENANT ? (
+        <div
+          className="pointer-events-none fixed right-4 top-4 z-50 rounded-md border border-amber-300 bg-amber-50 px-3 py-1 text-xs font-semibold tracking-normal text-amber-800 shadow-sm"
+          aria-label="Demo tenant watermark"
+        >
+          DEMO TENANT
+        </div>
+      ) : null}
       {/* Sidebar */}
       <aside className="flex w-56 flex-col border-r bg-card px-3 py-4">
         <div className="mb-6 px-2 text-lg font-bold">EVS</div>

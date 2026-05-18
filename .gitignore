@@ -51,3 +51,7 @@ override.tf.json
 # Coverage
 coverage/
 *.lcov
+.coverage
+
+# Demo seed output
+.demo/
