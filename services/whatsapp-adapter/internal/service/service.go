@@ -97,6 +97,153 @@ func (s *Service) SeedPrebuiltTemplates(ctx context.Context, tenantID string) er
 	return nil
 }
 
+func (s *Service) SeedDemoInbox(ctx context.Context, tenantID string) error {
+	now := s.now()
+	if _, err := s.store.GetCredential(ctx, tenantID); err != nil {
+		if _, err := s.store.UpsertCredential(ctx, model.VaultCredential{TenantID: tenantID}); err != nil {
+			return err
+		}
+	}
+	type seed struct {
+		thread model.Thread
+		msgs   []model.Message
+	}
+	seeds := []seed{
+		{
+			thread: model.Thread{
+				ID:                 "wa-thread-demo-optout",
+				TenantID:           tenantID,
+				LeadID:             "lead-demo-001",
+				Phone:              "+919876543210",
+				LastInboundAt:      now.Add(-12 * time.Minute),
+				ServiceWindowUntil: now.Add(23 * time.Hour),
+				CreatedAt:          now.Add(-18 * time.Minute),
+				UpdatedAt:          now.Add(-12 * time.Minute),
+			},
+			msgs: []model.Message{
+				{
+					ID:        "wa-msg-demo-optout-1",
+					TenantID:  tenantID,
+					ThreadID:  "wa-thread-demo-optout",
+					LeadID:    "lead-demo-001",
+					Phone:     "+919876543210",
+					Direction: model.DirectionOutbound,
+					Kind:      model.MessageKindTemplate,
+					Body:      "Hi Asha, thanks for your interest in Skyline Residency.",
+					Status:    model.MessageStatusDelivered,
+					CreatedAt: now.Add(-18 * time.Minute),
+				},
+				{
+					ID:        "wa-msg-demo-optout-2",
+					TenantID:  tenantID,
+					ThreadID:  "wa-thread-demo-optout",
+					LeadID:    "lead-demo-001",
+					Phone:     "+919876543210",
+					Direction: model.DirectionInbound,
+					Kind:      model.MessageKindText,
+					Body:      "STOP",
+					Status:    model.MessageStatusReceived,
+					CreatedAt: now.Add(-12 * time.Minute),
+				},
+			},
+		},
+		{
+			thread: model.Thread{
+				ID:                 "wa-thread-demo-visit",
+				TenantID:           tenantID,
+				LeadID:             "lead-demo-002",
+				Phone:              "+919988776655",
+				LastInboundAt:      now.Add(-4 * time.Minute),
+				ServiceWindowUntil: now.Add(24 * time.Hour),
+				CreatedAt:          now.Add(-9 * time.Minute),
+				UpdatedAt:          now.Add(-4 * time.Minute),
+			},
+			msgs: []model.Message{
+				{
+					ID:        "wa-msg-demo-visit-1",
+					TenantID:  tenantID,
+					ThreadID:  "wa-thread-demo-visit",
+					LeadID:    "lead-demo-002",
+					Phone:     "+919988776655",
+					Direction: model.DirectionInbound,
+					Kind:      model.MessageKindText,
+					Body:      "Can I visit on Saturday?",
+					Status:    model.MessageStatusReceived,
+					CreatedAt: now.Add(-4 * time.Minute),
+				},
+				{
+					ID:        "wa-msg-demo-visit-2",
+					TenantID:  tenantID,
+					ThreadID:  "wa-thread-demo-visit",
+					LeadID:    "lead-demo-002",
+					Phone:     "+919988776655",
+					Direction: model.DirectionOutbound,
+					Kind:      model.MessageKindText,
+					Body:      "Yes. I can hold a 4 PM slot for you.",
+					Status:    model.MessageStatusSent,
+					CreatedAt: now.Add(-3 * time.Minute),
+				},
+			},
+		},
+		{
+			thread: model.Thread{
+				ID:        "wa-thread-demo-template",
+				TenantID:  tenantID,
+				LeadID:    "lead-demo-003",
+				Phone:     "+919123456780",
+				CreatedAt: now.Add(-30 * time.Minute),
+				UpdatedAt: now.Add(-30 * time.Minute),
+			},
+			msgs: []model.Message{
+				{
+					ID:        "wa-msg-demo-template-1",
+					TenantID:  tenantID,
+					ThreadID:  "wa-thread-demo-template",
+					LeadID:    "lead-demo-003",
+					Phone:     "+919123456780",
+					Direction: model.DirectionOutbound,
+					Kind:      model.MessageKindTemplate,
+					Body:      "Reminder: your site visit is scheduled tomorrow at 10 AM.",
+					Status:    model.MessageStatusDelivered,
+					CreatedAt: now.Add(-30 * time.Minute),
+				},
+			},
+		},
+	}
+	for _, item := range seeds {
+		if _, err := s.store.SaveThread(ctx, item.thread); err != nil {
+			return err
+		}
+		for _, msg := range item.msgs {
+			if _, err := s.store.SaveMessage(ctx, msg); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := s.store.AddOptOut(ctx, model.WhatsAppOptOut{
+		TenantID:  tenantID,
+		LeadID:    "lead-demo-001",
+		Phone:     "+919876543210",
+		Channel:   "whatsapp",
+		Reason:    "STOP",
+		CreatedAt: now.Add(-12 * time.Minute),
+	}); err != nil {
+		return err
+	}
+	if _, err := s.store.AddConsentLedger(ctx, model.ConsentLedgerEntry{
+		TenantID:  tenantID,
+		LeadID:    "lead-demo-001",
+		Channel:   "whatsapp",
+		Basis:     "withdrawal",
+		Source:    "demo_inbox_seed",
+		Reason:    "STOP",
+		CreatedAt: now.Add(-12 * time.Minute),
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Service) SyncTemplates(ctx context.Context, tenantID string) ([]model.Template, error) {
 	cred, err := s.store.GetCredential(ctx, tenantID)
 	if err != nil {

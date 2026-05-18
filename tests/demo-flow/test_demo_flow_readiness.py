@@ -123,9 +123,13 @@ def build_gap_report() -> dict:
         GapCheck(
             key="whatsapp.dashboard_inbox_api",
             title="WhatsApp inbox is API-backed",
-            status="missing" if "const threads = [" in messages_page else "partial",
-            evidence="messages page currently contains static thread/message arrays.",
-            next_step="Back WhatsApp inbox with adapter/demo APIs and lead timeline updates.",
+            status=_status(
+                "const threads = [" not in messages_page
+                and "/v1/whatsapp/threads" in messages_page
+                and "/v1/whatsapp/messages" in messages_page
+            ),
+            evidence="messages page uses WhatsApp thread/message APIs instead of local static arrays.",
+            next_step="Extend WhatsApp replies into RAG/brain responses and lead timeline updates.",
         ),
         GapCheck(
             key="demo.full_e2e_command",
@@ -168,4 +172,4 @@ def test_demo_flow_gap_report_is_structured() -> None:
     assert report["side_effects"] == "none"
     assert report["checks"]
     assert all(check["status"] in {"pass", "partial", "missing"} for check in report["checks"])
-    assert report["statuses"]["missing"] >= 1
+    assert report["statuses"]["missing"] == 0

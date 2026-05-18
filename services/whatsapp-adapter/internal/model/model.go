@@ -37,31 +37,31 @@ const (
 )
 
 type Template struct {
-	ID         string
-	TenantID   string
-	Name       string
-	Language   string
-	Category   TemplateCategory
-	Body       string
-	Status     string
-	MetaName   string
-	Variables  []string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
-	SyncedAt   *time.Time
-	RemoteID   string
-	RemoteNote string
+	ID         string           `json:"id"`
+	TenantID   string           `json:"tenant_id"`
+	Name       string           `json:"name"`
+	Language   string           `json:"language"`
+	Category   TemplateCategory `json:"category"`
+	Body       string           `json:"body"`
+	Status     string           `json:"status"`
+	MetaName   string           `json:"meta_name"`
+	Variables  []string         `json:"variables"`
+	CreatedAt  time.Time        `json:"created_at"`
+	UpdatedAt  time.Time        `json:"updated_at"`
+	SyncedAt   *time.Time       `json:"synced_at"`
+	RemoteID   string           `json:"remote_id"`
+	RemoteNote string           `json:"remote_note"`
 }
 
 type Thread struct {
-	ID                 string
-	TenantID           string
-	LeadID             string
-	Phone              string
-	LastInboundAt      time.Time
-	ServiceWindowUntil time.Time
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	ID                 string    `json:"id"`
+	TenantID           string    `json:"tenant_id"`
+	LeadID             string    `json:"lead_id"`
+	Phone              string    `json:"phone"`
+	LastInboundAt      time.Time `json:"last_inbound_at"`
+	ServiceWindowUntil time.Time `json:"service_window_until"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 type Attachment struct {
@@ -71,20 +71,20 @@ type Attachment struct {
 }
 
 type Message struct {
-	ID            string
-	TenantID      string
-	ThreadID      string
-	LeadID        string
-	Phone         string
-	Direction     Direction
-	Kind          MessageKind
-	Body          string
-	TemplateID    string
-	FlowID        string
-	Attachments   []Attachment
-	Status        MessageStatus
-	MetaMessageID string
-	CreatedAt     time.Time
+	ID            string        `json:"id"`
+	TenantID      string        `json:"tenant_id"`
+	ThreadID      string        `json:"thread_id"`
+	LeadID        string        `json:"lead_id"`
+	Phone         string        `json:"phone"`
+	Direction     Direction     `json:"direction"`
+	Kind          MessageKind   `json:"kind"`
+	Body          string        `json:"body"`
+	TemplateID    string        `json:"template_id"`
+	FlowID        string        `json:"flow_id"`
+	Attachments   []Attachment  `json:"attachments"`
+	Status        MessageStatus `json:"status"`
+	MetaMessageID string        `json:"meta_message_id"`
+	CreatedAt     time.Time     `json:"created_at"`
 }
 
 type WebhookEvent struct {
@@ -139,46 +139,46 @@ type ConsentLedgerEntry struct {
 }
 
 type VaultCredential struct {
-	TenantID          string
-	PhoneNumberID     string
-	BusinessAccountID string
-	AccessToken       string
-	VerifyToken       string
-	AppSecret         string
-	UpdatedAt         time.Time
+	TenantID          string    `json:"tenant_id"`
+	PhoneNumberID     string    `json:"phone_number_id"`
+	BusinessAccountID string    `json:"business_account_id"`
+	AccessToken       string    `json:"access_token"`
+	VerifyToken       string    `json:"verify_token"`
+	AppSecret         string    `json:"app_secret"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type RetryTask struct {
-	ID        string
-	TenantID  string
-	Operation string
-	Payload   map[string]any
-	RunAfter  time.Time
-	Attempts  int
-	LastError string
-	CreatedAt time.Time
+	ID        string         `json:"id"`
+	TenantID  string         `json:"tenant_id"`
+	Operation string         `json:"operation"`
+	Payload   map[string]any `json:"payload"`
+	RunAfter  time.Time      `json:"run_after"`
+	Attempts  int            `json:"attempts"`
+	LastError string         `json:"last_error"`
+	CreatedAt time.Time      `json:"created_at"`
 }
 
 type SendTemplateRequest struct {
-	TenantID   string
-	LeadID     string
-	Phone      string
-	TemplateID string
-	Language   string
-	Variables  map[string]string
+	TenantID   string            `json:"tenant_id"`
+	LeadID     string            `json:"lead_id"`
+	Phone      string            `json:"phone"`
+	TemplateID string            `json:"template_id"`
+	Language   string            `json:"language"`
+	Variables  map[string]string `json:"variables"`
 }
 
 type SendMessageRequest struct {
-	TenantID    string
-	ThreadID    string
-	Body        string
-	Attachments []Attachment
+	TenantID    string       `json:"tenant_id"`
+	ThreadID    string       `json:"thread_id"`
+	Body        string       `json:"body"`
+	Attachments []Attachment `json:"attachments"`
 }
 
 type SendFlowRequest struct {
-	TenantID string
-	LeadID   string
-	Phone    string
-	FlowID   string
-	Payload  map[string]any
+	TenantID string         `json:"tenant_id"`
+	LeadID   string         `json:"lead_id"`
+	Phone    string         `json:"phone"`
+	FlowID   string         `json:"flow_id"`
+	Payload  map[string]any `json:"payload"`
 }

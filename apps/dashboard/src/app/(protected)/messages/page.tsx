@@ -1,79 +1,140 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { MessageCircle, Paperclip, Search, Send } from 'lucide-react';
+import { toast } from 'sonner';
+import { api } from '@/lib/api';
 
-const threads = [
-  {
-    id: 'th-1',
-    lead: 'Asha Mehta',
-    phone: '+91 98765 43210',
-    project: 'Skyline Residency',
-    last: 'STOP',
-    unread: 1,
-    status: 'Opted out',
-  },
-  {
-    id: 'th-2',
-    lead: 'Rohan Shah',
-    phone: '+91 99887 76655',
-    project: 'Lakeview Towers',
-    last: 'Can I visit on Saturday?',
-    unread: 2,
-    status: 'Open',
-  },
-  {
-    id: 'th-3',
-    lead: 'Neha Iyer',
-    phone: '+91 91234 56780',
-    project: 'Green Acres',
-    last: 'Site visit reminder sent',
-    unread: 0,
-    status: 'Template sent',
-  },
-];
+const DEMO_TENANT_ID = 'tenant-demo';
 
-const messagesByThread: Record<
-  string,
-  { id: string; from: 'lead' | 'agent'; body: string; time: string }[]
-> = {
-  'th-1': [
-    {
-      id: 'm1',
-      from: 'agent',
-      body: 'Hi Asha, thanks for your interest in Skyline Residency.',
-      time: '09:42',
-    },
-    { id: 'm2', from: 'lead', body: 'STOP', time: '09:48' },
-  ],
-  'th-2': [
-    { id: 'm3', from: 'lead', body: 'Can I visit on Saturday?', time: '11:12' },
-    { id: 'm4', from: 'agent', body: 'Yes. I can hold a 4 PM slot for you.', time: '11:14' },
-  ],
-  'th-3': [
-    {
-      id: 'm5',
-      from: 'agent',
-      body: 'Reminder: your site visit is scheduled tomorrow at 10 AM.',
-      time: 'Yesterday',
-    },
-  ],
+type Direction = 'inbound' | 'outbound';
+
+interface RawThread {
+  id?: string;
+  ID?: string;
+  lead_id?: string;
+  LeadID?: string;
+  phone?: string;
+  Phone?: string;
+  updated_at?: string;
+  UpdatedAt?: string;
+  service_window_until?: string;
+  ServiceWindowUntil?: string;
+}
+
+interface RawMessage {
+  id?: string;
+  ID?: string;
+  thread_id?: string;
+  ThreadID?: string;
+  direction?: Direction;
+  Direction?: Direction;
+  body?: string;
+  Body?: string;
+  status?: string;
+  Status?: string;
+  created_at?: string;
+  CreatedAt?: string;
+}
+
+interface InboxThread {
+  id: string;
+  leadID: string;
+  lead: string;
+  phone: string;
+  project: string;
+  status: string;
+  updatedAt: string;
+}
+
+interface InboxMessage {
+  id: string;
+  from: 'lead' | 'agent';
+  body: string;
+  status: string;
+  createdAt: string;
+}
+
+const LEAD_LABELS: Record<string, { name: string; project: string }> = {
+  'lead-demo-001': { name: 'Asha Mehta', project: 'Skyline Residency' },
+  'lead-demo-002': { name: 'Rohan Shah', project: 'Lakeview Towers' },
+  'lead-demo-003': { name: 'Neha Iyer', project: 'Green Acres' },
 };
 
+async function fetchThreads() {
+  const { data } = await api.get(`/v1/whatsapp/threads?tenant_id=${DEMO_TENANT_ID}`);
+  return ((data.threads ?? []) as RawThread[]).map(normalizeThread);
+}
+
+async function fetchMessages(threadID: string) {
+  const { data } = await api.get(`/v1/whatsapp/threads/${threadID}/messages`);
+  return ((data.messages ?? []) as RawMessage[]).map(normalizeMessage);
+}
+
+function normalizeThread(raw: RawThread): InboxThread {
+  const id = raw.id ?? raw.ID ?? '';
+  const leadID = raw.lead_id ?? raw.LeadID ?? '';
+  const phone = raw.phone ?? raw.Phone ?? '';
+  const labels = LEAD_LABELS[leadID] ?? { name: leadID || phone, project: 'Demo project' };
+  const serviceWindow = raw.service_window_until ?? raw.ServiceWindowUntil ?? '';
+  return {
+    id,
+    leadID,
+    lead: labels.name,
+    phone,
+    project: labels.project,
+    status: serviceWindow ? 'Open' : 'Template sent',
+    updatedAt: raw.updated_at ?? raw.UpdatedAt ?? '',
+  };
+}
+
+function normalizeMessage(raw: RawMessage): InboxMessage {
+  const direction = raw.direction ?? raw.Direction ?? 'outbound';
+  return {
+    id: raw.id ?? raw.ID ?? '',
+    from: direction === 'inbound' ? 'lead' : 'agent',
+    body: raw.body ?? raw.Body ?? '',
+    status: raw.status ?? raw.Status ?? '',
+    createdAt: raw.created_at ?? raw.CreatedAt ?? '',
+  };
+}
+
 export default function MessagesPage() {
-  const [selectedThreadID, setSelectedThreadID] = useState('th-2');
+  const queryClient = useQueryClient();
+  const [selectedThreadID, setSelectedThreadID] = useState('');
   const [query, setQuery] = useState('');
+  const [reply, setReply] = useState('');
+
+  const { data: threads = [], isLoading } = useQuery({
+    queryKey: ['whatsapp-threads'],
+    queryFn: fetchThreads,
+  });
+
+  useEffect(() => {
+    if (!selectedThreadID && threads[0]) {
+      setSelectedThreadID(threads[0].id);
+    }
+  }, [selectedThreadID, threads]);
+
   const selectedThread = threads.find((thread) => thread.id === selectedThreadID) ??
     threads[0] ?? {
       id: '',
+      leadID: '',
       lead: '',
       phone: '',
       project: '',
-      last: '',
-      unread: 0,
       status: '',
+      updatedAt: '',
     };
+
+  const { data: messages = [] } = useQuery({
+    queryKey: ['whatsapp-messages', selectedThread.id],
+    queryFn: () => fetchMessages(selectedThread.id),
+    enabled: Boolean(selectedThread.id),
+  });
+
   const filteredThreads = useMemo(
     () =>
       threads.filter((thread) =>
@@ -81,9 +142,31 @@ export default function MessagesPage() {
           .toLowerCase()
           .includes(query.toLowerCase()),
       ),
-    [query],
+    [query, threads],
   );
-  const messages = messagesByThread[selectedThread.id] ?? [];
+
+  const latestMessageByThread = useMemo(() => {
+    if (!selectedThread.id || messages.length === 0) return new Map<string, string>();
+    return new Map([[selectedThread.id, messages[messages.length - 1]?.body ?? '']]);
+  }, [messages, selectedThread.id]);
+
+  const sendMutation = useMutation({
+    mutationFn: async () => {
+      const body = reply.trim();
+      if (!body || !selectedThread.id) return;
+      await api.post('/v1/whatsapp/messages', {
+        tenant_id: DEMO_TENANT_ID,
+        thread_id: selectedThread.id,
+        body,
+      });
+    },
+    onSuccess: () => {
+      setReply('');
+      queryClient.invalidateQueries({ queryKey: ['whatsapp-messages', selectedThread.id] });
+      toast.success('Message queued');
+    },
+    onError: () => toast.error('Message failed'),
+  });
 
   return (
     <div className="space-y-5">
@@ -117,27 +200,31 @@ export default function MessagesPage() {
             </label>
           </div>
           <div className="divide-y">
-            {filteredThreads.map((thread) => (
-              <button
-                key={thread.id}
-                type="button"
-                onClick={() => setSelectedThreadID(thread.id)}
-                className={`grid w-full gap-1 px-4 py-3 text-left hover:bg-muted/40 ${
-                  selectedThreadID === thread.id ? 'bg-muted/60' : ''
-                }`}
-              >
-                <span className="flex items-center justify-between gap-3">
-                  <span className="truncate text-sm font-medium">{thread.lead}</span>
-                  {thread.unread > 0 ? (
-                    <span className="rounded-full bg-primary px-2 py-0.5 text-xs text-primary-foreground">
-                      {thread.unread}
-                    </span>
-                  ) : null}
-                </span>
-                <span className="truncate text-xs text-muted-foreground">{thread.project}</span>
-                <span className="truncate text-xs">{thread.last}</span>
-              </button>
-            ))}
+            {isLoading ? (
+              <div className="p-4 text-sm text-muted-foreground">Loading conversations...</div>
+            ) : filteredThreads.length === 0 ? (
+              <div className="p-4 text-sm text-muted-foreground">No conversations found.</div>
+            ) : (
+              filteredThreads.map((thread) => (
+                <button
+                  key={thread.id}
+                  type="button"
+                  onClick={() => setSelectedThreadID(thread.id)}
+                  className={`grid w-full gap-1 px-4 py-3 text-left hover:bg-muted/40 ${
+                    selectedThreadID === thread.id ? 'bg-muted/60' : ''
+                  }`}
+                >
+                  <span className="flex items-center justify-between gap-3">
+                    <span className="truncate text-sm font-medium">{thread.lead}</span>
+                    <span className="rounded-full border px-2 py-0.5 text-xs">{thread.status}</span>
+                  </span>
+                  <span className="truncate text-xs text-muted-foreground">{thread.project}</span>
+                  <span className="truncate text-xs">
+                    {latestMessageByThread.get(thread.id) || thread.phone}
+                  </span>
+                </button>
+              ))
+            )}
           </div>
         </section>
 
@@ -156,27 +243,35 @@ export default function MessagesPage() {
             </div>
 
             <div className="flex-1 space-y-3 overflow-y-auto bg-muted/20 p-5">
-              {messages.map((message) => (
-                <div
-                  key={message.id}
-                  className={`flex ${message.from === 'agent' ? 'justify-end' : 'justify-start'}`}
-                >
+              {messages.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No messages yet.</p>
+              ) : (
+                messages.map((message) => (
                   <div
-                    className={`max-w-[78%] rounded-lg px-4 py-2 text-sm shadow-sm ${
-                      message.from === 'agent'
-                        ? 'bg-primary text-primary-foreground'
-                        : 'border bg-background'
-                    }`}
+                    key={message.id}
+                    className={`flex ${message.from === 'agent' ? 'justify-end' : 'justify-start'}`}
                   >
-                    <p>{message.body}</p>
-                    <p
-                      className={`mt-1 text-[11px] ${message.from === 'agent' ? 'text-primary-foreground/70' : 'text-muted-foreground'}`}
+                    <div
+                      className={`max-w-[78%] rounded-lg px-4 py-2 text-sm shadow-sm ${
+                        message.from === 'agent'
+                          ? 'bg-primary text-primary-foreground'
+                          : 'border bg-background'
+                      }`}
                     >
-                      {message.time}
-                    </p>
+                      <p>{message.body}</p>
+                      <p
+                        className={`mt-1 text-[11px] ${
+                          message.from === 'agent'
+                            ? 'text-primary-foreground/70'
+                            : 'text-muted-foreground'
+                        }`}
+                      >
+                        {formatTime(message.createdAt)} - {message.status}
+                      </p>
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
 
             <div className="border-t p-4">
@@ -189,10 +284,16 @@ export default function MessagesPage() {
                 </button>
                 <input
                   aria-label="Quick reply"
+                  value={reply}
+                  onChange={(event) => setReply(event.target.value)}
                   placeholder="Reply inside the 24h window"
                   className="h-10 min-w-0 flex-1 rounded-md border px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
                 />
-                <button className="inline-flex h-10 items-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90">
+                <button
+                  onClick={() => sendMutation.mutate()}
+                  disabled={!reply.trim() || sendMutation.isPending}
+                  className="inline-flex h-10 items-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                >
                   <Send className="h-4 w-4" />
                   Send
                 </button>
@@ -203,4 +304,11 @@ export default function MessagesPage() {
       </div>
     </div>
   );
+}
+
+function formatTime(value: string) {
+  if (!value) return 'now';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }

@@ -18,6 +18,7 @@ type Config struct {
 	TenantAuthURL  string
 	LeadImportURL  string
 	CampaignURL    string
+	WhatsAppURL    string
 	RedisAddr      string
 	JWTSecret      string
 	AllowedOrigins []string
@@ -35,6 +36,7 @@ func New(cfg Config, logger *slog.Logger) (http.Handler, error) {
 	productProxy, err := handler.NewProductProxy(map[string]string{
 		"lead_import": cfg.LeadImportURL,
 		"campaign":    cfg.CampaignURL,
+		"whatsapp":    cfg.WhatsAppURL,
 	})
 	if err != nil {
 		return nil, err
@@ -113,6 +115,11 @@ func New(cfg Config, logger *slog.Logger) (http.Handler, error) {
 		r.Post("/v1/campaigns/{id}/pause", productProxy.ProxyTo("campaign"))
 		r.Post("/v1/campaigns/{id}/resume", productProxy.ProxyTo("campaign"))
 		r.Get("/v1/campaigns/{id}/health", productProxy.ProxyTo("campaign"))
+
+		// WhatsApp inbox APIs
+		r.Get("/v1/whatsapp/threads", productProxy.ProxyTo("whatsapp"))
+		r.Get("/v1/whatsapp/threads/{thread_id}/messages", productProxy.ProxyTo("whatsapp"))
+		r.Post("/v1/whatsapp/messages", productProxy.ProxyTo("whatsapp"))
 	})
 
 	return r, nil

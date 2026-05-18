@@ -36,6 +36,7 @@ func main() {
 		AppSecret:         os.Getenv("META_WA_APP_SECRET"),
 	})
 	_ = svc.SeedPrebuiltTemplates(context.Background(), "default")
+	_ = svc.SeedDemoInbox(context.Background(), "tenant-demo")
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RequestID)
@@ -45,7 +46,7 @@ func main() {
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	handler.New(svc).Mount(r)
 
-	addr := envOr("WHATSAPP_ADAPTER_ADDR", ":8106")
+	addr := envOr("WHATSAPP_ADAPTER_ADDR", ":8119")
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      r,

@@ -39,7 +39,7 @@ The dashboard calls:
 
 Status: partially closed in Phase 27.
 
-Phase 27 added BFF proxy routes for lead-import and campaign APIs, plus safe empty lead timeline placeholders. Remaining BFF proxy gaps still exist for scheduler, telephony, WhatsApp, reports, billing, site-visit, handoff, and AI-quality APIs.
+Phase 27 added BFF proxy routes for lead-import and campaign APIs, plus safe empty lead timeline placeholders. Phase 31 added WhatsApp inbox proxy routes. Remaining BFF proxy gaps still exist for scheduler, telephony, reports, billing, site-visit, handoff, and AI-quality APIs.
 
 ### 2. Missing client campaign UI
 
@@ -77,11 +77,11 @@ The current loop buffers audio until silence, then calls STT, LLM, guardrail, an
 
 Impact: demo can prove behavior, but production latency work remains.
 
-### 8. WhatsApp inbox is static UI data
+### 8. WhatsApp inbox is API-backed in demo mode
 
-The dashboard WhatsApp page uses local hardcoded thread/message arrays. The WhatsApp adapter has real/fake clients and webhook handling, but dashboard inbox data is not wired to adapter state.
+Status: closed for demo inbox in Phase 31.
 
-Impact: post-call WhatsApp follow-up cannot be verified from the client UI.
+Phase 31 replaced local hardcoded dashboard thread/message arrays with BFF-backed WhatsApp APIs. The WhatsApp adapter now seeds deterministic demo inbox threads for opt-out, site-visit interest, and template follow-up, and demo replies use the demo Meta client for `tenant-demo`.
 
 ### 9. WhatsApp conversational RAG is not wired
 

@@ -20,6 +20,7 @@ func main() {
 		TenantAuthURL: envOr("TENANT_AUTH_URL", "http://localhost:8101"),
 		LeadImportURL: envOr("LEAD_IMPORT_URL", "http://localhost:8106"),
 		CampaignURL:   envOr("CAMPAIGN_URL", "http://localhost:8112"),
+		WhatsAppURL:   envOr("WHATSAPP_URL", "http://localhost:8119"),
 		RedisAddr:     envOr("REDIS_ADDR", "localhost:6379"),
 		JWTSecret:     envOr("JWT_SECRET", "dev-secret"),
 		AllowedOrigins: []string{
