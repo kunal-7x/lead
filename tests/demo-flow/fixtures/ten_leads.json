@@ -1,0 +1,62 @@
+[
+  {
+    "name": "Asha Mehta",
+    "phone": "+919876543210",
+    "project": "Skyline Residency",
+    "expected_outcome": "opt_out"
+  },
+  {
+    "name": "Rohan Shah",
+    "phone": "+919988776655",
+    "project": "Skyline Residency",
+    "expected_outcome": "site_visit"
+  },
+  {
+    "name": "Neha Iyer",
+    "phone": "+919123456780",
+    "project": "Lakeview Towers",
+    "expected_outcome": "hot_handoff"
+  },
+  {
+    "name": "Karan Malhotra",
+    "phone": "+919112223334",
+    "project": "Skyline Residency",
+    "expected_outcome": "callback"
+  },
+  {
+    "name": "Priya Nair",
+    "phone": "+919223334445",
+    "project": "Lakeview Towers",
+    "expected_outcome": "warm_followup"
+  },
+  {
+    "name": "Imran Khan",
+    "phone": "+919334445556",
+    "project": "Skyline Residency",
+    "expected_outcome": "no_answer_retry"
+  },
+  {
+    "name": "Vivek Rao",
+    "phone": "+919445556667",
+    "project": "Green Acres",
+    "expected_outcome": "not_interested"
+  },
+  {
+    "name": "Meera Joshi",
+    "phone": "+919556667778",
+    "project": "Green Acres",
+    "expected_outcome": "qualified"
+  },
+  {
+    "name": "Sanjay Patel",
+    "phone": "+919667778889",
+    "project": "Lakeview Towers",
+    "expected_outcome": "wrong_number"
+  },
+  {
+    "name": "Divya Singh",
+    "phone": "+919778889990",
+    "project": "Skyline Residency",
+    "expected_outcome": "brochure_sent"
+  }
+]
