@@ -55,19 +55,15 @@ Impact: lead-import, campaign, scheduler, telephony, voice, WhatsApp, billing, r
 
 ### 4. Scheduler is not wired to imported leads and telephony
 
-Scheduler has picker logic, but there is no complete demo path:
+Status: closed for demo command dispatch in Phase 29.
 
-`campaign launched -> scheduler picks imported lead -> telephony call requested -> call events published`
-
-Impact: uploaded leads do not automatically become calls.
+Phase 29 added `/v1/scheduler/demo-dispatch`, which seeds deterministic demo leads, picks them, and posts call commands to telephony. Remaining work is to invoke this from campaign launch automatically and then persist downstream voice/WhatsApp events.
 
 ### 5. Telephony lacks product-level call orchestration API
 
-Telephony has adapters and routing, but the runtime server mainly exposes health/provider selection and Plivo webhook handling. It does not expose the product call command that the scheduler needs for demo and production:
+Status: closed for demo call command in Phase 29.
 
-`POST /v1/calls` with tenant, campaign, lead, contact, phone, project, KB/prompt versions, demo flag, and limits.
-
-Impact: scheduler cannot reliably start call sessions.
+Phase 29 added `POST /v1/calls`, which accepts tenant/campaign/lead/contact/project/phone/demo metadata, routes demo tenants to the mock provider, places the call, and stores the call session.
 
 ### 6. Voice worker uses fake publisher and fake turn store at runtime
 

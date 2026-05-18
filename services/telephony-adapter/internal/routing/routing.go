@@ -37,6 +37,43 @@ func New(s store.Store, adapters []adapter.Telephony) *Router {
 
 func (r *Router) WithWindow(d time.Duration) *Router { r.window = d; return r }
 
+// PlaceCall selects the provider, places the outbound call, and records the
+// call session in the store. Demo tenants are isolated to the mock provider.
+func (r *Router) PlaceCall(ctx context.Context, req model.CallRequest) (*model.CallSession, error) {
+	if req.SessionID == "" {
+		req.SessionID = fmt.Sprintf("call-%d", time.Now().UnixNano())
+	}
+	if req.MaxDuration <= 0 {
+		req.MaxDuration = 300
+	}
+
+	selected, err := r.SelectForCall(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	providerCallID, err := selected.PlaceCall(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	session := &model.CallSession{
+		ID:             req.SessionID,
+		TenantID:       req.TenantID,
+		ProviderCallID: string(providerCallID),
+		ProviderName:   selected.Name(),
+		FromNumber:     req.FromNumber,
+		ToNumber:       req.ToNumber,
+		Status:         "queued",
+		StartedAt:      now,
+		CreatedAt:      now,
+	}
+	if err := r.store.StoreCallSession(ctx, session); err != nil {
+		return nil, fmt.Errorf("routing: store call session: %w", err)
+	}
+	return session, nil
+}
+
 // SelectForCall enforces demo-mode isolation before falling back to normal
 // health/failure routing. Demo tenants and DEMO_MODE=1 can only use "mock".
 func (r *Router) SelectForCall(ctx context.Context, req model.CallRequest) (adapter.Telephony, error) {

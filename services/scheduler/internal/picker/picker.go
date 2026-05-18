@@ -54,9 +54,17 @@ func (p *Picker) PickNext(ctx context.Context, req model.PickNextRequest) (*mode
 	return &model.PickNextResponse{Leads: leads}, nil
 }
 
+func (p *Picker) AddLeads(ctx context.Context, leads []*model.Lead) error {
+	return p.store.AddLeads(ctx, leads)
+}
+
 // MarkAttempt records the outcome of a call attempt and feeds back into the retry ladder.
 func (p *Picker) MarkAttempt(ctx context.Context, req model.MarkAttemptRequest) error {
 	return p.store.MarkAttempt(ctx, req.CallSessionID, req.Outcome)
+}
+
+func (p *Picker) SetCallSession(ctx context.Context, callSessionID, leadID string) error {
+	return p.store.SetCallSession(ctx, callSessionID, leadID)
 }
 
 // GetQueueDepth returns the number of pending leads for a tenant.

@@ -42,7 +42,7 @@ def build_gap_report() -> dict:
     bff_server = _read("services/bff/internal/server/server.go")
     lead_import_service = _read("services/lead-import/internal/service/service.go")
     campaign_handler = _read("services/campaign/internal/handler/handler.go")
-    scheduler_main = _read("services/scheduler/cmd/server/main.go")
+    scheduler_handler = _read("services/scheduler/internal/handler/handler.go")
     telephony_handler = _read("services/telephony-adapter/internal/handler/handler.go")
     voice_app = _read("services/voice-agent-worker/voice_agent/app.py")
     messages_page = _read("apps/dashboard/src/app/(protected)/messages/page.tsx")
@@ -93,8 +93,12 @@ def build_gap_report() -> dict:
         GapCheck(
             key="scheduler.to_telephony",
             title="Scheduler starts demo telephony calls",
-            status="missing" if "telephony" not in scheduler_main.lower() else "partial",
-            evidence="scheduler runtime does not reference telephony adapter/client.",
+            status=_status(
+                "/v1/scheduler/demo-dispatch" in scheduler_handler
+                and "/v1/calls" in scheduler_handler
+                and "telephony" in scheduler_handler.lower()
+            ),
+            evidence="scheduler handler checked for demo dispatch endpoint and telephony call command.",
             next_step="Add demo scheduler flow: launched campaign -> pick lead -> POST call command.",
         ),
         GapCheck(
