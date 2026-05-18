@@ -17,7 +17,7 @@
 | 8103 | lead-service         |
 | 8104 | campaign-service     |
 | 8105 | telephony-gateway    |
-| 8106 | whatsapp-gateway     |
+| 8106 | whatsapp-adapter     |
 | 8107 | scheduler            |
 | 8108 | billing-service      |
 | 8109 | analytics-ingest     |

@@ -13,4 +13,5 @@ use (
 	./services/telephony-adapter
 	./services/temporal-workers
 	./services/tenant-auth
+	./services/whatsapp-adapter
 )
