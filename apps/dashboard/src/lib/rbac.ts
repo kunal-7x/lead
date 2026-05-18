@@ -38,6 +38,7 @@ const NAV_PERMISSIONS: Record<string, Role[]> = {
   '/billing/invoices': ['super_admin', 'internal_admin', 'client_owner'],
   '/billing/credits': ['super_admin', 'internal_admin', 'client_owner'],
   '/reports': ['super_admin', 'internal_admin', 'client_owner', 'sales_manager'],
+  '/ai-quality': ['super_admin', 'internal_admin', 'client_owner', 'sales_manager'],
   '/settings/profile': [
     'super_admin',
     'internal_admin',

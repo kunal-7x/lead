@@ -14,6 +14,7 @@ const NAV = [
   { label: 'Site Visits', href: '/site-visits' },
   { label: 'Billing', href: '/billing/usage' },
   { label: 'Reports', href: '/reports' },
+  { label: 'AI Quality', href: '/ai-quality' },
   { label: 'Profile', href: '/settings/profile' },
   { label: 'Team', href: '/settings/team' },
   { label: 'API Keys', href: '/settings/api-keys' },

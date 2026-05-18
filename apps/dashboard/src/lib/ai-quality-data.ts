@@ -1,0 +1,82 @@
+export const qualityQueue = [
+  {
+    id: 'review-001',
+    tenant: 'North Star Realty',
+    session: 'sess-551',
+    reason: 'hallucination flagged',
+    severity: 'high',
+    confidence: '57%',
+    promptVersion: 'prompt_v14',
+    modelVersion: 'groq_llama',
+    retrievedScore: '0.61',
+    guardrailDecision: 'claim_rewritten',
+    transcript: [
+      'Customer: Possession kab milega?',
+      'AI: December possession confirm hai.',
+      'Guardrail: Claim not found in KB, rewrite and handover.',
+    ],
+    kbChunks: [
+      'RERA possession date: please verify with sales office.',
+      'Loan eligibility and possession timelines must be confirmed by the project team.',
+    ],
+    brainJson: {
+      next_action: 'handover',
+      risk_level: 'risky',
+      lead_status: 'needs_human_review',
+      summary: 'Possession claim was not supported by KB',
+    },
+    blameChain: [
+      { label: 'Prompt', value: 'prompt_v14' },
+      { label: 'Model', value: 'groq_llama' },
+      { label: 'KB score', value: '0.61' },
+      { label: 'Guardrail', value: 'claim_rewritten' },
+    ],
+  },
+  {
+    id: 'review-002',
+    tenant: 'Westline Estates',
+    session: 'sess-552',
+    reason: 'hot-handover mismatch',
+    severity: 'medium',
+    confidence: '64%',
+    promptVersion: 'prompt_v14',
+    modelVersion: 'openrouter',
+    retrievedScore: '0.74',
+    guardrailDecision: 'none',
+    transcript: ['Customer: I want to book visit.', 'AI: I will call you later.'],
+    kbChunks: ['Site visits can be booked for qualified hot leads from 10:00 to 18:00.'],
+    brainJson: {
+      next_action: 'callback',
+      risk_level: 'safe',
+      lead_status: 'hot',
+      summary: 'Lead wanted visit but AI chose callback',
+    },
+    blameChain: [
+      { label: 'Prompt', value: 'prompt_v14' },
+      { label: 'Model', value: 'openrouter' },
+      { label: 'KB score', value: '0.74' },
+      { label: 'Guardrail', value: 'none' },
+    ],
+  },
+];
+
+export const promptRuns = [
+  {
+    id: 'run-default-prompt_v14-groq_llama',
+    prompt: 'prompt_v14',
+    model: 'groq_llama',
+    suite: 'default',
+    aggregate: '100%',
+    highSeverity: '100%',
+    status: 'green',
+  },
+  {
+    id: 'run-default-prompt_regression_5pct-groq_llama',
+    prompt: 'prompt_regression_5pct',
+    model: 'groq_llama',
+    suite: 'default',
+    aggregate: '61%',
+    highSeverity: '40%',
+    status: 'blocked',
+  },
+];
