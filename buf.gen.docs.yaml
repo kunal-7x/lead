@@ -1,0 +1,7 @@
+version: v2
+plugins:
+  - remote: buf.build/community/pseudomuto-doc
+    out: docs/api/proto
+    opt: markdown,index.md
+inputs:
+  - directory: proto
