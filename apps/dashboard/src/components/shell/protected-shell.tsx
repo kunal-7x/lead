@@ -10,6 +10,7 @@ import { toast } from 'sonner';
 const NAV = [
   { label: 'Dashboard', href: '/dashboard' },
   { label: 'Leads', href: '/leads' },
+  { label: 'Campaigns', href: '/campaigns' },
   { label: 'Messages', href: '/messages' },
   { label: 'Site Visits', href: '/site-visits' },
   { label: 'Billing', href: '/billing/usage' },

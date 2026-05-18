@@ -72,7 +72,10 @@ def build_gap_report() -> dict:
         GapCheck(
             key="dashboard.campaign_ui",
             title="Client dashboard has campaign launch UI",
-            status=_status(_exists("apps/dashboard/src/app/(protected)/campaigns/page.tsx")),
+            status=_status(
+                _exists("apps/dashboard/src/app/(protected)/campaigns/page.tsx")
+                and "/v1/campaigns" in _read("apps/dashboard/src/app/(protected)/campaigns/page.tsx")
+            ),
             evidence="Checked for protected dashboard campaigns route.",
             next_step="Add campaign list/create/attach/launch/health UI.",
         ),

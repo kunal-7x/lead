@@ -43,9 +43,9 @@ Phase 27 added BFF proxy routes for lead-import and campaign APIs, plus safe emp
 
 ### 2. Missing client campaign UI
 
-The protected dashboard currently has no campaign page in the route tree. Campaign service has APIs, but the client cannot create, attach leads, launch, pause, or inspect campaign health from the dashboard.
+Status: closed in Phase 28.
 
-Impact: the user cannot start the 10-lead calling flow from the product UI.
+Phase 28 added a client dashboard campaign page that can list campaigns, create a campaign, attach lead IDs, launch, pause/resume, and read campaign health through the BFF campaign proxy.
 
 ### 3. Runtime fake stores are isolated per service
 

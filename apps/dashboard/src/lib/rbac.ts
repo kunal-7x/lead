@@ -23,6 +23,7 @@ const NAV_PERMISSIONS: Record<string, Role[]> = {
     'salesperson',
     'viewer',
   ],
+  '/campaigns': ['super_admin', 'internal_admin', 'client_owner', 'sales_manager'],
   '/messages': ['super_admin', 'internal_admin', 'client_owner', 'sales_manager', 'salesperson'],
   '/messages/templates': ['super_admin', 'internal_admin', 'client_owner', 'sales_manager'],
   '/site-visits': ['super_admin', 'internal_admin', 'client_owner', 'sales_manager', 'salesperson'],
