@@ -21,4 +21,5 @@ use (
 	./services/notification
 	./services/site-visit
 	./services/whatsapp-adapter
+	./tests/security
 )
