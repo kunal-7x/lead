@@ -37,9 +37,9 @@ The dashboard calls:
 - `/api/v1/leads/{id}/activities`
 - `/api/v1/leads/{id}/status-history`
 
-The BFF currently exposes auth/team/audit routes only. It does not proxy lead-import, campaign, scheduler, telephony, WhatsApp, reports, or demo-flow APIs.
+Status: partially closed in Phase 27.
 
-Impact: dashboard lead upload/list/detail cannot work through the normal client route.
+Phase 27 added BFF proxy routes for lead-import and campaign APIs, plus safe empty lead timeline placeholders. Remaining BFF proxy gaps still exist for scheduler, telephony, WhatsApp, reports, billing, site-visit, handoff, and AI-quality APIs.
 
 ### 2. Missing client campaign UI
 

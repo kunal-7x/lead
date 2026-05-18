@@ -18,6 +18,8 @@ func main() {
 	cfg := server.Config{
 		Addr:          envOr("BFF_ADDR", ":8080"),
 		TenantAuthURL: envOr("TENANT_AUTH_URL", "http://localhost:8101"),
+		LeadImportURL: envOr("LEAD_IMPORT_URL", "http://localhost:8106"),
+		CampaignURL:   envOr("CAMPAIGN_URL", "http://localhost:8112"),
 		RedisAddr:     envOr("REDIS_ADDR", "localhost:6379"),
 		JWTSecret:     envOr("JWT_SECRET", "dev-secret"),
 		AllowedOrigins: []string{

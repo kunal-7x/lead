@@ -16,6 +16,8 @@ import (
 type Config struct {
 	Addr           string
 	TenantAuthURL  string
+	LeadImportURL  string
+	CampaignURL    string
 	RedisAddr      string
 	JWTSecret      string
 	AllowedOrigins []string
@@ -30,6 +32,13 @@ func New(cfg Config, logger *slog.Logger) (http.Handler, error) {
 	}
 
 	authClient := handler.NewTenantAuthClient(cfg.TenantAuthURL)
+	productProxy, err := handler.NewProductProxy(map[string]string{
+		"lead_import": cfg.LeadImportURL,
+		"campaign":    cfg.CampaignURL,
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	r := chi.NewRouter()
 
@@ -82,6 +91,28 @@ func New(cfg Config, logger *slog.Logger) (http.Handler, error) {
 
 		// Audit log
 		r.Get("/v1/audit-log", handler.QueryAuditLog(authClient))
+
+		// Lead import + lead APIs
+		r.Post("/v1/import/preview", productProxy.ProxyTo("lead_import"))
+		r.Post("/v1/import/jobs", productProxy.ProxyTo("lead_import"))
+		r.Get("/v1/import/jobs/{id}", productProxy.ProxyTo("lead_import"))
+		r.Post("/v1/leads", productProxy.ProxyTo("lead_import"))
+		r.Get("/v1/leads", productProxy.ProxyTo("lead_import"))
+		r.Get("/v1/leads/{id}", productProxy.ProxyTo("lead_import"))
+		r.Get("/v1/leads/{id}/activities", handler.EmptyLeadActivities)
+		r.Get("/v1/leads/{id}/status-history", handler.EmptyLeadStatusHistory)
+
+		// Campaign APIs
+		r.Post("/v1/campaigns", productProxy.ProxyTo("campaign"))
+		r.Post("/v1/campaigns/", productProxy.ProxyTo("campaign"))
+		r.Get("/v1/campaigns", productProxy.ProxyTo("campaign"))
+		r.Get("/v1/campaigns/", productProxy.ProxyTo("campaign"))
+		r.Get("/v1/campaigns/{id}", productProxy.ProxyTo("campaign"))
+		r.Post("/v1/campaigns/{id}/leads", productProxy.ProxyTo("campaign"))
+		r.Post("/v1/campaigns/{id}/launch", productProxy.ProxyTo("campaign"))
+		r.Post("/v1/campaigns/{id}/pause", productProxy.ProxyTo("campaign"))
+		r.Post("/v1/campaigns/{id}/resume", productProxy.ProxyTo("campaign"))
+		r.Get("/v1/campaigns/{id}/health", productProxy.ProxyTo("campaign"))
 	})
 
 	return r, nil
