@@ -26,6 +26,7 @@
 | 8113 | notification         |
 | 8114 | site-visit           |
 | 8115 | billing-meter        |
+| 8116 | analytics-sink       |
 
 ### AI plane (Python) 8201–8210
 | Port | Service              |

@@ -13,6 +13,7 @@ const NAV = [
   { label: 'Messages', href: '/messages' },
   { label: 'Site Visits', href: '/site-visits' },
   { label: 'Billing', href: '/billing/usage' },
+  { label: 'Reports', href: '/reports' },
   { label: 'Profile', href: '/settings/profile' },
   { label: 'Team', href: '/settings/team' },
   { label: 'API Keys', href: '/settings/api-keys' },
