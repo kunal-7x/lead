@@ -111,12 +111,13 @@ def build_gap_report() -> dict:
         GapCheck(
             key="voice.runtime_persistence",
             title="Voice worker persists events and turns outside tests",
-            status=(
-                "missing"
-                if "FakePublisher()" in voice_app and "FakeTurnStore()" in voice_app
-                else "partial"
+            status=_status(
+                "DemoEventPublisher" in voice_app
+                and "DemoTurnStore" in voice_app
+                and "FakePublisher()" not in voice_app
+                and "FakeTurnStore()" not in voice_app
             ),
-            evidence="voice WebSocket handler currently creates FakePublisher and FakeTurnStore.",
+            evidence="voice WebSocket handler checked for demo runtime publisher and turn store.",
             next_step="Use demo event publisher and demo turn store in demo mode.",
         ),
         GapCheck(

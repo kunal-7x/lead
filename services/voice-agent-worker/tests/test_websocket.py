@@ -10,9 +10,7 @@ from voice_agent.app import app
 
 def _make_app(monkeypatch):
     import voice_agent.app as app_module
-    import fakeredis.aioredis
-    rdb = fakeredis.aioredis.FakeRedis()
-    monkeypatch.setattr(app_module, "_redis", rdb)
+    monkeypatch.setattr(app_module, "_redis", None)
     return TestClient(app)
 
 

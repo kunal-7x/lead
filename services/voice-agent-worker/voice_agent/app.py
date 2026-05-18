@@ -8,11 +8,10 @@ import os
 import redis.asyncio as aioredis
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from voice_agent.actions import FakePublisher
 from voice_agent.agent import AgentLoop
 from voice_agent.clients import HttpSTTClient, HttpLLMClient, HttpGuardrailClient, HttpTTSClient
+from voice_agent.demo_runtime import DemoEventPublisher, DemoTurnStore
 from voice_agent.models import SessionContext
-from voice_agent.recorder import FakeTurnStore
 from voice_agent.vad import SileroVAD
 
 app = FastAPI(title="voice-agent-worker", version="0.1.0")
@@ -41,8 +40,8 @@ async def audio_ws(websocket: WebSocket, session_id: str) -> None:
     llm = HttpLLMClient()
     guardrail = HttpGuardrailClient()
     tts = HttpTTSClient()
-    publisher = FakePublisher()   # replace with NatsPublisher in Phase 16
-    store = FakeTurnStore()       # replace with DB-backed store in Phase 16
+    publisher = DemoEventPublisher()
+    store = DemoTurnStore()
     vad = SileroVAD()
 
     async def audio_source():
@@ -57,8 +56,6 @@ async def audio_ws(websocket: WebSocket, session_id: str) -> None:
                         return
         except WebSocketDisconnect:
             return
-
-    audio_chunks = []
 
     async def send_audio(audio: bytes) -> None:
         b64 = base64.b64encode(audio).decode()

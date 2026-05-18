@@ -67,9 +67,9 @@ Phase 29 added `POST /v1/calls`, which accepts tenant/campaign/lead/contact/proj
 
 ### 6. Voice worker uses fake publisher and fake turn store at runtime
 
-`voice-agent-worker` currently creates `FakePublisher` and `FakeTurnStore` in the WebSocket handler.
+Status: closed for demo runtime in Phase 30.
 
-Impact: STT/LLM/TTS actions, summaries, transcripts, site-visit requests, handoff requests, and WhatsApp requests are not visible to the rest of the product.
+Phase 30 added JSONL-backed demo runtime implementations for event publishing and turn storage. Runtime voice artifacts are written under `VOICE_DEMO_DIR` or `.demo/voice-agent` by default. Unit-test fakes remain available only for tests.
 
 ### 7. Voice path is per-utterance batch, not streaming-optimized
 
