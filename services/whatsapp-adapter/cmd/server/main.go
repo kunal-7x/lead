@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
+	libsvault "github.com/lead/libs/go/vault"
 	"github.com/lead/services/whatsapp-adapter/internal/consent"
 	"github.com/lead/services/whatsapp-adapter/internal/handler"
 	"github.com/lead/services/whatsapp-adapter/internal/meta"
@@ -34,14 +35,8 @@ func main() {
 	consentChecker := consent.StaticChecker{Allowed: true}
 	svc := service.New(st, consentChecker, metaClient)
 
-	_, _ = svc.UpsertCredential(context.Background(), model.VaultCredential{
-		TenantID:          "default",
-		PhoneNumberID:     os.Getenv("META_WA_PHONE_NUMBER_ID"),
-		BusinessAccountID: os.Getenv("META_WA_BUSINESS_ACCOUNT_ID"),
-		AccessToken:       os.Getenv("META_WA_TOKEN"),
-		VerifyToken:       os.Getenv("META_WA_VERIFY_TOKEN"),
-		AppSecret:         os.Getenv("META_WA_APP_SECRET"),
-	})
+	cred := loadWACredential(logger)
+	_, _ = svc.UpsertCredential(context.Background(), cred)
 	_ = svc.SeedPrebuiltTemplates(context.Background(), "default")
 	_ = svc.SeedDemoInbox(context.Background(), "tenant-demo")
 
@@ -80,6 +75,56 @@ func main() {
 		logger.Error("shutdown error", "err", err)
 	}
 	logger.Info("whatsapp-adapter stopped")
+}
+
+// loadWACredential reads META_WA_* values from Vault when VAULT_ADDR is set,
+// falling back to env vars so dev without Vault keeps working.
+func loadWACredential(logger *slog.Logger) model.VaultCredential {
+	cred := model.VaultCredential{
+		TenantID:          "default",
+		PhoneNumberID:     os.Getenv("META_WA_PHONE_NUMBER_ID"),
+		BusinessAccountID: os.Getenv("META_WA_BUSINESS_ACCOUNT_ID"),
+		AccessToken:       os.Getenv("META_WA_TOKEN"),
+		VerifyToken:       os.Getenv("META_WA_VERIFY_TOKEN"),
+		AppSecret:         os.Getenv("META_WA_APP_SECRET"),
+	}
+
+	addr := os.Getenv("VAULT_ADDR")
+	token := os.Getenv("VAULT_TOKEN")
+	if addr == "" || token == "" {
+		return cred
+	}
+
+	vc, err := libsvault.New(addr, token)
+	if err != nil {
+		logger.Warn("vault client init failed — using env vars", "err", err)
+		return cred
+	}
+
+	data, err := vc.ReadKV("capsy/whatsapp/default")
+	if err != nil {
+		logger.Warn("vault read whatsapp creds failed — using env vars", "err", err)
+		return cred
+	}
+
+	if v := data["META_WA_PHONE_NUMBER_ID"]; v != "" {
+		cred.PhoneNumberID = v
+	}
+	if v := data["META_WA_BUSINESS_ACCOUNT_ID"]; v != "" {
+		cred.BusinessAccountID = v
+	}
+	if v := data["META_WA_TOKEN"]; v != "" {
+		cred.AccessToken = v
+	}
+	if v := data["META_WA_VERIFY_TOKEN"]; v != "" {
+		cred.VerifyToken = v
+	}
+	if v := data["META_WA_APP_SECRET"]; v != "" {
+		cred.AppSecret = v
+	}
+
+	logger.Info("loaded secret from vault", "path", "capsy/whatsapp/default")
+	return cred
 }
 
 func newStore() (store.Store, error) {

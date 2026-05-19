@@ -3,6 +3,9 @@ package vault
 import (
 	"context"
 	"os"
+	"time"
+
+	libsvault "github.com/lead/libs/go/vault"
 )
 
 // KeyProvider provides signing keys for JWTs.
@@ -29,4 +32,18 @@ func NewStatic(secret string) *Static {
 
 func (s *Static) SigningKey(_ context.Context) ([]byte, error) {
 	return s.key, nil
+}
+
+// NewVaultProvider returns a KeyProvider that reads JWT_SECRET from Vault
+// at secret/data/capsy/jwt, caching for 5 seconds. On failure it falls back
+// to the static secret so dev without Vault keeps working.
+func NewVaultProvider(vc *libsvault.Client, staticSecret string) KeyProvider {
+	if staticSecret == "" {
+		staticSecret = os.Getenv("JWT_SECRET")
+	}
+	if staticSecret == "" {
+		staticSecret = "dev-secret-change-in-production"
+	}
+	return libsvault.NewCachedKeyProvider(vc, "capsy/jwt", "JWT_SECRET",
+		5*time.Second, []byte(staticSecret))
 }

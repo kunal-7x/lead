@@ -31,9 +31,10 @@ const (
 
 // Service implements all TenantAuth RPCs as HTTP handlers.
 type Service struct {
-	store store.Store
-	keys  vault.KeyProvider
-	rl    ratelimit.Limiter
+	store   store.Store
+	keys    vault.KeyProvider
+	rl      ratelimit.Limiter
+	rotator Rotator
 }
 
 func New(s store.Store, keys vault.KeyProvider, rl ratelimit.Limiter) *Service {
@@ -61,6 +62,10 @@ func (svc *Service) Mount(mux *http.ServeMux) {
 	mux.HandleFunc(base+"CheckPermission", svc.handleCheckPermission)
 	mux.HandleFunc(base+"WriteAuditLog", svc.handleWriteAuditLog)
 	mux.HandleFunc(base+"QueryAuditLogs", svc.handleQueryAuditLogs)
+
+	if svc.rotator != nil {
+		mux.HandleFunc("/v1/admin/rotate-jwt", svc.handleRotateJWT)
+	}
 }
 
 // ---- helpers ----------------------------------------------------------------

@@ -8,6 +8,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	libsvault "github.com/lead/libs/go/vault"
 	"github.com/lead/services/tenant-auth/internal/ratelimit"
 	"github.com/lead/services/tenant-auth/internal/service"
 	"github.com/lead/services/tenant-auth/internal/store"
@@ -32,15 +33,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	keys := vault.NewStatic("")
+	keys, vc := newKeyProvider(log)
 	svc := service.New(st, keys, rl)
+	if vc != nil {
+		svc.SetRotator(vc)
+	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	svc.Mount(mux)
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8081"
+		port = "8101"
 	}
 	addr := fmt.Sprintf(":%s", port)
 	log.Info("tenant-auth service starting", "addr", addr)
@@ -48,6 +53,24 @@ func main() {
 		log.Error("server error", "error", err)
 		os.Exit(1)
 	}
+}
+
+// newKeyProvider returns a KeyProvider. When VAULT_ADDR is set it uses a
+// Vault-backed provider with 5-second TTL cache (enables JWT rotation).
+// Falls back to static env var so dev without Vault keeps working.
+func newKeyProvider(log *slog.Logger) (vault.KeyProvider, *libsvault.Client) {
+	addr := os.Getenv("VAULT_ADDR")
+	token := os.Getenv("VAULT_TOKEN")
+	if addr == "" || token == "" {
+		return vault.NewStatic(""), nil
+	}
+	vc, err := libsvault.New(addr, token)
+	if err != nil {
+		log.Warn("vault client init failed — falling back to static key", "error", err)
+		return vault.NewStatic(""), nil
+	}
+	log.Info("loaded secret from vault", "key", "JWT_SECRET", "path", "capsy/jwt")
+	return vault.NewVaultProvider(vc, os.Getenv("JWT_SECRET")), vc
 }
 
 func newStore() (store.Store, error) {

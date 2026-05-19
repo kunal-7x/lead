@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 
+	libsvault "github.com/lead/libs/go/vault"
 	"github.com/lead/services/notification/internal/adapters"
 	"github.com/lead/services/notification/internal/handler"
 	"github.com/lead/services/notification/internal/model"
@@ -14,6 +15,10 @@ import (
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	// Load provider secrets from Vault when available; env-var fallback preserved.
+	loadSecretsFromVault(log)
+
 	st, err := newStore()
 	if err != nil {
 		log.Error("store init", "error", err)
@@ -38,6 +43,50 @@ func main() {
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Error("server error", "error", err)
 		os.Exit(1)
+	}
+}
+
+// loadSecretsFromVault fetches notification provider credentials from Vault
+// and overrides the corresponding env vars. Adapters read from env vars so
+// they remain unchanged; this is the only injection point.
+func loadSecretsFromVault(log *slog.Logger) {
+	addr := os.Getenv("VAULT_ADDR")
+	token := os.Getenv("VAULT_TOKEN")
+	if addr == "" || token == "" {
+		return
+	}
+
+	vc, err := libsvault.New(addr, token)
+	if err != nil {
+		log.Warn("vault client init failed — using env vars", "err", err)
+		return
+	}
+
+	// Notification provider keys live at capsy/providers/notification.
+	data, err := vc.ReadKV("capsy/providers/notification")
+	if err != nil {
+		log.Warn("vault read notification secrets failed — using env vars", "err", err)
+		return
+	}
+
+	keys := []string{
+		"POSTMARK_TOKEN",
+		"POSTMARK_FROM_EMAIL",
+		"SLACK_WEBHOOK_URL",
+		"DISCORD_WEBHOOK_URL",
+		"SES_REGION",
+		"AWS_ACCESS_KEY_ID",
+		"AWS_SECRET_ACCESS_KEY",
+	}
+	loaded := 0
+	for _, k := range keys {
+		if v := data[k]; v != "" {
+			os.Setenv(k, v)
+			loaded++
+		}
+	}
+	if loaded > 0 {
+		log.Info("loaded secret from vault", "path", "capsy/providers/notification", "keys", loaded)
 	}
 }
 
