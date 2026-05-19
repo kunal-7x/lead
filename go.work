@@ -1,25 +1,25 @@
-go 1.24.0
+go 1.25.0
 
 use (
 	./libs/go
 	./services/analytics-sink
-	./services/billing-meter
 	./services/bff
+	./services/billing-meter
 	./services/campaign
 	./services/consent-compliance
 	./services/freeswitch-bridge
 	./services/handoff
+	./services/internal-admin-api
 	./services/knowledge
 	./services/lead-identity
 	./services/lead-import
-	./services/internal-admin-api
 	./services/model-config
+	./services/notification
 	./services/scheduler
+	./services/site-visit
 	./services/telephony-adapter
 	./services/temporal-workers
 	./services/tenant-auth
-	./services/notification
-	./services/site-visit
 	./services/whatsapp-adapter
 	./tests/security
 )

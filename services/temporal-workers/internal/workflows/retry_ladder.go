@@ -7,10 +7,9 @@ import (
 	"github.com/lead/services/temporal-workers/internal/model"
 )
 
-// RetryLadderWorkflow computes the retry schedule for a lead given a policy.
-// It is deterministic: the same input always produces the same schedule.
-// In production this runs as a Temporal workflow registered via temporal.RegisterWorkflow.
-func RetryLadderWorkflow(input model.RetryLadderInput) (*model.RetryLadderResult, error) {
+// EvaluateRetryLadder computes the retry schedule for a lead. Pure function,
+// deterministic — used by RetryLadderWorkflow via activity and directly in tests.
+func EvaluateRetryLadder(input model.RetryLadderInput) (*model.RetryLadderResult, error) {
 	if input.LeadID == "" {
 		return nil, fmt.Errorf("lead_id required")
 	}

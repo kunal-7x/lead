@@ -12,10 +12,9 @@ const (
 	suppressionHitThreshold  = 0.30
 )
 
-// CampaignHealthWorkflow evaluates a health snapshot and returns a pause signal
-// if any threshold is breached. In production this runs as a Temporal workflow
-// polling the health API periodically.
-func CampaignHealthWorkflow(snap model.HealthSnapshot) (*model.CampaignPauseSignal, error) {
+// EvaluateCampaignHealth evaluates a health snapshot and returns a pause signal
+// if any threshold is breached. Pure function used by CampaignHealthWorkflow.
+func EvaluateCampaignHealth(snap model.HealthSnapshot) (*model.CampaignPauseSignal, error) {
 	if snap.CampaignID == "" {
 		return nil, fmt.Errorf("campaign_id required")
 	}

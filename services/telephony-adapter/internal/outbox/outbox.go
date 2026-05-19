@@ -4,11 +4,29 @@ package outbox
 import (
 	"context"
 	"sync"
+
+	"github.com/lead/libs/go/events"
 )
 
 // Publisher emits events to a message bus.
 type Publisher interface {
 	Publish(ctx context.Context, subject string, data []byte) error
+}
+
+// jetstreamBridge adapts events.Publisher (variadic opts) to the local Publisher
+// interface (no opts). Used in production when NATS_URL is set.
+type jetstreamBridge struct {
+	p events.Publisher
+}
+
+func (b *jetstreamBridge) Publish(ctx context.Context, subject string, data []byte) error {
+	return b.p.Publish(ctx, subject, data)
+}
+
+// NewJetStream returns a Publisher backed by the given events.Publisher.
+// Use events.NewFromEnv(os.Getenv("NATS_URL")) to create the underlying publisher.
+func NewJetStream(p events.Publisher) Publisher {
+	return &jetstreamBridge{p: p}
 }
 
 // Message is a published event.

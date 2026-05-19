@@ -10,9 +10,8 @@ import (
 	"github.com/lead/services/temporal-workers/internal/workflows"
 )
 
-// TestRetryLadder_Determinism verifies that replaying the RetryLadderWorkflow
-// with identical inputs always produces the same schedule — the core Temporal
-// replay guarantee that this workflow must satisfy.
+// TestRetryLadder_Determinism verifies that replaying EvaluateRetryLadder
+// with identical inputs always produces the same schedule.
 func TestRetryLadder_Determinism(t *testing.T) {
 	input := model.RetryLadderInput{
 		LeadID:      "replay-lead-001",
@@ -21,14 +20,13 @@ func TestRetryLadder_Determinism(t *testing.T) {
 		Policy:      model.DefaultRetryPolicy,
 	}
 
-	// Run the workflow 100 times — every result must be identical.
-	first, err := workflows.RetryLadderWorkflow(input)
+	first, err := workflows.EvaluateRetryLadder(input)
 	if err != nil {
 		t.Fatalf("first run error: %v", err)
 	}
 
 	for i := 1; i <= 100; i++ {
-		result, err := workflows.RetryLadderWorkflow(input)
+		result, err := workflows.EvaluateRetryLadder(input)
 		if err != nil {
 			t.Fatalf("run %d error: %v", i, err)
 		}
@@ -46,26 +44,26 @@ func TestRetryLadder_Determinism(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("determinism verified: 100 replays of RetryLadderWorkflow produced identical schedules")
+	t.Logf("determinism verified: 100 replays of EvaluateRetryLadder produced identical schedules")
 }
 
-// TestCallingWindowGate_Determinism verifies the calling window gate is deterministic.
+// TestCallingWindowGate_Determinism verifies EvaluateCallingWindow is deterministic.
 func TestCallingWindowGate_Determinism(t *testing.T) {
 	input := model.CallingWindowInput{
 		CallID:      "replay-call-001",
-		RequestedAt: time.Date(2026, 5, 17, 3, 30, 0, 0, time.UTC), // 09:00 IST
+		RequestedAt: time.Date(2026, 5, 17, 3, 30, 0, 0, time.UTC),
 		WindowStart: "09:00",
 		WindowEnd:   "21:00",
 		Timezone:    "Asia/Kolkata",
 	}
 
-	first, err := workflows.CallingWindowGate(input)
+	first, err := workflows.EvaluateCallingWindow(input)
 	if err != nil {
 		t.Fatalf("first run error: %v", err)
 	}
 
 	for i := 1; i <= 100; i++ {
-		result, err := workflows.CallingWindowGate(input)
+		result, err := workflows.EvaluateCallingWindow(input)
 		if err != nil {
 			t.Fatalf("run %d error: %v", i, err)
 		}
@@ -76,5 +74,5 @@ func TestCallingWindowGate_Determinism(t *testing.T) {
 			t.Fatalf("run %d: wait_until mismatch", i)
 		}
 	}
-	t.Logf("determinism verified: CallingWindowGate is deterministic")
+	t.Logf("determinism verified: EvaluateCallingWindow is deterministic")
 }

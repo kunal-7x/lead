@@ -6,10 +6,9 @@ import (
 	"github.com/lead/services/temporal-workers/internal/model"
 )
 
-// CostCapWatchWorkflow evaluates a billing-meter event and signals campaigns that
-// have reached their cost cap. In production this runs as a Temporal workflow
-// that receives signals from the billing plane.
-func CostCapWatchWorkflow(input model.CostCapWatchInput, events []model.BillingMeterEvent) ([]model.CampaignPauseSignal, error) {
+// EvaluateCostCap evaluates billing events and returns pause signals for
+// campaigns over their cost cap. Pure function used by CostCapWatchWorkflow.
+func EvaluateCostCap(input model.CostCapWatchInput, events []model.BillingMeterEvent) ([]model.CampaignPauseSignal, error) {
 	if input.TenantID == "" {
 		return nil, fmt.Errorf("tenant_id required")
 	}

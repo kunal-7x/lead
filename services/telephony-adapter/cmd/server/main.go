@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/lead/libs/go/events"
 	"github.com/lead/services/telephony-adapter/internal/adapter"
 	"github.com/lead/services/telephony-adapter/internal/handler"
 	"github.com/lead/services/telephony-adapter/internal/outbox"
@@ -28,7 +29,8 @@ func main() {
 	if closer, ok := s.(interface{ Close() }); ok {
 		defer closer.Close()
 	}
-	pub := outbox.NewFakePublisher()
+
+	pub := newPublisher()
 
 	adapters := []adapter.Telephony{
 		adapter.NewExotel(),
@@ -51,4 +53,20 @@ func newStore() (store.Store, error) {
 		return store.NewPostgres(dsn)
 	}
 	return store.NewFake(), nil
+}
+
+// newPublisher returns a real JetStream publisher when NATS_URL is set,
+// otherwise a Noop publisher so the service runs in dev without NATS.
+func newPublisher() outbox.Publisher {
+	natsURL := os.Getenv("NATS_URL")
+	if natsURL == "" {
+		log.Println("telephony-adapter: NATS_URL not set, using noop publisher")
+		return outbox.NewFakePublisher()
+	}
+	ep, err := events.New(natsURL)
+	if err != nil {
+		log.Fatalf("telephony-adapter: connect NATS %s: %v", natsURL, err)
+	}
+	log.Printf("telephony-adapter: loaded publisher from JetStream %s", natsURL)
+	return outbox.NewJetStream(ep)
 }

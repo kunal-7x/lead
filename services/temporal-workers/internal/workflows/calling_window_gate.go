@@ -7,10 +7,9 @@ import (
 	"github.com/lead/services/temporal-workers/internal/model"
 )
 
-// CallingWindowGate determines whether a call can proceed now, or when to resume.
-// In production this runs as a Temporal workflow that sleeps until the window opens.
-// The function is pure and deterministic, enabling replay testing.
-func CallingWindowGate(input model.CallingWindowInput) (*model.CallingWindowResult, error) {
+// EvaluateCallingWindow determines whether a call can proceed now, or when to
+// resume. Pure and deterministic — used by CallingWindowGateWorkflow and in tests.
+func EvaluateCallingWindow(input model.CallingWindowInput) (*model.CallingWindowResult, error) {
 	if input.Timezone == "" {
 		input.Timezone = "Asia/Kolkata"
 	}

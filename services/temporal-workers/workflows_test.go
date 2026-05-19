@@ -8,11 +8,11 @@ import (
 	"github.com/lead/services/temporal-workers/internal/workflows"
 )
 
-// ---- RetryLadderWorkflow tests ----
+// ---- EvaluateRetryLadder tests ----
 
 func TestRetryLadder_DefaultPolicy(t *testing.T) {
 	firstCall := time.Date(2026, 5, 17, 10, 0, 0, 0, time.UTC)
-	result, err := workflows.RetryLadderWorkflow(model.RetryLadderInput{
+	result, err := workflows.EvaluateRetryLadder(model.RetryLadderInput{
 		LeadID:      "lead-1",
 		CampaignID:  "camp-1",
 		FirstCallAt: firstCall,
@@ -28,7 +28,6 @@ func TestRetryLadder_DefaultPolicy(t *testing.T) {
 		t.Fatalf("expected 5 attempts, got %d", len(result.Schedule))
 	}
 
-	// Verify schedule: immediate, +1h, +24h, +72h, +168h
 	expected := []time.Duration{0, time.Hour, 24 * time.Hour, 72 * time.Hour, 168 * time.Hour}
 	for i, d := range expected {
 		want := firstCall.Add(d).Truncate(time.Second)
@@ -43,7 +42,7 @@ func TestRetryLadder_DefaultPolicy(t *testing.T) {
 }
 
 func TestRetryLadder_MissingLeadID_Error(t *testing.T) {
-	_, err := workflows.RetryLadderWorkflow(model.RetryLadderInput{
+	_, err := workflows.EvaluateRetryLadder(model.RetryLadderInput{
 		FirstCallAt: time.Now(),
 	})
 	if err == nil {
@@ -52,7 +51,7 @@ func TestRetryLadder_MissingLeadID_Error(t *testing.T) {
 }
 
 func TestRetryLadder_MissingFirstCallAt_Error(t *testing.T) {
-	_, err := workflows.RetryLadderWorkflow(model.RetryLadderInput{
+	_, err := workflows.EvaluateRetryLadder(model.RetryLadderInput{
 		LeadID: "lead-x",
 	})
 	if err == nil {
@@ -66,7 +65,7 @@ func TestRetryLadder_CustomPolicy(t *testing.T) {
 		Max:     3,
 	}
 	firstCall := time.Date(2026, 5, 17, 9, 0, 0, 0, time.UTC)
-	result, err := workflows.RetryLadderWorkflow(model.RetryLadderInput{
+	result, err := workflows.EvaluateRetryLadder(model.RetryLadderInput{
 		LeadID:      "lead-2",
 		CampaignID:  "camp-2",
 		FirstCallAt: firstCall,
@@ -80,14 +79,13 @@ func TestRetryLadder_CustomPolicy(t *testing.T) {
 	}
 }
 
-// ---- CallingWindowGate tests ----
+// ---- EvaluateCallingWindow tests ----
 
 func TestCallingWindowGate_WithinWindow(t *testing.T) {
-	// 14:00 IST is within 09:00-21:00 window.
 	ist, _ := time.LoadLocation("Asia/Kolkata")
 	reqAt := time.Date(2026, 5, 17, 8, 30, 0, 0, time.UTC) // 14:00 IST
 
-	result, err := workflows.CallingWindowGate(model.CallingWindowInput{
+	result, err := workflows.EvaluateCallingWindow(model.CallingWindowInput{
 		CallID:      "call-1",
 		RequestedAt: reqAt,
 		WindowStart: "09:00",
@@ -104,11 +102,10 @@ func TestCallingWindowGate_WithinWindow(t *testing.T) {
 }
 
 func TestCallingWindowGate_BeforeWindow_WaitsUntil0900IST(t *testing.T) {
-	// 06:00 IST is before the 09:00 window.
 	ist, _ := time.LoadLocation("Asia/Kolkata")
 	reqAt := time.Date(2026, 5, 17, 0, 30, 0, 0, time.UTC) // 06:00 IST
 
-	result, err := workflows.CallingWindowGate(model.CallingWindowInput{
+	result, err := workflows.EvaluateCallingWindow(model.CallingWindowInput{
 		CallID:      "call-2",
 		RequestedAt: reqAt,
 		WindowStart: "09:00",
@@ -121,7 +118,6 @@ func TestCallingWindowGate_BeforeWindow_WaitsUntil0900IST(t *testing.T) {
 	if result.CanProceed {
 		t.Fatal("expected can_proceed=false before window")
 	}
-	// WaitUntil should be 09:00 IST on the same day.
 	want := time.Date(2026, 5, 17, 9, 0, 0, 0, ist)
 	if !result.WaitUntil.Equal(want) {
 		t.Fatalf("expected wait_until %v, got %v", want, result.WaitUntil)
@@ -129,11 +125,10 @@ func TestCallingWindowGate_BeforeWindow_WaitsUntil0900IST(t *testing.T) {
 }
 
 func TestCallingWindowGate_AfterWindow_WaitsNextDay(t *testing.T) {
-	// 22:00 IST is after the 21:00 window — should wait until next day 09:00.
 	ist, _ := time.LoadLocation("Asia/Kolkata")
 	reqAt := time.Date(2026, 5, 17, 16, 30, 0, 0, time.UTC) // 22:00 IST
 
-	result, err := workflows.CallingWindowGate(model.CallingWindowInput{
+	result, err := workflows.EvaluateCallingWindow(model.CallingWindowInput{
 		CallID:      "call-3",
 		RequestedAt: reqAt,
 		WindowStart: "09:00",
@@ -152,10 +147,10 @@ func TestCallingWindowGate_AfterWindow_WaitsNextDay(t *testing.T) {
 	}
 }
 
-// ---- CostCapWatchWorkflow tests ----
+// ---- EvaluateCostCap tests ----
 
 func TestCostCapWatch_CapReached_EmitsSignal(t *testing.T) {
-	signals, err := workflows.CostCapWatchWorkflow(
+	signals, err := workflows.EvaluateCostCap(
 		model.CostCapWatchInput{TenantID: "t1", CapINR: 1000},
 		[]model.BillingMeterEvent{
 			{TenantID: "t1", CampaignID: "camp-1", CostBurnINR: 1001, CapINR: 1000},
@@ -173,7 +168,7 @@ func TestCostCapWatch_CapReached_EmitsSignal(t *testing.T) {
 }
 
 func TestCostCapWatch_BelowCap_NoSignal(t *testing.T) {
-	signals, err := workflows.CostCapWatchWorkflow(
+	signals, err := workflows.EvaluateCostCap(
 		model.CostCapWatchInput{TenantID: "t1", CapINR: 1000},
 		[]model.BillingMeterEvent{
 			{TenantID: "t1", CampaignID: "camp-2", CostBurnINR: 500, CapINR: 1000},
@@ -188,7 +183,7 @@ func TestCostCapWatch_BelowCap_NoSignal(t *testing.T) {
 }
 
 func TestCostCapWatch_DifferentTenant_Ignored(t *testing.T) {
-	signals, err := workflows.CostCapWatchWorkflow(
+	signals, err := workflows.EvaluateCostCap(
 		model.CostCapWatchInput{TenantID: "t1", CapINR: 100},
 		[]model.BillingMeterEvent{
 			{TenantID: "t2", CampaignID: "camp-3", CostBurnINR: 999, CapINR: 100},
@@ -203,7 +198,7 @@ func TestCostCapWatch_DifferentTenant_Ignored(t *testing.T) {
 }
 
 func TestCostCapWatch_NoDuplicateSignals(t *testing.T) {
-	signals, err := workflows.CostCapWatchWorkflow(
+	signals, err := workflows.EvaluateCostCap(
 		model.CostCapWatchInput{TenantID: "t1", CapINR: 100},
 		[]model.BillingMeterEvent{
 			{TenantID: "t1", CampaignID: "camp-4", CostBurnINR: 200, CapINR: 100},
@@ -218,10 +213,10 @@ func TestCostCapWatch_NoDuplicateSignals(t *testing.T) {
 	}
 }
 
-// ---- CampaignHealthWorkflow tests ----
+// ---- EvaluateCampaignHealth tests ----
 
 func TestCampaignHealth_HallucinationThreshold(t *testing.T) {
-	signal, err := workflows.CampaignHealthWorkflow(model.HealthSnapshot{
+	signal, err := workflows.EvaluateCampaignHealth(model.HealthSnapshot{
 		CampaignID:         "camp-h1",
 		HallucinationCount: 6,
 	})
@@ -234,7 +229,7 @@ func TestCampaignHealth_HallucinationThreshold(t *testing.T) {
 }
 
 func TestCampaignHealth_ProviderFailureRate(t *testing.T) {
-	signal, err := workflows.CampaignHealthWorkflow(model.HealthSnapshot{
+	signal, err := workflows.EvaluateCampaignHealth(model.HealthSnapshot{
 		CampaignID:          "camp-h2",
 		ProviderFailureRate: 0.35,
 	})
@@ -247,7 +242,7 @@ func TestCampaignHealth_ProviderFailureRate(t *testing.T) {
 }
 
 func TestCampaignHealth_SuppressionHitRate(t *testing.T) {
-	signal, err := workflows.CampaignHealthWorkflow(model.HealthSnapshot{
+	signal, err := workflows.EvaluateCampaignHealth(model.HealthSnapshot{
 		CampaignID:         "camp-h3",
 		SuppressionHitRate: 0.35,
 	})
@@ -260,7 +255,7 @@ func TestCampaignHealth_SuppressionHitRate(t *testing.T) {
 }
 
 func TestCampaignHealth_Healthy_NoPause(t *testing.T) {
-	signal, err := workflows.CampaignHealthWorkflow(model.HealthSnapshot{
+	signal, err := workflows.EvaluateCampaignHealth(model.HealthSnapshot{
 		CampaignID:          "camp-h4",
 		HallucinationCount:  3,
 		ProviderFailureRate: 0.10,
@@ -275,7 +270,7 @@ func TestCampaignHealth_Healthy_NoPause(t *testing.T) {
 }
 
 func TestCampaignHealth_MissingCampaignID_Error(t *testing.T) {
-	_, err := workflows.CampaignHealthWorkflow(model.HealthSnapshot{})
+	_, err := workflows.EvaluateCampaignHealth(model.HealthSnapshot{})
 	if err == nil {
 		t.Fatal("expected error for missing campaign_id")
 	}

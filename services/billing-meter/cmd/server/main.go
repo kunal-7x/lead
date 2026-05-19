@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/lead/services/billing-meter/internal/handler"
 	"github.com/lead/services/billing-meter/internal/service"
@@ -21,6 +24,12 @@ func main() {
 		defer closer.Close()
 	}
 	svc := service.New(st)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	go startConsumer(ctx, log, svc)
+
 	mux := http.NewServeMux()
 	handler.New(svc).Mount(mux)
 	addr := envOr("BILLING_METER_ADDR", ":8115")

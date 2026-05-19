@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 
 	libsvault "github.com/lead/libs/go/vault"
 	"github.com/lead/services/notification/internal/adapters"
@@ -16,7 +19,6 @@ import (
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	// Load provider secrets from Vault when available; env-var fallback preserved.
 	loadSecretsFromVault(log)
 
 	st, err := newStore()
@@ -35,6 +37,12 @@ func main() {
 		model.ChannelDiscord:   adapters.NewWebhook(),
 		model.ChannelCRM:       adapters.NewWebhook(),
 	})
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	go startConsumer(ctx, log, svc)
+
 	mux := http.NewServeMux()
 	handler.New(svc).Mount(mux)
 
@@ -62,7 +70,6 @@ func loadSecretsFromVault(log *slog.Logger) {
 		return
 	}
 
-	// Notification provider keys live at capsy/providers/notification.
 	data, err := vc.ReadKV("capsy/providers/notification")
 	if err != nil {
 		log.Warn("vault read notification secrets failed — using env vars", "err", err)
