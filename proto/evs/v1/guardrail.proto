@@ -3,9 +3,9 @@ package evs.v1;
 option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
 
 service GuardrailService {
-  rpc Check(GuardrailCheckRequest) returns (GuardrailCheckResponse);
+  rpc Check(CheckRequest) returns (CheckResponse);
 }
 
-message GuardrailCheckRequest { string tenant_id = 1; string content = 2; string context = 3; repeated string policies = 4; }
-message GuardrailCheckResponse { bool allowed = 1; repeated GuardrailViolation violations = 2; string sanitized_content = 3; }
+message CheckRequest { string tenant_id = 1; string content = 2; string context = 3; repeated string policies = 4; }
+message CheckResponse { bool allowed = 1; repeated GuardrailViolation violations = 2; string sanitized_content = 3; }
 message GuardrailViolation { string policy = 1; string reason = 2; double severity = 3; }

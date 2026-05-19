@@ -1,6 +1,5 @@
 syntax = "proto3";
 package evs.v1;
-import "evs/v1/common.proto";
 option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
 
 service HandoffService {

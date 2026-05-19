@@ -50,24 +50,45 @@ func TestRLS_TenantIsolation(t *testing.T) {
 		t.Fatalf("create user B: %v", err)
 	}
 
-	// Now open a connection scoped to tenant B and verify it cannot see tenant A's user.
-	conn, err := pool.Acquire(ctx)
+	const rlsRole = "tenant_auth_rls_test"
+	_, err = pool.Exec(ctx, fmt.Sprintf(`
+DO $$
+BEGIN
+	IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '%s') THEN
+		CREATE ROLE %s;
+	END IF;
+END
+$$;
+GRANT SELECT ON tenant_users TO %s;`, rlsRole, rlsRole, rlsRole))
 	if err != nil {
-		t.Fatalf("acquire connection: %v", err)
+		t.Fatalf("create restricted test role: %v", err)
 	}
-	defer conn.Release()
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), fmt.Sprintf("REVOKE SELECT ON tenant_users FROM %s", rlsRole))
+	})
 
-	// Set RLS session variables to tenant B.
-	_, err = conn.Exec(ctx, fmt.Sprintf(
+	// Query as a restricted role scoped to tenant B. The postgres superuser
+	// bypasses RLS, so the assertion must run after SET ROLE.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, fmt.Sprintf("SET LOCAL ROLE %s", rlsRole))
+	if err != nil {
+		t.Fatalf("set restricted role: %v", err)
+	}
+	_, err = tx.Exec(ctx, fmt.Sprintf(
 		"SET LOCAL app.current_tenant_id = '%s'; SET LOCAL app.current_user_id = '%s'",
-		tenantB.ID, "system"))
+		tenantB.ID, "00000000-0000-0000-0000-000000000000"))
 	if err != nil {
 		t.Fatalf("set rls vars: %v", err)
 	}
 
 	// Try to read tenant A's user from a tenant B context.
 	var count int
-	err = conn.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		"SELECT COUNT(*) FROM tenant_users WHERE id = $1", userA.ID).Scan(&count)
 	if err != nil {
 		t.Fatalf("query: %v", err)

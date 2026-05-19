@@ -5,15 +5,15 @@ import "google/protobuf/timestamp.proto";
 option go_package = "github.com/lead/libs/go/pb/evs/v1;evsv1";
 
 service NotificationService {
-  rpc Send(SendNotificationRequest) returns (SendNotificationResponse);
-  rpc GetStatus(GetNotificationStatusRequest) returns (GetNotificationStatusResponse);
+  rpc Send(SendRequest) returns (SendResponse);
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
   rpc ListNotifications(ListNotificationsRequest) returns (ListNotificationsResponse);
 }
 
-message SendNotificationRequest { string tenant_id = 1; string contact_id = 2; string channel = 3; string template_id = 4; map<string, string> variables = 5; }
-message SendNotificationResponse { string notification_id = 1; }
-message GetNotificationStatusRequest { string tenant_id = 1; string notification_id = 2; }
-message GetNotificationStatusResponse { string notification_id = 1; string status = 2; google.protobuf.Timestamp sent_at = 3; }
+message SendRequest { string tenant_id = 1; string contact_id = 2; string channel = 3; string template_id = 4; map<string, string> variables = 5; }
+message SendResponse { string notification_id = 1; }
+message GetStatusRequest { string tenant_id = 1; string notification_id = 2; }
+message GetStatusResponse { string notification_id = 1; string status = 2; google.protobuf.Timestamp sent_at = 3; }
 message ListNotificationsRequest { string tenant_id = 1; string contact_id = 2; PageRequest page = 3; }
 message ListNotificationsResponse { repeated Notification notifications = 1; PageResponse page = 2; }
 message Notification { string id = 1; string tenant_id = 2; string contact_id = 3; string channel = 4; string template_id = 5; string status = 6; google.protobuf.Timestamp created_at = 7; }

@@ -85,11 +85,11 @@ func (svc *Service) issueJWT(ctx context.Context, tenantID, userID string, roles
 		return "", fmt.Errorf("get signing key: %w", err)
 	}
 	claims := jwt.MapClaims{
-		"tid":  tenantID,
-		"uid":  userID,
+		"tid":   tenantID,
+		"uid":   userID,
 		"roles": roles,
-		"exp":  time.Now().Add(ttl).Unix(),
-		"iat":  time.Now().Unix(),
+		"exp":   time.Now().Add(ttl).Unix(),
+		"iat":   time.Now().Unix(),
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return tok.SignedString(key)
@@ -250,8 +250,9 @@ func (svc *Service) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		_ = svc.store.AssignRole(r.Context(), req.TenantID, u.ID, roleID)
 	}
 	svc.auditWrite(r.Context(), req.TenantID, u.ID, u.Email, "CreateUser", "user", u.ID, nil, map[string]any{"email": u.Email}, r.RemoteAddr)
-	u.PasswordHash = ""
-	writeJSON(w, http.StatusOK, map[string]any{"user": u})
+	safeUser := *u
+	safeUser.PasswordHash = ""
+	writeJSON(w, http.StatusOK, map[string]any{"user": &safeUser})
 }
 
 func (svc *Service) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -402,8 +403,8 @@ func (svc *Service) handleEnroll2FA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"secret":   key.Secret(),
-		"otpauth":  key.URL(),
+		"secret":  key.Secret(),
+		"otpauth": key.URL(),
 	})
 }
 
