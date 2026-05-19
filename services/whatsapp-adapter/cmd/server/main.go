@@ -22,7 +22,14 @@ import (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	st := store.NewFake()
+	st, err := newStore()
+	if err != nil {
+		logger.Error("store init", "err", err)
+		os.Exit(1)
+	}
+	if closer, ok := st.(interface{ Close() }); ok {
+		defer closer.Close()
+	}
 	metaClient := meta.NewCloudClient(envOr("META_GRAPH_URL", "https://graph.facebook.com/v20.0"), http.DefaultClient)
 	consentChecker := consent.StaticChecker{Allowed: true}
 	svc := service.New(st, consentChecker, metaClient)
@@ -73,6 +80,13 @@ func main() {
 		logger.Error("shutdown error", "err", err)
 	}
 	logger.Info("whatsapp-adapter stopped")
+}
+
+func newStore() (store.Store, error) {
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		return store.NewPostgres(dsn)
+	}
+	return store.NewFake(), nil
 }
 
 func envOr(key, fallback string) string {

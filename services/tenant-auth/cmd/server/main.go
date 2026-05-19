@@ -1,13 +1,11 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/lead/services/tenant-auth/internal/ratelimit"
@@ -19,33 +17,23 @@ import (
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		log.Error("DATABASE_URL not set")
-		os.Exit(1)
-	}
-	pool, err := pgxpool.New(context.Background(), dsn)
+	st, err := newStore()
 	if err != nil {
-		log.Error("connect db", "error", err)
+		log.Error("store init", "error", err)
 		os.Exit(1)
 	}
-	defer pool.Close()
-
-	redisAddr := os.Getenv("REDIS_URL")
-	if redisAddr == "" {
-		redisAddr = "redis://localhost:6379"
+	if closer, ok := st.(interface{ Close() }); ok {
+		defer closer.Close()
 	}
-	opt, err := redis.ParseURL(redisAddr)
+
+	rl, err := newLimiter()
 	if err != nil {
-		log.Error("parse redis url", "error", err)
+		log.Error("rate limiter init", "error", err)
 		os.Exit(1)
 	}
-	rdb := redis.NewClient(opt)
 
-	pg := store.NewPG(pool)
 	keys := vault.NewStatic("")
-	rl := ratelimit.NewRedis(rdb)
-	svc := service.New(pg, keys, rl)
+	svc := service.New(st, keys, rl)
 
 	mux := http.NewServeMux()
 	svc.Mount(mux)
@@ -60,4 +48,23 @@ func main() {
 		log.Error("server error", "error", err)
 		os.Exit(1)
 	}
+}
+
+func newStore() (store.Store, error) {
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		return store.NewPostgres(dsn)
+	}
+	return store.NewFake(), nil
+}
+
+func newLimiter() (ratelimit.Limiter, error) {
+	redisAddr := os.Getenv("REDIS_URL")
+	if redisAddr == "" {
+		return &ratelimit.NoOp{}, nil
+	}
+	opt, err := redis.ParseURL(redisAddr)
+	if err != nil {
+		return nil, err
+	}
+	return ratelimit.NewRedis(redis.NewClient(opt)), nil
 }

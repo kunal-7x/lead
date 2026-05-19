@@ -16,12 +16,17 @@ func main() {
 	}
 
 	// Use fake store unless DATABASE_URL is set.
-	// In production, swap this for a real postgres store.
 	var s store.Store
 	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
-		log.Printf("DATABASE_URL set but postgres store not implemented; using fake store")
+		pg, err := store.NewPostgres(dsn)
+		if err != nil {
+			log.Fatalf("connect postgres: %v", err)
+		}
+		defer pg.Close()
+		s = pg
+	} else {
+		s = store.NewFake()
 	}
-	s = store.NewFake()
 
 	h := handler.New(s)
 

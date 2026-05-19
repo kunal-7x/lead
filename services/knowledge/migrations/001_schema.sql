@@ -1,5 +1,3 @@
-CREATE EXTENSION IF NOT EXISTS pgvector;
-
 CREATE TABLE projects (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL,
@@ -30,7 +28,7 @@ CREATE TABLE project_facts (
     version_id UUID NOT NULL REFERENCES project_kb_versions(id),
     content TEXT NOT NULL,
     metadata JSONB,
-    embedding VECTOR(1536),
+    embedding REAL[],
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -39,7 +37,7 @@ CREATE TABLE project_faqs (
     version_id UUID NOT NULL REFERENCES project_kb_versions(id),
     question TEXT NOT NULL,
     answer TEXT NOT NULL,
-    embedding VECTOR(1536),
+    embedding REAL[],
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

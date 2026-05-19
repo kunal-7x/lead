@@ -21,7 +21,13 @@ func main() {
 
 	plivoAuthToken := os.Getenv("PLIVO_AUTH_TOKEN")
 
-	s := store.NewFake()
+	s, err := newStore()
+	if err != nil {
+		log.Fatalf("connect store: %v", err)
+	}
+	if closer, ok := s.(interface{ Close() }); ok {
+		defer closer.Close()
+	}
 	pub := outbox.NewFakePublisher()
 
 	adapters := []adapter.Telephony{
@@ -38,4 +44,11 @@ func main() {
 	if err := http.ListenAndServe(addr, h.Routes()); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func newStore() (store.Store, error) {
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		return store.NewPostgres(dsn)
+	}
+	return store.NewFake(), nil
 }

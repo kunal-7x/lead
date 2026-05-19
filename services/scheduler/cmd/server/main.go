@@ -16,7 +16,13 @@ func main() {
 		addr = ":8107"
 	}
 
-	s := store.NewFake()
+	s, err := newStore()
+	if err != nil {
+		log.Fatalf("connect store: %v", err)
+	}
+	if closer, ok := s.(interface{ Close() }); ok {
+		defer closer.Close()
+	}
 	p := picker.New(s)
 	h := handler.NewWithTelephony(p, envOr("TELEPHONY_URL", "http://localhost:8108"), http.DefaultClient)
 
@@ -24,6 +30,13 @@ func main() {
 	if err := http.ListenAndServe(addr, h.Routes()); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func newStore() (store.Store, error) {
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		return store.NewPostgres(dsn)
+	}
+	return store.NewFake(), nil
 }
 
 func envOr(key, fallback string) string {

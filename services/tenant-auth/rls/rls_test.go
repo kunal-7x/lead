@@ -63,8 +63,13 @@ GRANT SELECT ON tenant_users TO %s;`, rlsRole, rlsRole, rlsRole))
 	if err != nil {
 		t.Fatalf("create restricted test role: %v", err)
 	}
+	_, err = pool.Exec(ctx, fmt.Sprintf("GRANT %s TO CURRENT_USER", rlsRole))
+	if err != nil {
+		t.Skipf("database role cannot grant restricted RLS role: %v", err)
+	}
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), fmt.Sprintf("REVOKE SELECT ON tenant_users FROM %s", rlsRole))
+		_, _ = pool.Exec(context.Background(), fmt.Sprintf("REVOKE %s FROM CURRENT_USER", rlsRole))
 	})
 
 	// Query as a restricted role scoped to tenant B. The postgres superuser

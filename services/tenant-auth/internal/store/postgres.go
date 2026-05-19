@@ -7,12 +7,32 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/lead/libs/go/pgjson"
 	"github.com/lead/services/tenant-auth/internal/model"
 )
 
 // PG is a PostgreSQL-backed Store.
 type PG struct {
 	pool *pgxpool.Pool
+}
+
+type PostgresStore struct {
+	db *pgxpool.Pool
+	*PG
+}
+
+var _ Store = (*PostgresStore)(nil)
+
+func NewPostgres(dsn string) (*PostgresStore, error) {
+	pool, err := pgjson.OpenPool(context.Background(), dsn, "tenant_auth")
+	if err != nil {
+		return nil, err
+	}
+	return &PostgresStore{db: pool, PG: NewPG(pool)}, nil
+}
+
+func (p *PostgresStore) Close() {
+	p.db.Close()
 }
 
 func NewPG(pool *pgxpool.Pool) *PG {

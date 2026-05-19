@@ -18,8 +18,14 @@ import (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	// In production, swap store.NewFake() for a Postgres-backed store.
-	st := store.NewFake()
+	st, err := newStore()
+	if err != nil {
+		logger.Error("store init", "err", err)
+		os.Exit(1)
+	}
+	if closer, ok := st.(interface{ Close() }); ok {
+		defer closer.Close()
+	}
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RequestID)
@@ -58,6 +64,13 @@ func main() {
 		logger.Error("shutdown error", "err", err)
 	}
 	logger.Info("lead-identity stopped")
+}
+
+func newStore() (store.Store, error) {
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		return store.NewPostgres(dsn)
+	}
+	return store.NewFake(), nil
 }
 
 func envOr(key, fallback string) string {

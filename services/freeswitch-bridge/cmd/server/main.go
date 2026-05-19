@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
+
+	"github.com/lead/services/freeswitch-bridge/internal/store"
 )
 
 func main() {
@@ -21,11 +24,36 @@ func main() {
 	})
 
 	ctx := context.Background()
-	_ = ctx
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		pg, err := store.NewPostgres(dsn)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "freeswitch-bridge postgres: %v\n", err)
+			os.Exit(1)
+		}
+		defer pg.Close()
+		if err := pg.SaveInstance(ctx, store.Instance{
+			ID:        "local",
+			Host:      envOr("FREESWITCH_HOST", "localhost"),
+			SIPPort:   5060,
+			ESLPort:   8021,
+			Healthy:   true,
+			CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "freeswitch-bridge save instance: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	fmt.Printf("freeswitch-bridge listening on %s\n", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		fmt.Fprintf(os.Stderr, "freeswitch-bridge: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func envOr(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }

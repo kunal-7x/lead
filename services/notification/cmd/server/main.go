@@ -14,7 +14,14 @@ import (
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	st := store.NewFake()
+	st, err := newStore()
+	if err != nil {
+		log.Error("store init", "error", err)
+		os.Exit(1)
+	}
+	if closer, ok := st.(interface{ Close() }); ok {
+		defer closer.Close()
+	}
 	svc := service.New(st, map[model.Channel]adapters.Adapter{
 		model.ChannelDashboard: adapters.NewDashboard(),
 		model.ChannelWhatsApp:  adapters.NewWhatsApp(),
@@ -32,6 +39,13 @@ func main() {
 		log.Error("server error", "error", err)
 		os.Exit(1)
 	}
+}
+
+func newStore() (store.Store, error) {
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		return store.NewPostgres(dsn)
+	}
+	return store.NewFake(), nil
 }
 
 func envOr(key, fallback string) string {
