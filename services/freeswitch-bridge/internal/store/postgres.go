@@ -30,6 +30,14 @@ type uploadRecord struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type archiveRecord struct {
+	ID         string    `json:"id"`
+	TenantID   string    `json:"tenant_id"`
+	SessionID  string    `json:"session_id"`
+	B2Key      string    `json:"b2_key"`
+	ArchivedAt time.Time `json:"archived_at"`
+}
+
 type sessionRecord struct {
 	CallUUID  string     `json:"call_uuid"`
 	StartedAt *time.Time `json:"started_at,omitempty"`
@@ -71,6 +79,17 @@ func (p *PostgresStore) SaveUpload(ctx context.Context, tenantID, sessionID, spa
 		CreatedAt: time.Now().UTC(),
 	}
 	return p.kv.Put(ctx, "recording_uploads", record.ID, record)
+}
+
+func (p *PostgresStore) SaveArchive(ctx context.Context, tenantID, sessionID, b2Key string) error {
+	record := archiveRecord{
+		ID:         pgkv.NewID("archive"),
+		TenantID:   tenantID,
+		SessionID:  sessionID,
+		B2Key:      b2Key,
+		ArchivedAt: time.Now().UTC(),
+	}
+	return p.kv.Put(ctx, "recording_archives", record.ID, record)
 }
 
 func (p *PostgresStore) SetSessionStarted(ctx context.Context, callUUID string) error {

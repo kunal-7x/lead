@@ -47,5 +47,43 @@ func (s *PostgresRecordingStore) SaveUpload(ctx context.Context, tenantID, sessi
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	return pgjson.Put(ctx, s.db, "upload", record.ID, tenantID, record)
+	if err := pgjson.Put(ctx, s.db, "upload", record.ID, tenantID, record); err != nil {
+		return err
+	}
+	// Also reflect spaces_key + size into the queue row so dashboards
+	// can read both signals without a join.
+	_, _ = s.db.Exec(ctx, `
+		UPDATE recording_upload_queue
+		SET spaces_key = $1, size_bytes = $2, status = 'uploaded', updated_at = now()
+		WHERE tenant_id = $3 AND session_id = $4
+	`, spacesKey, sizeBytes, tenantID, sessionID)
+	return nil
+}
+
+// SaveArchive records the B2 archive key for a given recording.
+func (s *PostgresRecordingStore) SaveArchive(ctx context.Context, tenantID, sessionID, b2Key string) error {
+	now := time.Now().UTC()
+	type archiveRecord struct {
+		ID         string    `json:"id"`
+		TenantID   string    `json:"tenant_id"`
+		SessionID  string    `json:"session_id"`
+		B2Key      string    `json:"b2_key"`
+		ArchivedAt time.Time `json:"archived_at"`
+	}
+	rec := archiveRecord{
+		ID:         tenantID + ":" + sessionID,
+		TenantID:   tenantID,
+		SessionID:  sessionID,
+		B2Key:      b2Key,
+		ArchivedAt: now,
+	}
+	if err := pgjson.Put(ctx, s.db, "archive", rec.ID, tenantID, rec); err != nil {
+		return err
+	}
+	_, _ = s.db.Exec(ctx, `
+		UPDATE recording_upload_queue
+		SET b2_key = $1, archived_at = now(), updated_at = now()
+		WHERE tenant_id = $2 AND session_id = $3
+	`, b2Key, tenantID, sessionID)
+	return nil
 }
