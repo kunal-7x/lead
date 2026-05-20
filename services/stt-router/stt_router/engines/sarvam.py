@@ -35,7 +35,7 @@ class SarvamEngine(STTEngine):
 
         headers = {"API-Subscription-Key": self._api_key}
         files = {"file": ("audio.wav", _wrap_pcm_wav(pcm, sample_rate=16000), "audio/wav")}
-        data = {"language_code": _lang_code(lang), "model": "saarika:v2"}
+        data = {"language_code": _lang_code(lang), "model": "saaras:v2.5"}
 
         resp = await self._client.post(_BATCH_URL, headers=headers, files=files, data=data)
         resp.raise_for_status()

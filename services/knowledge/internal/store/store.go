@@ -28,6 +28,11 @@ type Store interface {
 	AddOffer(ctx context.Context, o *model.Offer) error
 	AddDisclaimer(ctx context.Context, d *model.Disclaimer) error
 
+	// Listings (used by the embedding indexer at publish time)
+	ListFactsByVersion(ctx context.Context, versionID string) ([]*model.Fact, error)
+	ListFAQsByVersion(ctx context.Context, versionID string) ([]*model.FAQ, error)
+	ListDisclaimersByVersion(ctx context.Context, versionID string) ([]*model.Disclaimer, error)
+
 	// Approval history
 	RecordApprovalEvent(ctx context.Context, e *model.ApprovalEvent) error
 

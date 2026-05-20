@@ -124,7 +124,17 @@ class ElevenLabsEngine(TTSEngine):
         return strip_wav_header(resp.content)
 
     async def health_check(self) -> bool:
-        return bool(self._api_key)
+        """Real ping: list user — cheap and authenticates the key."""
+        if not self._api_key:
+            return False
+        try:
+            resp = await self._client.get(
+                "https://api.elevenlabs.io/v1/user",
+                headers={"xi-api-key": self._api_key}, timeout=3.0,
+            )
+            return resp.status_code == 200
+        except Exception:
+            return False
 
     def voices(self) -> list[VoiceInfo]:
         return [VoiceInfo(id="21m00Tcm4TlvDq8ikWAM", name="Rachel", lang="en", engine="elevenlabs")]

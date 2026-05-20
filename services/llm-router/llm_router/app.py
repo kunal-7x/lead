@@ -7,12 +7,13 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from llm_router.backends.groq import GroqLlamaBackend
+from llm_router.backends.sarvam import SarvamLLMBackend
 from llm_router.backends.vllm import VLLMBackend
 from llm_router.backends.openai_backend import (
     OpenAIBackend, AnthropicBackend, OpenRouterBackend, GoogleGeminiBackend
 )
 from llm_router.kb_client import HttpKbRetriever
-from llm_router.models import LLMRequest
+from llm_router.models import HealthResponse, LLMRequest
 from llm_router.router import LLMRouter
 from llm_router.switcher import ModelSwitcher
 
@@ -26,6 +27,7 @@ def _build_router() -> LLMRouter:
     kb = HttpKbRetriever()
     backends = {
         "groq_llama": GroqLlamaBackend(),
+        "sarvam_llm": SarvamLLMBackend(),
         "qwen3_32b": VLLMBackend("qwen3_32b"),
         "llama3_70b": VLLMBackend("llama3_70b"),
         "mistral_7b": VLLMBackend("mistral_7b"),
@@ -52,6 +54,13 @@ async def healthz() -> dict:
 async def list_models() -> dict:
     from llm_router.switcher import VALID_MODELS, DEFAULT_MODEL
     return {"models": sorted(VALID_MODELS), "default": DEFAULT_MODEL}
+
+
+@app.get("/v1/health/engines", response_model=HealthResponse)
+async def engine_health() -> HealthResponse:
+    assert _router is not None
+    engines = await _router.engine_health()
+    return HealthResponse(engines=engines)
 
 
 @app.post("/v1/llm/generate")

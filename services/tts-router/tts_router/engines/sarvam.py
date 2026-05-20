@@ -14,12 +14,17 @@ _URL = "https://api.sarvam.ai/text-to-speech"
 _TIMEOUT = 10.0
 
 _VOICES = [
-    VoiceInfo(id="meera", name="Meera", lang="hi-en", engine="sarvam_bulbul"),
-    VoiceInfo(id="pavithra", name="Pavithra", lang="hi-en", engine="sarvam_bulbul"),
-    VoiceInfo(id="maitreyi", name="Maitreyi", lang="hi-en", engine="sarvam_bulbul"),
-    VoiceInfo(id="arvind", name="Arvind", lang="hi-en", engine="sarvam_bulbul"),
-    VoiceInfo(id="amol", name="Amol", lang="mr-IN", engine="sarvam_bulbul"),
+    VoiceInfo(id="anushka", name="Anushka", lang="hi-en", engine="sarvam_bulbul"),
+    VoiceInfo(id="manisha", name="Manisha", lang="hi-en", engine="sarvam_bulbul"),
+    VoiceInfo(id="vidya", name="Vidya", lang="hi-en", engine="sarvam_bulbul"),
+    VoiceInfo(id="arya", name="Arya", lang="hi-en", engine="sarvam_bulbul"),
+    VoiceInfo(id="abhilash", name="Abhilash", lang="hi-en", engine="sarvam_bulbul"),
+    VoiceInfo(id="karun", name="Karun", lang="hi-en", engine="sarvam_bulbul"),
+    VoiceInfo(id="hitesh", name="Hitesh", lang="hi-en", engine="sarvam_bulbul"),
 ]
+
+_DEFAULT_SPEAKER = "anushka"
+_VALID_SPEAKERS = {v.id for v in _VOICES}
 
 
 class SarvamBulbulEngine(TTSEngine):
@@ -36,16 +41,17 @@ class SarvamBulbulEngine(TTSEngine):
         self._client = httpx.AsyncClient(timeout=timeout)
 
     async def synthesize(self, text: str, voice_id: str, lang: str) -> bytes:
+        speaker = voice_id if voice_id in _VALID_SPEAKERS else _DEFAULT_SPEAKER
         payload = {
             "inputs": [text],
             "target_language_code": _lang_code(lang),
-            "speaker": voice_id,
+            "speaker": speaker,
             "pitch": 0,
             "pace": 1.0,
             "loudness": 1.5,
             "speech_sample_rate": 8000,
             "enable_preprocessing": True,
-            "model": "bulbul:v1",
+            "model": "bulbul:v2",
         }
         headers = {"API-Subscription-Key": self._api_key}
         resp = await self._client.post(_URL, json=payload, headers=headers)
@@ -56,7 +62,24 @@ class SarvamBulbulEngine(TTSEngine):
         return strip_wav_header(wav)
 
     async def health_check(self) -> bool:
-        return bool(self._api_key)
+        """Real ping: tiny TTS call. Cached at the router layer (5s TTL)."""
+        if not self._api_key:
+            return False
+        try:
+            payload = {
+                "inputs": ["ok"],
+                "target_language_code": "hi-IN",
+                "speaker": _DEFAULT_SPEAKER,
+                "speech_sample_rate": 8000,
+                "model": "bulbul:v2",
+            }
+            resp = await self._client.post(
+                _URL, json=payload,
+                headers={"API-Subscription-Key": self._api_key}, timeout=3.0,
+            )
+            return resp.status_code == 200
+        except Exception:
+            return False
 
     def voices(self) -> list[VoiceInfo]:
         return _VOICES

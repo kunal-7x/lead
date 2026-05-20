@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, Response
 from tts_router.cache import RedisAudioCache
 from tts_router.engines.sarvam import SarvamBulbulEngine
 from tts_router.engines.kokoro import KokoroEngine, IndicParlerEngine, IndicF5Engine, ElevenLabsEngine
-from tts_router.models import TTSRequest, WarmRequest
+from tts_router.models import HealthResponse, TTSRequest, WarmRequest
 from tts_router.router import TTSRouter
 from tts_router.switcher import EngineSwitcher
 
@@ -40,6 +40,13 @@ async def startup() -> None:
 @app.get("/healthz")
 async def healthz() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/v1/health/engines", response_model=HealthResponse)
+async def engine_health() -> HealthResponse:
+    assert _router is not None
+    engines = await _router.engine_health()
+    return HealthResponse(engines=engines)
 
 
 @app.get("/v1/tts/voices")

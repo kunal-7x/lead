@@ -32,7 +32,16 @@ class OpenAIBackend(LLMBackend):
         return BrainOutput.model_validate_json(content), usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
 
     async def health_check(self) -> bool:
-        return bool(self._api_key)
+        if not self._api_key:
+            return False
+        try:
+            resp = await self._client.get(
+                "https://api.openai.com/v1/models",
+                headers={"Authorization": f"Bearer {self._api_key}"}, timeout=3.0,
+            )
+            return resp.status_code == 200
+        except Exception:
+            return False
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -61,7 +70,17 @@ class AnthropicBackend(LLMBackend):
         return BrainOutput.model_validate_json(content), usage.get("input_tokens", 0), usage.get("output_tokens", 0)
 
     async def health_check(self) -> bool:
-        return bool(self._api_key)
+        if not self._api_key:
+            return False
+        try:
+            resp = await self._client.get(
+                "https://api.anthropic.com/v1/models",
+                headers={"x-api-key": self._api_key, "anthropic-version": "2023-06-01"},
+                timeout=3.0,
+            )
+            return resp.status_code == 200
+        except Exception:
+            return False
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -89,7 +108,16 @@ class OpenRouterBackend(LLMBackend):
         return BrainOutput.model_validate_json(content), usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
 
     async def health_check(self) -> bool:
-        return bool(self._api_key)
+        if not self._api_key:
+            return False
+        try:
+            resp = await self._client.get(
+                "https://openrouter.ai/api/v1/models",
+                headers={"Authorization": f"Bearer {self._api_key}"}, timeout=3.0,
+            )
+            return resp.status_code == 200
+        except Exception:
+            return False
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -118,7 +146,16 @@ class GoogleGeminiBackend(LLMBackend):
         return BrainOutput.model_validate_json(content), 0, 0
 
     async def health_check(self) -> bool:
-        return bool(self._api_key)
+        if not self._api_key:
+            return False
+        try:
+            resp = await self._client.get(
+                f"https://generativelanguage.googleapis.com/v1beta/models?key={self._api_key}",
+                timeout=3.0,
+            )
+            return resp.status_code == 200
+        except Exception:
+            return False
 
     async def aclose(self) -> None:
         await self._client.aclose()

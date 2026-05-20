@@ -35,3 +35,14 @@ class WarmRequest(BaseModel):
     voice_id: str = "meera"
     tenant_id: str
     project_id: str = ""
+
+
+class EngineHealth(BaseModel):
+    name: str
+    available: bool
+    p95_latency_ms: int | None = None
+    last_error: str | None = None
+
+
+class HealthResponse(BaseModel):
+    engines: list[EngineHealth]

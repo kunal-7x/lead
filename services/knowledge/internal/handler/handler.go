@@ -5,14 +5,18 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/lead/services/knowledge/internal/embed"
 	"github.com/lead/services/knowledge/internal/kb"
 	"github.com/lead/services/knowledge/internal/model"
 	"github.com/lead/services/knowledge/internal/store"
+	"github.com/lead/services/knowledge/internal/vector"
 )
 
 type Handler struct {
-	store  store.Store
-	kbSvc  *kb.Service
+	store    store.Store
+	kbSvc    *kb.Service
+	embedder embed.Provider // nil → /retrieve falls back to legacy precomputed-vector mode
+	qdrant   *vector.Client // nil → /retrieve uses in-Postgres cosine scan
 }
 
 func New(s store.Store) *Handler {
@@ -22,8 +26,20 @@ func New(s store.Store) *Handler {
 	}
 }
 
+// WithVector wires the embedder + Qdrant client into the handler. After this
+// /retrieve accepts a `query` text field and performs real vector search.
+func (h *Handler) WithVector(e embed.Provider, q *vector.Client) *Handler {
+	h.embedder = e
+	h.qdrant = q
+	h.kbSvc = h.kbSvc.WithIndexer(newIndexerAdapter(h.store, e, q))
+	return h
+}
+
 func (h *Handler) Router() http.Handler {
 	r := chi.NewRouter()
+
+	r.Get("/healthz", h.healthz)
+	r.Get("/readyz", h.readyz)
 
 	r.Route("/v1/knowledge", func(r chi.Router) {
 		// Projects
@@ -52,6 +68,31 @@ func (h *Handler) Router() http.Handler {
 	})
 
 	return r
+}
+
+func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// readyz also probes the embedding backend and Qdrant. Real ping, not just
+// a constant — so a misconfigured deploy is caught at boot, not first query.
+func (h *Handler) readyz(w http.ResponseWriter, r *http.Request) {
+	body := map[string]any{"status": "ok"}
+	if h.embedder != nil {
+		body["embedder"] = h.embedder.Name()
+		body["embedding_dim"] = h.embedder.Dim()
+	}
+	if h.qdrant != nil {
+		if err := h.qdrant.Healthy(r.Context()); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"status": "qdrant_unavailable",
+				"error":  err.Error(),
+			})
+			return
+		}
+		body["qdrant"] = "ok"
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -291,7 +332,8 @@ func (h *Handler) publishVersion(w http.ResponseWriter, r *http.Request) {
 // Retrieval
 
 type retrieveRequest struct {
-	QueryEmbedding []float32 `json:"query_embedding"`
+	Query          string    `json:"query"`           // preferred: raw text, server-side embed
+	QueryEmbedding []float32 `json:"query_embedding"` // legacy: pre-computed vector
 	TopK           int       `json:"top_k"`
 }
 
@@ -305,12 +347,64 @@ func (h *Handler) retrieveKb(w http.ResponseWriter, r *http.Request) {
 	if req.TopK <= 0 {
 		req.TopK = 8
 	}
+
+	// Path A — vector backend wired AND a real query text supplied → Qdrant.
+	if h.embedder != nil && h.qdrant != nil && req.Query != "" {
+		result, err := h.retrieveViaQdrant(r, projectID, req.Query, req.TopK)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+
+	// Path B — caller already has an embedding (legacy path / internal callers).
 	result, err := h.store.RetrieveKb(r.Context(), projectID, req.QueryEmbedding, req.TopK)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *Handler) retrieveViaQdrant(r *http.Request, projectID, query string, topK int) (*model.RetrieveResult, error) {
+	ctx := r.Context()
+	project, err := h.store.GetProject(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if project.ActiveVersionID == "" {
+		return &model.RetrieveResult{}, nil
+	}
+	vec, err := h.embedder.Embed(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	collection := vector.CollectionFor(project.TenantID)
+	filter := map[string]any{
+		"must": []map[string]any{
+			vector.MatchKeyword("project_id", project.ID),
+			vector.MatchKeyword("kb_version_id", project.ActiveVersionID),
+		},
+	}
+	hits, err := h.qdrant.Search(ctx, collection, vec, topK, filter)
+	if err != nil {
+		return nil, err
+	}
+	chunks := make([]model.RetrievedChunk, 0, len(hits))
+	for _, hit := range hits {
+		payload := hit.Payload
+		text, _ := payload["text"].(string)
+		srcType, _ := payload["source_type"].(string)
+		chunks = append(chunks, model.RetrievedChunk{
+			VersionID: project.ActiveVersionID,
+			ChunkType: srcType,
+			Content:   text,
+			Score:     hit.Score,
+		})
+	}
+	return &model.RetrieveResult{VersionStamp: project.ActiveVersionID, Chunks: chunks}, nil
 }
 
 // Pronunciations

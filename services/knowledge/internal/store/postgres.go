@@ -231,6 +231,51 @@ func (p *PostgresStore) AddDisclaimer(ctx context.Context, disclaimer *model.Dis
 	return p.kv.Put(ctx, "disclaimers", disclaimer.ID, *disclaimer)
 }
 
+func (p *PostgresStore) ListFactsByVersion(ctx context.Context, versionID string) ([]*model.Fact, error) {
+	items, err := pgkv.List[model.Fact](ctx, p.kv, "facts")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*model.Fact, 0, len(items))
+	for _, it := range items {
+		if it.VersionID == versionID {
+			cp := it
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
+func (p *PostgresStore) ListFAQsByVersion(ctx context.Context, versionID string) ([]*model.FAQ, error) {
+	items, err := pgkv.List[model.FAQ](ctx, p.kv, "faqs")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*model.FAQ, 0, len(items))
+	for _, it := range items {
+		if it.VersionID == versionID {
+			cp := it
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
+func (p *PostgresStore) ListDisclaimersByVersion(ctx context.Context, versionID string) ([]*model.Disclaimer, error) {
+	items, err := pgkv.List[model.Disclaimer](ctx, p.kv, "disclaimers")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*model.Disclaimer, 0, len(items))
+	for _, it := range items {
+		if it.VersionID == versionID {
+			cp := it
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
 func (p *PostgresStore) RecordApprovalEvent(ctx context.Context, event *model.ApprovalEvent) error {
 	if event.ID == "" {
 		event.ID = pgkv.NewID("")

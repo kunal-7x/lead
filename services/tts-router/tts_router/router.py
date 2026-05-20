@@ -6,7 +6,7 @@ import time
 from tts_router.audio import ensure_8khz_l16
 from tts_router.cache import AudioCache, cache_key
 from tts_router.engines.base import TTSEngine
-from tts_router.models import TTSRequest, TTSResult
+from tts_router.models import EngineHealth, TTSRequest, TTSResult
 from tts_router.pronunciation import normalize
 from tts_router.switcher import EngineSwitcher
 
@@ -99,6 +99,16 @@ class TTSRouter:
             if result.tier_used != "silence":
                 count += 1
         return count
+
+    async def engine_health(self) -> list[EngineHealth]:
+        results = []
+        for name, engine in self._engines.items():
+            try:
+                ok = await asyncio.wait_for(engine.health_check(), timeout=5.0)
+            except Exception:
+                ok = False
+            results.append(EngineHealth(name=name, available=ok))
+        return results
 
     def all_voices(self) -> list:
         voices = []

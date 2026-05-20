@@ -6,8 +6,17 @@ import time
 
 from llm_router.backends.base import LLMBackend
 from llm_router.kb_client import KbRetriever
-from llm_router.models import BrainOutput, LLMRequest, LLMResponse, FALLBACK_BRAIN
+from llm_router.models import BrainOutput, EngineHealth, LLMRequest, LLMResponse, FALLBACK_BRAIN
 from llm_router.switcher import ModelSwitcher
+
+try:
+    from evs_common.langfuse_tracer import trace_span
+except Exception:  # evs_common optional outside repo
+    import contextlib
+
+    @contextlib.asynccontextmanager
+    async def trace_span(*a, **kw):  # type: ignore
+        yield {"output": None}
 
 _TIMEOUT_S = 20.0
 
@@ -34,7 +43,7 @@ class LLMRouter:
         self._switcher = switcher
         self._kb = kb
 
-    async def generate(self, req: LLMRequest) -> LLMResponse:
+    async def generate(self, req: LLMRequest, trace_id: str | None = None) -> LLMResponse:
         t0 = time.time()
 
         # Always retrieve KB before LLM call
@@ -51,9 +60,17 @@ class LLMRouter:
             if backend is None:
                 continue
             try:
-                brain, pt, ct = await asyncio.wait_for(
-                    backend.generate(req, kb_context), timeout=_TIMEOUT_S
-                )
+                async with trace_span(
+                    f"llm.{model_name}",
+                    trace_id=trace_id,
+                    input={"user_turn": req.user_turn, "lang": req.lang},
+                    metadata={"tenant_id": req.tenant_id, "session_id": req.session_id},
+                ) as span:
+                    brain, pt, ct = await asyncio.wait_for(
+                        backend.generate(req, kb_context), timeout=_TIMEOUT_S
+                    )
+                    span["output"] = {"reply": brain.reply, "lead_score": brain.lead_score,
+                                      "next_action": brain.next_action}
                 return LLMResponse(
                     brain=brain,
                     model_used=model_name,
@@ -71,6 +88,16 @@ class LLMRouter:
             model_used="fallback",
             latency_ms=int((time.time() - t0) * 1000),
         )
+
+    async def engine_health(self) -> list[EngineHealth]:
+        results = []
+        for name, backend in self._backends.items():
+            try:
+                ok = await asyncio.wait_for(backend.health_check(), timeout=5.0)
+            except Exception:
+                ok = False
+            results.append(EngineHealth(name=name, available=ok))
+        return results
 
 
 def _format_kb(chunks) -> str:

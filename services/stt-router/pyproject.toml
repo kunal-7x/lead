@@ -12,7 +12,11 @@ dependencies = [
     "redis[asyncio]>=5.0.0",
     "python-multipart>=0.0.9",
     "structlog>=24.1.0",
+    "evs-common",
 ]
+
+[tool.uv.sources]
+evs-common = { workspace = true }
 
 [project.optional-dependencies]
 test = [

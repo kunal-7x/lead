@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from typing import Literal
-from pydantic import BaseModel, Field
+from typing import Any, Literal
+from pydantic import BaseModel, Field, model_validator
 
 
 class Budget(BaseModel):
@@ -10,8 +10,29 @@ class Budget(BaseModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
+_NULLISH = {"null", "none", "nil", "n/a", "na", ""}
+
+
+def _scrub_nullish(values: dict[str, Any]) -> dict[str, Any]:
+    """LLMs sometimes emit "null"/"none" strings for Optional fields.
+    Coerce those to actual None so Pydantic validation passes.
+    """
+    for k, v in list(values.items()):
+        if isinstance(v, str) and v.strip().lower() in _NULLISH:
+            values[k] = None
+    return values
+
+
 class BrainOutput(BaseModel):
     """Enforced output schema from the LLM. Never changed without migration."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_nullish_strings(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            return _scrub_nullish(data)
+        return data
+
     reply: str
     lead_status: Literal[
         "hot", "warm", "cold", "call_later", "not_interested",
@@ -59,6 +80,17 @@ class LLMResponse(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     latency_ms: int = 0
+
+
+class EngineHealth(BaseModel):
+    name: str
+    available: bool
+    p95_latency_ms: int | None = None
+    last_error: str | None = None
+
+
+class HealthResponse(BaseModel):
+    engines: list[EngineHealth]
 
 
 FALLBACK_BRAIN = BrainOutput(

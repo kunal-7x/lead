@@ -8,9 +8,19 @@ from stt_router.engines.base import STTEngine
 from stt_router.models import STTResult, EngineHealth
 from stt_router.switcher import EngineSwitcher
 
+try:
+    from evs_common.langfuse_tracer import trace_span
+except Exception:
+    import contextlib
+
+    @contextlib.asynccontextmanager
+    async def trace_span(*a, **kw):  # type: ignore
+        yield {"output": None}
+
 _TIMEOUT_S = 1.5        # mark engine unhealthy after 1.5s
 _UNHEALTHY_TTL_S = 60   # stay unhealthy for 60s
 _MIN_CONFIDENCE = 0.55  # re-run on next engine if confidence < this
+_HEALTH_CACHE_TTL_S = 5.0  # cache health ping results for 5 seconds
 
 
 class STTRouter:
@@ -37,6 +47,7 @@ class STTRouter:
         self._engines = engines
         self._switcher = switcher
         self._unhealthy_until: dict[str, float] = {}
+        self._health_cache: dict[str, tuple[bool, float]] = {}  # name → (ok, expires_at)
 
     def _is_healthy(self, name: str) -> bool:
         until = self._unhealthy_until.get(name, 0)
@@ -58,7 +69,8 @@ class STTRouter:
         return ["faster_whisper", "groq_whisper", "sarvam", "indicconformer"]
 
     async def transcribe(
-        self, audio: bytes, lang: str, session_id: str, tenant_id: str
+        self, audio: bytes, lang: str, session_id: str, tenant_id: str,
+        trace_id: str | None = None,
     ) -> STTResult:
         forced = await self._switcher.active_engine()
         chain = self._priority_chain(lang, forced)
@@ -73,10 +85,17 @@ class STTRouter:
                 continue
 
             try:
-                result = await asyncio.wait_for(
-                    engine.transcribe(audio, lang, session_id),
-                    timeout=_TIMEOUT_S,
-                )
+                async with trace_span(
+                    f"stt.{name}",
+                    trace_id=trace_id,
+                    input={"audio_bytes": len(audio), "lang": lang},
+                    metadata={"tenant_id": tenant_id, "session_id": session_id},
+                ) as span:
+                    result = await asyncio.wait_for(
+                        engine.transcribe(audio, lang, session_id),
+                        timeout=_TIMEOUT_S,
+                    )
+                    span["output"] = {"text": result.text, "confidence": result.confidence}
             except asyncio.TimeoutError:
                 self._mark_unhealthy(name)
                 continue
@@ -97,12 +116,18 @@ class STTRouter:
         raise RuntimeError("All STT engines failed or unavailable")
 
     async def engine_health(self) -> list[EngineHealth]:
+        now = time.time()
         results = []
         for name, engine in self._engines.items():
-            try:
-                ok = await asyncio.wait_for(engine.health_check(), timeout=3.0)
-            except Exception:
-                ok = False
+            cached_ok, expires_at = self._health_cache.get(name, (False, 0.0))
+            if now < expires_at:
+                ok = cached_ok
+            else:
+                try:
+                    ok = await asyncio.wait_for(engine.health_check(), timeout=3.0)
+                except Exception:
+                    ok = False
+                self._health_cache[name] = (ok, now + _HEALTH_CACHE_TTL_S)
             results.append(EngineHealth(
                 name=name,
                 available=ok and self._is_healthy(name),

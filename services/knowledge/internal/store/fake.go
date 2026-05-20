@@ -276,6 +276,45 @@ func (f *Fake) AddDisclaimer(ctx context.Context, d *model.Disclaimer) error {
 	return nil
 }
 
+func (f *Fake) ListFactsByVersion(ctx context.Context, versionID string) ([]*model.Fact, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	var out []*model.Fact
+	for _, fact := range f.facts {
+		if fact.VersionID == versionID {
+			cp := *fact
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
+func (f *Fake) ListFAQsByVersion(ctx context.Context, versionID string) ([]*model.FAQ, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	var out []*model.FAQ
+	for _, faq := range f.faqs {
+		if faq.VersionID == versionID {
+			cp := *faq
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
+func (f *Fake) ListDisclaimersByVersion(ctx context.Context, versionID string) ([]*model.Disclaimer, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	var out []*model.Disclaimer
+	for _, d := range f.disclaimers {
+		if d.VersionID == versionID {
+			cp := *d
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
 func (f *Fake) RecordApprovalEvent(ctx context.Context, e *model.ApprovalEvent) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

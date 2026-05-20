@@ -11,7 +11,19 @@ dependencies = [
     "httpx>=0.27.0",
     "redis[asyncio]>=5.0.0",
     "structlog>=24.1.0",
+    "evs-common",
+    "stt-router",
+    "llm-router",
+    "tts-router",
+    "guardrail",
 ]
+
+[tool.uv.sources]
+evs-common = { workspace = true }
+stt-router = { workspace = true }
+llm-router = { workspace = true }
+tts-router = { workspace = true }
+guardrail = { workspace = true }
 
 [project.optional-dependencies]
 test = [
