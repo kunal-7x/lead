@@ -18,12 +18,17 @@ import (
 	"time"
 )
 
-// SpacesClient uploads to DO Spaces (S3-compatible).
-// Production: real DO Spaces client with SSE-KMS.
+// SpacesClient uploads to DO Spaces (S3-compatible) hot storage.
 type SpacesClient interface {
 	// Put uploads data with optional server-side encryption.
 	// Returns the storage key on success.
 	Put(ctx context.Context, tenantID, key string, data []byte, encrypted bool) (string, error)
+}
+
+// Archiver writes a long-term immutable copy (B2 WORM). Optional — if nil,
+// no archive copy is made.
+type Archiver interface {
+	Archive(ctx context.Context, tenantID, key string, data []byte) (string, error)
 }
 
 // Publisher sends NATS messages.
@@ -36,6 +41,11 @@ type RecordingStore interface {
 	SaveUpload(ctx context.Context, tenantID, sessionID, spacesKey string, sizeBytes int64) error
 }
 
+// ArchiveStore persists B2 archive metadata (optional — Worker skips if nil).
+type ArchiveStore interface {
+	SaveArchive(ctx context.Context, tenantID, sessionID, b2Key string) error
+}
+
 // UploadJob represents a pending WAV upload.
 type UploadJob struct {
 	TenantID  string
@@ -46,16 +56,31 @@ type UploadJob struct {
 
 // Worker drains the upload queue.
 type Worker struct {
-	mu      sync.Mutex
-	queue   []UploadJob
-	spaces  SpacesClient
-	pub     Publisher
-	store   RecordingStore
+	mu       sync.Mutex
+	queue    []UploadJob
+	spaces   SpacesClient
+	archiver Archiver
+	pub      Publisher
+	store    RecordingStore
+	archive  ArchiveStore
 	maxRetry int
 }
 
-func NewWorker(spaces SpacesClient, pub Publisher, store RecordingStore) *Worker {
-	return &Worker{spaces: spaces, pub: pub, store: store, maxRetry: 3}
+// WorkerOption configures optional Worker capabilities.
+type WorkerOption func(*Worker)
+
+// WithArchiver enables WORM archive uploads (e.g. Backblaze B2).
+func WithArchiver(a Archiver) WorkerOption { return func(w *Worker) { w.archiver = a } }
+
+// WithArchiveStore wires a persistent record of archive copies.
+func WithArchiveStore(s ArchiveStore) WorkerOption { return func(w *Worker) { w.archive = s } }
+
+func NewWorker(spaces SpacesClient, pub Publisher, store RecordingStore, opts ...WorkerOption) *Worker {
+	w := &Worker{spaces: spaces, pub: pub, store: store, maxRetry: 3}
+	for _, opt := range opts {
+		opt(w)
+	}
+	return w
 }
 
 // Enqueue adds a recording upload job to the queue.
@@ -109,7 +134,7 @@ func (w *Worker) processJob(ctx context.Context, job UploadJob) error {
 	}
 
 	key := fmt.Sprintf("%s/recordings/%s.wav", job.TenantID, job.SessionID)
-	spacesKey, err := w.spaces.Put(ctx, job.TenantID, key, data, true /* SSE-KMS */)
+	spacesKey, err := w.spaces.Put(ctx, job.TenantID, key, data, true /* SSE */)
 	if err != nil {
 		return fmt.Errorf("spaces upload: %w", err)
 	}
@@ -118,10 +143,32 @@ func (w *Worker) processJob(ctx context.Context, job UploadJob) error {
 		return fmt.Errorf("store upload: %w", err)
 	}
 
-	payload := []byte(fmt.Sprintf(`{"tenant_id":%q,"session_id":%q,"spaces_key":%q}`,
-		job.TenantID, job.SessionID, spacesKey))
+	var b2Key string
+	if w.archiver != nil {
+		ak, aerr := w.archiver.Archive(ctx, job.TenantID, key, data)
+		if aerr != nil && ak == "" {
+			// Hard failure — keep local file, return error so Worker retries.
+			return fmt.Errorf("b2 archive: %w", aerr)
+		}
+		b2Key = ak
+		if w.archive != nil && b2Key != "" {
+			_ = w.archive.SaveArchive(ctx, job.TenantID, job.SessionID, b2Key)
+		}
+		if aerr != nil {
+			// Soft failure (object-lock-not-enabled): archived without retention,
+			// still emit event but log via NATS subject so ops can fix bucket.
+			_ = w.pub.Publish(ctx, "recording.archive.warning",
+				[]byte(fmt.Sprintf(`{"session_id":%q,"warning":%q}`, job.SessionID, aerr.Error())))
+		}
+	}
+
+	payload := []byte(fmt.Sprintf(`{"tenant_id":%q,"session_id":%q,"spaces_key":%q,"b2_key":%q}`,
+		job.TenantID, job.SessionID, spacesKey, b2Key))
 	if err := w.pub.Publish(ctx, "call.recording.ready", payload); err != nil {
 		return fmt.Errorf("publish: %w", err)
+	}
+	if b2Key != "" {
+		_ = w.pub.Publish(ctx, "recording.archived", payload)
 	}
 
 	_ = os.Remove(job.LocalPath)
@@ -165,6 +212,26 @@ func (f *FakeSpaces) SSEHeaders() map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// FakeArchiver is a test double for B2.
+type FakeArchiver struct {
+	mu     sync.Mutex
+	Stored map[string][]byte
+}
+
+func NewFakeArchiver() *FakeArchiver {
+	return &FakeArchiver{Stored: make(map[string][]byte)}
+}
+
+func (f *FakeArchiver) Archive(_ context.Context, tenantID, key string, data []byte) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	storageKey := fmt.Sprintf("b2://%s/%s", tenantID, key)
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	f.Stored[storageKey] = cp
+	return storageKey, nil
 }
 
 // FakePublisher records published messages.
