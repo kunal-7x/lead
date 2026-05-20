@@ -20,6 +20,7 @@ func main() {
 		addr = ":8108"
 	}
 
+	plivoAuthID := os.Getenv("PLIVO_AUTH_ID")
 	plivoAuthToken := os.Getenv("PLIVO_AUTH_TOKEN")
 
 	s, err := newStore()
@@ -37,6 +38,16 @@ func main() {
 		adapter.NewTwilio(),
 		adapter.NewMock(),
 	}
+	// Register real Plivo adapter when credentials are present. With both
+	// PLIVO_AUTH_ID and PLIVO_AUTH_TOKEN set, outbound /v1/calls routed to
+	// provider "plivo" hit the live Plivo REST API.
+	if plivoAuthID != "" && plivoAuthToken != "" {
+		plivoHTTP := adapter.NewPlivoHTTP(nil)
+		adapters = append(adapters, adapter.NewPlivo(plivoAuthID, plivoAuthToken, plivoHTTP))
+		log.Printf("telephony-adapter: registered live Plivo adapter (auth_id=%s)", maskAuthID(plivoAuthID))
+	} else {
+		log.Println("telephony-adapter: PLIVO_AUTH_ID/TOKEN not set; Plivo adapter NOT registered")
+	}
 
 	wh := webhook.New(plivoAuthToken, s, pub)
 	r := routing.New(s, adapters)
@@ -53,6 +64,13 @@ func newStore() (store.Store, error) {
 		return store.NewPostgres(dsn)
 	}
 	return store.NewFake(), nil
+}
+
+func maskAuthID(s string) string {
+	if len(s) <= 4 {
+		return "***"
+	}
+	return s[:4] + "***"
 }
 
 // newPublisher returns a real JetStream publisher when NATS_URL is set,

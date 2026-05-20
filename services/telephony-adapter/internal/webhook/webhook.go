@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/lead/services/telephony-adapter/internal/model"
@@ -20,6 +21,10 @@ import (
 const (
 	// NATSSubjectProviderEvent is the NATS subject for normalized provider events.
 	NATSSubjectProviderEvent = "call.provider.event"
+	// NATSSubjectRecordingReady is emitted when a provider posts a recording URL.
+	// Consumed by freeswitch-bridge's recording uploader (C8) to pull & re-store
+	// the audio in DO Spaces and archive a copy in B2 with Object Lock.
+	NATSSubjectRecordingReady = "call.recording.ready"
 
 	headerSignature = "X-Plivo-Signature-V3"
 	headerNonce     = "X-Plivo-Signature-Nonce"
@@ -82,18 +87,93 @@ func (h *Handler) HandleEvent(ctx context.Context, eventType, url, nonce, signat
 	}
 
 	pubData, _ := json.Marshal(map[string]string{
-		"event_id":    eventID,
-		"event_type":  eventType,
-		"provider":    "plivo",
+		"event_id":   eventID,
+		"event_type": eventType,
+		"provider":   "plivo",
 	})
 	if err := h.publisher.Publish(ctx, NATSSubjectProviderEvent, pubData); err != nil {
 		return fmt.Errorf("webhook: publish: %w", err)
+	}
+
+	// Recording-specific handling: parse the provider recording URL, persist a
+	// CallRecording row pointing at the raw provider URL, and emit
+	// call.recording.ready so the uploader (C8) can pull and re-store it.
+	if eventType == "recording" {
+		if err := h.handleRecording(ctx, eventID, payload); err != nil {
+			return fmt.Errorf("webhook: handle recording: %w", err)
+		}
 	}
 
 	if err := h.store.SetIdempotencyKey(ctx, eventID, []byte("published")); err != nil {
 		return fmt.Errorf("webhook: set idempotency key: %w", err)
 	}
 
+	return nil
+}
+
+// PlivoRecordingPayload mirrors Plivo's recording webhook fields (form OR JSON).
+type PlivoRecordingPayload struct {
+	RecordURL         string `json:"RecordUrl"`
+	RecordingID       string `json:"RecordingID"`
+	CallUUID          string `json:"CallUUID"`
+	RecordingDuration string `json:"RecordingDuration"`
+	RecordingFormat   string `json:"RecordingFormat"`
+}
+
+// parseRecordingPayload accepts either form-urlencoded or JSON bodies.
+func parseRecordingPayload(body []byte) (PlivoRecordingPayload, error) {
+	var out PlivoRecordingPayload
+	// Try JSON first
+	if json.Unmarshal(body, &out) == nil && out.RecordURL != "" {
+		return out, nil
+	}
+	// Fall back to form encoding
+	vals, err := url.ParseQuery(string(body))
+	if err != nil {
+		return out, fmt.Errorf("parse recording payload: %w", err)
+	}
+	out.RecordURL = vals.Get("RecordUrl")
+	out.RecordingID = vals.Get("RecordingID")
+	out.CallUUID = vals.Get("CallUUID")
+	out.RecordingDuration = vals.Get("RecordingDuration")
+	out.RecordingFormat = vals.Get("RecordingFormat")
+	if out.RecordURL == "" {
+		return out, fmt.Errorf("parse recording payload: no RecordUrl")
+	}
+	return out, nil
+}
+
+func (h *Handler) handleRecording(ctx context.Context, eventID string, payload []byte) error {
+	p, err := parseRecordingPayload(payload)
+	if err != nil {
+		return err
+	}
+
+	rec := &model.CallRecording{
+		ID:             p.RecordingID,
+		ProviderCallID: p.CallUUID,
+		StorageKey:     p.RecordURL, // raw provider URL until C8's uploader rewrites it
+		Encrypted:      false,
+		CreatedAt:      time.Now(),
+	}
+	if rec.ID == "" {
+		rec.ID = "rec-" + p.CallUUID
+	}
+	if err := h.store.StoreRecording(ctx, rec); err != nil {
+		return fmt.Errorf("store recording: %w", err)
+	}
+
+	readyEvt, _ := json.Marshal(map[string]string{
+		"event_id":         eventID,
+		"provider":         "plivo",
+		"provider_call_id": p.CallUUID,
+		"recording_id":     rec.ID,
+		"recording_url":    p.RecordURL,
+		"format":           p.RecordingFormat,
+	})
+	if err := h.publisher.Publish(ctx, NATSSubjectRecordingReady, readyEvt); err != nil {
+		return fmt.Errorf("publish recording.ready: %w", err)
+	}
 	return nil
 }
 

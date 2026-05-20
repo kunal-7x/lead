@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/lead/services/telephony-adapter/internal/model"
+	"github.com/lead/services/telephony-adapter/internal/plivoxml"
 	"github.com/lead/services/telephony-adapter/internal/routing"
 	"github.com/lead/services/telephony-adapter/internal/webhook"
 )
@@ -26,9 +27,23 @@ func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/healthz", h.healthz)
 	r.Post("/wh/plivo/{event}", h.wh.ServeHTTP)
+	// Answer URL Plivo fetches when our outbound call connects.
+	// For the C7 standalone smoke this returns <Speak>; once C12 lands
+	// this will return <Dial><User>sip:freeswitch-bridge…</User></Dial>.
+	r.Get("/wh/plivo/answer", h.plivoAnswer)
 	r.Post("/v1/calls", h.createCall)
 	r.Get("/v1/telephony/providers", h.listProviders)
 	return r
+}
+
+func (h *Handler) plivoAnswer(w http.ResponseWriter, _ *http.Request) {
+	body, err := plivoxml.SmokeResponse()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	_, _ = w.Write(body)
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, _ *http.Request) {

@@ -223,6 +223,13 @@ func (f *Fake) WebhookEventCount() int {
 	return len(f.webhookEvents)
 }
 
+// RecordingCount returns the number of stored recordings (for testing).
+func (f *Fake) RecordingCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.recordings)
+}
+
 // AddRoutingRule replaces the routing rules with the provided rule set (for routing tests).
 // Call before building the router to control which rules are active.
 func (f *Fake) AddRoutingRule(r model.ProviderRoutingRule) {
