@@ -7,7 +7,7 @@
     <param name="codec-prefs" value="PCMU,PCMA"/>
     <param name="inbound-codec-negotiation" value="greedy"/>
     <param name="auth-calls" value="false"/>
-    <param name="apply-inbound-acl" value="jio_acl"/>
+    <param name="apply-inbound-acl" value="${SIP_APPLY_INBOUND_ACL}"/>
   </settings>
 
   <gateways>

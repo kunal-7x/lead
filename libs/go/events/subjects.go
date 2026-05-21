@@ -8,23 +8,23 @@ package events
 //
 // Wildcard layout (all subjects use "." as separator):
 //
-//   call.*            — call lifecycle (initiated, ringing, answered, completed)
-//   lead.*            — lead lifecycle (created, scored, hot.detected)
-//   handoff.*         — handoff requested/completed
-//   wa.*              — WhatsApp template sent/delivered/failed
-//   billing.*         — usage events from billing-meter
-//   campaign.*        — campaign lifecycle (launched, paused, completed)
-//   site.*            — site visits scheduled/completed
-//   provider.*        — provider webhook normalization
+//	call.*            — call lifecycle (initiated, ringing, answered, completed)
+//	lead.*            — lead lifecycle (created, scored, hot.detected)
+//	handoff.*         — handoff requested/completed
+//	wa.*              — WhatsApp template sent/delivered/failed
+//	billing.*         — usage events from billing-meter
+//	campaign.*        — campaign lifecycle (launched, paused, completed)
+//	site.*            — site visits scheduled/completed
+//	provider.*        — provider webhook normalization
 type Subject = string
 
 const (
 	// Call subjects.
-	SubjectCallInitiated    Subject = "call.initiated"
-	SubjectCallAnswered     Subject = "call.answered"
-	SubjectCallCompleted    Subject = "call.completed"
-	SubjectCallRecording    Subject = "call.recording.uploaded"
-	SubjectCallProviderEvt  Subject = "call.provider.event"
+	SubjectCallInitiated   Subject = "call.initiated"
+	SubjectCallAnswered    Subject = "call.answered"
+	SubjectCallCompleted   Subject = "call.completed"
+	SubjectCallRecording   Subject = "call.recording.uploaded"
+	SubjectCallProviderEvt Subject = "call.provider.event"
 
 	// Lead subjects.
 	SubjectLeadCreated     Subject = "lead.created"
@@ -39,10 +39,14 @@ const (
 	SubjectWATemplateSent      Subject = "wa.template.sent"
 	SubjectWATemplateDelivered Subject = "wa.template.delivered"
 	SubjectWATemplateFailed    Subject = "wa.template.failed"
+	SubjectWAMessageReceived   Subject = "wa.message.received"
+	SubjectWAMessageSent       Subject = "wa.message.sent"
+	SubjectWAOptOut            Subject = "wa.optout"
+	SubjectWAStatusUpdated     Subject = "wa.status.updated"
 
 	// Billing subjects.
-	SubjectBillingUsage    Subject = "billing.usage"
-	SubjectBillingCapHit   Subject = "billing.cap.hit"
+	SubjectBillingUsage  Subject = "billing.usage"
+	SubjectBillingCapHit Subject = "billing.cap.hit"
 
 	// Campaign subjects.
 	SubjectCampaignLaunched Subject = "campaign.launched"
@@ -51,6 +55,16 @@ const (
 	// Site-visit subjects.
 	SubjectSiteVisitScheduled Subject = "site.visit.scheduled"
 	SubjectSiteVisitCompleted Subject = "site.visit.completed"
+
+	// FreeSWITCH subjects.
+	SubjectFreeSwitchChannelCreated     Subject = "freeswitch.channel.created"
+	SubjectFreeSwitchChannelAnswered    Subject = "freeswitch.channel.answered"
+	SubjectFreeSwitchChannelHangup      Subject = "freeswitch.channel.hangup"
+	SubjectFreeSwitchRecordingStopped   Subject = "freeswitch.recording.stopped"
+	SubjectFreeSwitchAudioStreamStarted Subject = "freeswitch.audio_stream.started"
+	SubjectFreeSwitchAudioStreamStopped Subject = "freeswitch.audio_stream.stopped"
+	SubjectFreeSwitchAudioStreamError   Subject = "freeswitch.audio_stream.error"
+	SubjectFreeSwitchAudioStreamEvent   Subject = "freeswitch.audio_stream.event"
 )
 
 // StreamSpec describes a JetStream stream Capsy expects to exist.
@@ -68,4 +82,5 @@ var DefaultStreams = []StreamSpec{
 	{Name: "CAPSY_BILLING", Subjects: []string{"billing.>"}},
 	{Name: "CAPSY_CAMPAIGN", Subjects: []string{"campaign.>"}},
 	{Name: "CAPSY_SITE", Subjects: []string{"site.>"}},
+	{Name: "CAPSY_FREESWITCH", Subjects: []string{"freeswitch.>"}},
 }
