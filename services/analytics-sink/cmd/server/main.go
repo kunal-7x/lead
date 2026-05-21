@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/lead/services/analytics-sink/internal/dimrefresh"
 	"github.com/lead/services/analytics-sink/internal/handler"
 	"github.com/lead/services/analytics-sink/internal/service"
 	"github.com/lead/services/analytics-sink/internal/store"
@@ -15,6 +17,9 @@ import (
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
 	st, err := newStore()
 	if err != nil {
 		log.Error("store init", "error", err)
@@ -25,8 +30,17 @@ func main() {
 	}
 	svc := service.New(st)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
+	if chStore, ok := st.(*store.ClickHouseStore); ok {
+		if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+			refresher, err := dimrefresh.New(ctx, dsn, chStore.Client())
+			if err != nil {
+				log.Warn("analytics-sink: dim refresher disabled", "error", err)
+			} else {
+				defer refresher.Close()
+				go refresher.Run(ctx, 5*time.Minute, log)
+			}
+		}
+	}
 
 	go startConsumer(ctx, log, svc)
 
@@ -41,10 +55,20 @@ func main() {
 }
 
 func newStore() (store.Store, error) {
-	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+	switch os.Getenv("ANALYTICS_STORE") {
+	case "fake":
+		return store.NewFake(), nil
+	case "postgres":
+		dsn := os.Getenv("DATABASE_URL")
+		if dsn == "" {
+			return nil, errEnvRequired("DATABASE_URL", "ANALYTICS_STORE=postgres")
+		}
 		return store.NewPostgres(dsn)
 	}
-	return store.NewFake(), nil
+	if os.Getenv("DEMO_MODE") == "1" {
+		return store.NewFake(), nil
+	}
+	return store.NewClickHouse(envOr("CLICKHOUSE_URL", "http://localhost:8123"))
 }
 
 func envOr(key, fallback string) string {
@@ -52,4 +76,17 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func errEnvRequired(key, context string) error {
+	return &envRequiredError{key: key, context: context}
+}
+
+type envRequiredError struct {
+	key     string
+	context string
+}
+
+func (e *envRequiredError) Error() string {
+	return e.key + " is required when " + e.context
 }
