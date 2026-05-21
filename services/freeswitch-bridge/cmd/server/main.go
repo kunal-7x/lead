@@ -8,14 +8,18 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/lead/libs/go/events"
+	"github.com/lead/services/freeswitch-bridge/internal/audiostream"
+	"github.com/lead/services/freeswitch-bridge/internal/esl"
 	"github.com/lead/services/freeswitch-bridge/internal/recording"
 	"github.com/lead/services/freeswitch-bridge/internal/store"
 )
@@ -25,12 +29,17 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	reportStartupReadiness()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"status":"ok"}`)
 	})
+	audioProxy := audiostream.NewProxy(envOr("VOICE_AGENT_WS_URL", "ws://localhost:8200/ws/audio"))
+	audioProxy.PlaybackFormat = envOr("FREESWITCH_PLAYBACK_FORMAT", "streamAudio")
+	mux.Handle("/ws/audio", audioProxy)
+	mux.Handle("/ws/audio/", audioProxy)
 
 	var pgStore *store.PostgresStore
 	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
@@ -77,6 +86,7 @@ func main() {
 	}
 
 	pub := makePublisher()
+	var uploadSink esl.RecordingUploader = noopUploader{}
 
 	if spaces != nil {
 		opts := []recording.WorkerOption{}
@@ -88,6 +98,7 @@ func main() {
 			opts = append(opts, recording.WithArchiveStore(as))
 		}
 		worker := recording.NewWorker(spaces, pub, recStore, opts...)
+		uploadSink = worker
 		// Drain queue every 5s.
 		go func() {
 			t := time.NewTicker(5 * time.Second)
@@ -110,6 +121,20 @@ func main() {
 		hotDays, _ := strconv.Atoi(os.Getenv("RECORDING_HOT_RETENTION_DAYS"))
 		cron := recording.NewRetentionCron(spaces, hotDays, "")
 		go cron.RunDaily(ctx)
+	}
+
+	if enabled := envOr("FREESWITCH_ESL_ENABLED", "true"); enabled != "false" && enabled != "0" {
+		listener := esl.NewListener(pub, makeSessionStore(pgStore), uploadSink)
+		cfg := esl.ClientConfig{
+			Addr:              net.JoinHostPort(envOr("FREESWITCH_HOST", "127.0.0.1"), envOr("FREESWITCH_ESL_PORT", "8021")),
+			Password:          envOr("ESL_PASSWORD", "ClueCon"),
+			ReconnectInterval: durationEnv("FREESWITCH_ESL_RECONNECT_INTERVAL", 2*time.Second),
+		}
+		go func() {
+			if err := esl.Run(ctx, cfg, listener.Handle); err != nil && ctx.Err() == nil {
+				fmt.Fprintf(os.Stderr, "freeswitch-bridge esl: %v\n", err)
+			}
+		}()
 	}
 
 	srv := &http.Server{Addr: addr, Handler: mux}
@@ -159,4 +184,63 @@ func makeRecordingStore(pg *store.PostgresStore) recording.RecordingStore {
 		return recording.NewFakeRecordingStore()
 	}
 	return pg
+}
+
+func makeSessionStore(pg *store.PostgresStore) esl.SessionStore {
+	if pg == nil {
+		return noopSessionStore{}
+	}
+	return pg
+}
+
+type noopSessionStore struct{}
+
+func (noopSessionStore) SetSessionStarted(context.Context, string) error { return nil }
+func (noopSessionStore) SetSessionEnded(context.Context, string) error   { return nil }
+
+type noopUploader struct{}
+
+func (noopUploader) Enqueue(context.Context, string, string, string) error { return nil }
+
+func durationEnv(key string, fallback time.Duration) time.Duration {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid %s=%q: %v (using %s)\n", key, raw, err, fallback)
+		return fallback
+	}
+	return d
+}
+
+func reportStartupReadiness() {
+	if missing := missingEnv("NATS_URL", "ESL_PASSWORD", "VOICE_AGENT_WS_URL"); len(missing) > 0 {
+		fmt.Fprintf(os.Stderr, "freeswitch-bridge readiness: missing local env %v (service may run degraded)\n", missing)
+	}
+	if missing := missingEnv("JIO_GATEWAY_IP"); len(missing) > 0 {
+		fmt.Fprintf(os.Stderr, "freeswitch-bridge go-live: missing Jio SIP trunk env %v (live PSTN blocked)\n", missing)
+	}
+	if missing := missingEnv("DO_SPACES_KEY", "DO_SPACES_SECRET", "DO_SPACES_BUCKET"); len(missing) > 0 {
+		fmt.Fprintf(os.Stderr, "freeswitch-bridge go-live: missing recording hot-tier env %v (recording upload disabled)\n", missing)
+	}
+	if missing := missingEnv("B2_KEY", "B2_SECRET", "B2_BUCKET"); len(missing) > 0 {
+		fmt.Fprintf(os.Stderr, "freeswitch-bridge go-live: missing recording archive env %v (WORM archive disabled)\n", missing)
+	}
+}
+
+func missingEnv(keys ...string) []string {
+	var missing []string
+	for _, key := range keys {
+		if isMissingConfigValue(os.Getenv(key)) {
+			missing = append(missing, key)
+		}
+	}
+	return missing
+}
+
+func isMissingConfigValue(value string) bool {
+	v := strings.TrimSpace(value)
+	return v == "" || v == "__placeholder__" || v == "placeholder" || v == "changeme"
 }

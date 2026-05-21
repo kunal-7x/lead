@@ -16,6 +16,7 @@
 
     <!-- Codecs: G.711 (PCMU/PCMA) — native for Jio SIP, zero transcoding -->
     <load module="mod_g711"/>
+    <load module="mod_l16"/>
 
     <!-- Logging -->
     <load module="mod_logfile"/>

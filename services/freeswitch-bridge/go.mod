@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/jackc/pgx/v5 v5.5.5
 	github.com/lead/libs/go v0.0.0
+	golang.org/x/net v0.50.0
 )
 
 require (

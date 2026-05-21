@@ -1,29 +1,49 @@
 <include>
   <context name="default">
 
-    <!--
-      Inbound from Jio SIP: record both legs, then connect audio stream WebSocket.
-      The voice agent handles the conversation; on hangup FreeSWITCH writes the WAV.
-    -->
-    <extension name="inbound-jio">
-      <condition field="network_addr" expression="${JIO_GATEWAY_IP}">
-        <action application="set" data="record_file=/tmp/recordings/${tenant_id}_${uuid}.wav"/>
-        <action application="record_session" data="/tmp/recordings/${tenant_id}_${uuid}.wav"/>
-        <action application="audio_stream" data="${VOICE_AGENT_WS_URL}?session_id=${uuid} async full"/>
+    <!-- Local-first C12 target: any local SIP UA can call 9196/1000 and exercise
+         answer -> record_session -> mod_audio_stream -> voice-agent. -->
+    <extension name="capsy-local-audio-stream">
+      <condition field="destination_number" expression="^(9196|1000|capsy-local)$">
+        <action application="set" data="tenant_id=local"/>
+        <action application="set" data="session_id=${uuid}"/>
+        <action application="set" data="provider_call_id=${sip_call_id}"/>
+        <action application="set" data="record_file=/tmp/recordings/local_${uuid}.wav"/>
+        <action application="answer"/>
+        <action application="sleep" data="500"/>
+        <action application="record_session" data="${record_file}"/>
+        <action application="execute_api" data="uuid_audio_stream ${uuid} start ${VOICE_AGENT_WS_URL}/${uuid} mono 8k {&quot;tenant_id&quot;:&quot;local&quot;,&quot;session_id&quot;:&quot;${uuid}&quot;,&quot;caller&quot;:&quot;${caller_id_number}&quot;,&quot;provider_call_id&quot;:&quot;${sip_call_id}&quot;}"/>
         <action application="park"/>
       </condition>
     </extension>
 
-    <!--
-      Outbound: originate via Jio gateway → on answer, stream audio to voice agent.
-      origination_uuid is set by the Go ESL control plane (PlaceCall).
-    -->
-    <extension name="outbound-jio">
-      <condition field="destination_number" expression="^\+?(\d+)$">
+    <!-- Carrier inbound path. JIO_GATEWAY_IP gates this until a real trunk is
+         available; no carrier credential is required for local C12. -->
+    <extension name="capsy-inbound-carrier">
+      <condition field="network_addr" expression="^${JIO_GATEWAY_IP}$">
+        <action application="set" data="tenant_id=capsy"/>
+        <action application="set" data="session_id=${uuid}"/>
+        <action application="set" data="provider_call_id=${sip_call_id}"/>
+        <action application="set" data="record_file=/tmp/recordings/capsy_${uuid}.wav"/>
+        <action application="answer"/>
+        <action application="sleep" data="500"/>
+        <action application="record_session" data="${record_file}"/>
+        <action application="execute_api" data="uuid_audio_stream ${uuid} start ${VOICE_AGENT_WS_URL}/${uuid} mono 8k {&quot;tenant_id&quot;:&quot;capsy&quot;,&quot;session_id&quot;:&quot;${uuid}&quot;,&quot;caller&quot;:&quot;${caller_id_number}&quot;,&quot;provider_call_id&quot;:&quot;${sip_call_id}&quot;}"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
+    <!-- Outbound carrier path for later carrier adapters. The audio stream is
+         started before bridge so the voice-agent path is active on answer. -->
+    <extension name="capsy-outbound-carrier">
+      <condition field="destination_number" expression="^\+?(\d{8,15})$">
+        <action application="set" data="tenant_id=${tenant_id}"/>
+        <action application="set" data="session_id=${uuid}"/>
+        <action application="set" data="provider_call_id=${sip_call_id}"/>
         <action application="set" data="record_file=/tmp/recordings/${tenant_id}_${uuid}.wav"/>
-        <action application="record_session" data="/tmp/recordings/${tenant_id}_${uuid}.wav"/>
+        <action application="record_session" data="${record_file}"/>
+        <action application="execute_api" data="uuid_audio_stream ${uuid} start ${VOICE_AGENT_WS_URL}/${uuid} mono 8k {&quot;tenant_id&quot;:&quot;${tenant_id}&quot;,&quot;session_id&quot;:&quot;${uuid}&quot;,&quot;caller&quot;:&quot;${effective_caller_id_number}&quot;,&quot;provider_call_id&quot;:&quot;${sip_call_id}&quot;}"/>
         <action application="bridge" data="{origination_uuid=${uuid}}sofia/gateway/jio/$1"/>
-        <action application="audio_stream" data="${VOICE_AGENT_WS_URL}?session_id=${uuid} async full"/>
       </condition>
     </extension>
 
