@@ -16,6 +16,7 @@ const NAV = [
   { label: 'Billing', href: '/billing/usage' },
   { label: 'Reports', href: '/reports' },
   { label: 'AI Quality', href: '/ai-quality' },
+  { label: 'Claims', href: '/ai-quality/claims' },
   { label: 'Profile', href: '/settings/profile' },
   { label: 'Team', href: '/settings/team' },
   { label: 'API Keys', href: '/settings/api-keys' },

@@ -5,6 +5,8 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/lead/libs/go/events"
+	"github.com/lead/services/knowledge/internal/claims"
 	"github.com/lead/services/knowledge/internal/embed"
 	"github.com/lead/services/knowledge/internal/kb"
 	"github.com/lead/services/knowledge/internal/model"
@@ -15,14 +17,16 @@ import (
 type Handler struct {
 	store    store.Store
 	kbSvc    *kb.Service
+	claimSvc *claims.Service
 	embedder embed.Provider // nil → /retrieve falls back to legacy precomputed-vector mode
 	qdrant   *vector.Client // nil → /retrieve uses in-Postgres cosine scan
 }
 
 func New(s store.Store) *Handler {
 	return &Handler{
-		store: s,
-		kbSvc: kb.New(s),
+		store:    s,
+		kbSvc:    kb.New(s),
+		claimSvc: claims.New(s),
 	}
 }
 
@@ -32,6 +36,12 @@ func (h *Handler) WithVector(e embed.Provider, q *vector.Client) *Handler {
 	h.embedder = e
 	h.qdrant = q
 	h.kbSvc = h.kbSvc.WithIndexer(newIndexerAdapter(h.store, e, q))
+	h.claimSvc = h.claimSvc.WithSemantic(e, q)
+	return h
+}
+
+func (h *Handler) WithPublisher(p events.Publisher) *Handler {
+	h.claimSvc = h.claimSvc.WithPublisher(p)
 	return h
 }
 
@@ -49,6 +59,10 @@ func (h *Handler) Router() http.Handler {
 		r.Put("/projects/{id}", h.updateProject)
 		r.Post("/projects/{id}/kb-versions", h.createKbVersion)
 		r.Post("/projects/{id}/retrieve", h.retrieveKb)
+		r.Post("/projects/{id}/claims", h.addClaim)
+		r.Get("/projects/{id}/claims", h.listClaims)
+		r.Get("/projects/{id}/claim-violations", h.listClaimViolations)
+		r.Post("/claims/{id}/approve", h.approveClaim)
 
 		// Versions
 		r.Post("/versions/{id}/facts", h.addFact)
@@ -66,6 +80,8 @@ func (h *Handler) Router() http.Handler {
 		r.Post("/pronunciations", h.addPronunciation)
 		r.Get("/pronunciations", h.listPronunciations)
 	})
+
+	r.Post("/v1/claim-control/check", h.checkClaimControl)
 
 	return r
 }
@@ -405,6 +421,82 @@ func (h *Handler) retrieveViaQdrant(r *http.Request, projectID, query string, to
 		})
 	}
 	return &model.RetrieveResult{VersionStamp: project.ActiveVersionID, Chunks: chunks}, nil
+}
+
+// Claim control
+
+func (h *Handler) addClaim(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "id")
+	var claim model.ProjectClaim
+	if err := decode(r, &claim); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	claim.ProjectID = projectID
+	if claim.TenantID == "" {
+		if project, err := h.store.GetProject(r.Context(), projectID); err == nil {
+			claim.TenantID = project.TenantID
+		}
+	}
+	if err := h.claimSvc.SaveClaim(r.Context(), &claim); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, claim)
+}
+
+func (h *Handler) listClaims(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "id")
+	claims, err := h.store.ListClaims(r.Context(), projectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if claims == nil {
+		claims = []*model.ProjectClaim{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"claims": claims})
+}
+
+type approveClaimBody struct {
+	ApproverUserID string `json:"approver_user_id"`
+}
+
+func (h *Handler) approveClaim(w http.ResponseWriter, r *http.Request) {
+	var body approveClaimBody
+	_ = decode(r, &body)
+	claim, err := h.claimSvc.ApproveClaim(r.Context(), chi.URLParam(r, "id"), body.ApproverUserID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, claim)
+}
+
+func (h *Handler) checkClaimControl(w http.ResponseWriter, r *http.Request) {
+	var req claims.CheckRequest
+	if err := decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	resp, err := h.claimSvc.Check(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) listClaimViolations(w http.ResponseWriter, r *http.Request) {
+	violations, err := h.store.ListClaimViolations(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if violations == nil {
+		violations = []*model.ClaimViolation{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"violations": violations})
 }
 
 // Pronunciations

@@ -105,7 +105,9 @@ async def test_openai_generate_mocked():
 
 
 async def test_openai_health_with_key():
-    assert await OpenAIBackend(api_key="key").health_check() is True
+    backend = OpenAIBackend(api_key="key")
+    backend._client = httpx.AsyncClient(transport=_mock({"data": []}, 200))
+    assert await backend.health_check() is True
 
 
 async def test_openai_health_no_key():
@@ -122,7 +124,9 @@ async def test_anthropic_generate_mocked():
 
 
 async def test_anthropic_health_with_key():
-    assert await AnthropicBackend(api_key="key").health_check() is True
+    backend = AnthropicBackend(api_key="key")
+    backend._client = httpx.AsyncClient(transport=_mock({"data": []}, 200))
+    assert await backend.health_check() is True
 
 
 # ── OpenRouter ────────────────────────────────────────────────────────────────
@@ -144,7 +148,9 @@ async def test_gemini_generate_mocked():
 
 
 async def test_gemini_health_with_key():
-    assert await GoogleGeminiBackend(api_key="key").health_check() is True
+    backend = GoogleGeminiBackend(api_key="key")
+    backend._client = httpx.AsyncClient(transport=_mock({"models": []}, 200))
+    assert await backend.health_check() is True
 
 
 # ── Base ─────────────────────────────────────────────────────────────────────

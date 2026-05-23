@@ -25,6 +25,8 @@ type Fake struct {
 	disclaimers     map[string]*model.Disclaimer
 	approvalHistory []*model.ApprovalEvent
 	pronunciations  map[string]*model.Pronunciation
+	claims          map[string]*model.ProjectClaim
+	violations      map[string]*model.ClaimViolation
 }
 
 func NewFake() *Fake {
@@ -38,6 +40,8 @@ func NewFake() *Fake {
 		offers:         make(map[string]*model.Offer),
 		disclaimers:    make(map[string]*model.Disclaimer),
 		pronunciations: make(map[string]*model.Pronunciation),
+		claims:         make(map[string]*model.ProjectClaim),
+		violations:     make(map[string]*model.ClaimViolation),
 	}
 }
 
@@ -429,6 +433,92 @@ func (f *Fake) ListPronunciations(ctx context.Context, tenantID, lang string) ([
 	for _, p := range f.pronunciations {
 		if p.TenantID == tenantID && (lang == "" || p.Lang == lang) {
 			clone := *p
+			out = append(out, &clone)
+		}
+	}
+	return out, nil
+}
+
+func (f *Fake) SaveClaim(ctx context.Context, claim *model.ProjectClaim) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := time.Now()
+	if claim.ID == "" {
+		claim.ID = newID()
+	}
+	if claim.PatternKind == "" {
+		claim.PatternKind = model.ClaimPatternPhrase
+	}
+	if claim.Status == "" {
+		claim.Status = model.ClaimStatusNeedsHumanApproval
+	}
+	if claim.CreatedAt.IsZero() {
+		claim.CreatedAt = now
+	}
+	claim.UpdatedAt = now
+	clone := *claim
+	f.claims[claim.ID] = &clone
+	return nil
+}
+
+func (f *Fake) GetClaim(ctx context.Context, id string) (*model.ProjectClaim, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	claim, ok := f.claims[id]
+	if !ok {
+		return nil, errors.New("claim not found")
+	}
+	clone := *claim
+	return &clone, nil
+}
+
+func (f *Fake) ListClaims(ctx context.Context, projectID string) ([]*model.ProjectClaim, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	var out []*model.ProjectClaim
+	for _, claim := range f.claims {
+		if claim.ProjectID == projectID {
+			clone := *claim
+			out = append(out, &clone)
+		}
+	}
+	return out, nil
+}
+
+func (f *Fake) ListGlobalClaims(ctx context.Context) ([]*model.ProjectClaim, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	var out []*model.ProjectClaim
+	for _, claim := range f.claims {
+		if claim.ProjectID == "" {
+			clone := *claim
+			out = append(out, &clone)
+		}
+	}
+	return out, nil
+}
+
+func (f *Fake) RecordClaimViolation(ctx context.Context, violation *model.ClaimViolation) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if violation.ID == "" {
+		violation.ID = newID()
+	}
+	if violation.OccurredAt.IsZero() {
+		violation.OccurredAt = time.Now()
+	}
+	clone := *violation
+	f.violations[violation.ID] = &clone
+	return nil
+}
+
+func (f *Fake) ListClaimViolations(ctx context.Context, projectID string) ([]*model.ClaimViolation, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	var out []*model.ClaimViolation
+	for _, violation := range f.violations {
+		if violation.ProjectID == projectID {
+			clone := *violation
 			out = append(out, &clone)
 		}
 	}

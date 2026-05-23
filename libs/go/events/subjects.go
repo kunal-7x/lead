@@ -56,6 +56,9 @@ const (
 	SubjectSiteVisitScheduled Subject = "site.visit.scheduled"
 	SubjectSiteVisitCompleted Subject = "site.visit.completed"
 
+	// Claim-control subjects.
+	SubjectClaimViolation Subject = "claim.violation"
+
 	// FreeSWITCH subjects.
 	SubjectFreeSwitchChannelCreated     Subject = "freeswitch.channel.created"
 	SubjectFreeSwitchChannelAnswered    Subject = "freeswitch.channel.answered"
@@ -82,5 +85,6 @@ var DefaultStreams = []StreamSpec{
 	{Name: "CAPSY_BILLING", Subjects: []string{"billing.>"}},
 	{Name: "CAPSY_CAMPAIGN", Subjects: []string{"campaign.>"}},
 	{Name: "CAPSY_SITE", Subjects: []string{"site.>"}},
+	{Name: "CAPSY_CLAIM", Subjects: []string{"claim.>"}},
 	{Name: "CAPSY_FREESWITCH", Subjects: []string{"freeswitch.>"}},
 }

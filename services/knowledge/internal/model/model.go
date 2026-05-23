@@ -14,6 +14,9 @@ type Project struct {
 	ID                string    `json:"id"`
 	TenantID          string    `json:"tenant_id"`
 	Name              string    `json:"name"`
+	State             string    `json:"state,omitempty"`
+	City              string    `json:"city,omitempty"`
+	RERAAuthorityURL  string    `json:"rera_authority_url,omitempty"`
 	RERANumber        string    `json:"rera_number,omitempty"`
 	BrochureAssetID   string    `json:"brochure_asset_id,omitempty"`
 	PriceSheetAssetID string    `json:"price_sheet_asset_id,omitempty"`
@@ -119,4 +122,46 @@ type RetrievedChunk struct {
 type RetrieveResult struct {
 	VersionStamp string           `json:"version_stamp"`
 	Chunks       []RetrievedChunk `json:"chunks"`
+}
+
+const (
+	ClaimStatusAllowed            = "allowed"
+	ClaimStatusForbidden          = "forbidden"
+	ClaimStatusNeedsHumanApproval = "needs_human_approval"
+
+	ClaimPatternRegex    = "regex"
+	ClaimPatternPhrase   = "phrase"
+	ClaimPatternSemantic = "semantic"
+)
+
+type ProjectClaim struct {
+	ID             string     `json:"id"`
+	TenantID       string     `json:"tenant_id,omitempty"`
+	ProjectID      string     `json:"project_id,omitempty"`
+	ClaimType      string     `json:"claim_type"`
+	Status         string     `json:"status"`
+	Pattern        string     `json:"pattern"`
+	PatternKind    string     `json:"pattern_kind"`
+	Replacement    string     `json:"replacement,omitempty"`
+	ValidFrom      *time.Time `json:"valid_from,omitempty"`
+	ValidUntil     *time.Time `json:"valid_until,omitempty"`
+	ApproverUserID string     `json:"approver_user_id,omitempty"`
+	Source         string     `json:"source,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+type ClaimViolation struct {
+	ID             string    `json:"id"`
+	TenantID       string    `json:"tenant_id,omitempty"`
+	ProjectID      string    `json:"project_id,omitempty"`
+	CallID         string    `json:"call_id,omitempty"`
+	LeadID         string    `json:"lead_id,omitempty"`
+	Channel        string    `json:"channel"`
+	AttemptedText  string    `json:"attempted_text"`
+	MatchedClaimID string    `json:"matched_claim_id,omitempty"`
+	ClaimType      string    `json:"claim_type,omitempty"`
+	ActionTaken    string    `json:"action_taken"`
+	Reason         string    `json:"reason"`
+	OccurredAt     time.Time `json:"occurred_at"`
 }

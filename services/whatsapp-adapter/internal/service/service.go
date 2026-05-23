@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lead/services/whatsapp-adapter/internal/claimcontrol"
 	"github.com/lead/services/whatsapp-adapter/internal/consent"
 	"github.com/lead/services/whatsapp-adapter/internal/cost"
 	"github.com/lead/services/whatsapp-adapter/internal/meta"
@@ -23,12 +24,14 @@ var (
 	ErrInvalidSignature     = errors.New("invalid whatsapp webhook signature")
 	ErrOptedOut             = errors.New("lead opted out of whatsapp")
 	ErrOutsideServiceWindow = errors.New("outside 24h whatsapp service window")
+	ErrClaimBlocked         = errors.New("claim control blocked whatsapp message")
 )
 
 type Service struct {
 	store      store.Store
 	consent    consent.Checker
 	meta       meta.Client
+	claims     claimcontrol.Client
 	demoMeta   meta.Client
 	demoTenant func(string) bool
 	now        func() time.Time
@@ -67,6 +70,10 @@ func (s *Service) SetDemoClient(client meta.Client) {
 	if client != nil {
 		s.demoMeta = client
 	}
+}
+
+func (s *Service) SetClaimControl(client claimcontrol.Client) {
+	s.claims = client
 }
 
 func (s *Service) RegisterTemplate(ctx context.Context, tmpl model.Template) (model.Template, error) {
@@ -304,6 +311,9 @@ func (s *Service) SendTemplate(ctx context.Context, req model.SendTemplateReques
 	if err := s.ensureCanContact(ctx, req.TenantID, req.LeadID, req.Phone); err != nil {
 		return model.Message{}, err
 	}
+	if err := s.ensureClaimAllowed(ctx, req.TenantID, req.ProjectID, req.LeadID, tmpl.Body); err != nil {
+		return model.Message{}, err
+	}
 	cred, err := s.store.GetCredential(ctx, req.TenantID)
 	if err != nil {
 		return model.Message{}, err
@@ -371,6 +381,9 @@ func (s *Service) SendMessage(ctx context.Context, req model.SendMessageRequest)
 		return model.Message{}, ErrOutsideServiceWindow
 	}
 	if err := s.ensureCanContact(ctx, req.TenantID, thread.LeadID, thread.Phone); err != nil {
+		return model.Message{}, err
+	}
+	if err := s.ensureClaimAllowed(ctx, req.TenantID, req.ProjectID, thread.LeadID, req.Body); err != nil {
 		return model.Message{}, err
 	}
 	cred, err := s.store.GetCredential(ctx, req.TenantID)
@@ -495,6 +508,30 @@ func (s *Service) ensureCanContact(ctx context.Context, tenantID, leadID, phone 
 	}
 	if !result.Allowed {
 		return fmt.Errorf("%w: %s", ErrConsentBlocked, result.Reason)
+	}
+	return nil
+}
+
+func (s *Service) ensureClaimAllowed(ctx context.Context, tenantID, projectID, leadID, text string) error {
+	if s.claims == nil {
+		return nil
+	}
+	result, err := s.claims.Check(ctx, claimcontrol.CheckRequest{
+		TenantID:  tenantID,
+		ProjectID: projectID,
+		LeadID:    leadID,
+		Channel:   "whatsapp",
+		Text:      text,
+	})
+	if err != nil {
+		return fmt.Errorf("%w: %s", ErrClaimBlocked, err.Error())
+	}
+	if !result.OK {
+		reason := "claim violation"
+		if len(result.Violations) > 0 {
+			reason = result.Violations[0].Reason
+		}
+		return fmt.Errorf("%w: %s", ErrClaimBlocked, reason)
 	}
 	return nil
 }

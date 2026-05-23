@@ -369,6 +369,90 @@ func (p *PostgresStore) ListPronunciations(ctx context.Context, tenantID, lang s
 	return out, nil
 }
 
+func (p *PostgresStore) SaveClaim(ctx context.Context, claim *model.ProjectClaim) error {
+	now := time.Now().UTC()
+	if claim.ID == "" {
+		claim.ID = pgkv.NewID("")
+	}
+	if claim.PatternKind == "" {
+		claim.PatternKind = model.ClaimPatternPhrase
+	}
+	if claim.Status == "" {
+		claim.Status = model.ClaimStatusNeedsHumanApproval
+	}
+	if claim.CreatedAt.IsZero() {
+		claim.CreatedAt = now
+	}
+	claim.UpdatedAt = now
+	return p.kv.Put(ctx, "project_claims", claim.ID, *claim)
+}
+
+func (p *PostgresStore) GetClaim(ctx context.Context, id string) (*model.ProjectClaim, error) {
+	claim, ok, err := pgkv.Get[model.ProjectClaim](ctx, p.kv, "project_claims", id)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errors.New("claim not found")
+	}
+	return &claim, nil
+}
+
+func (p *PostgresStore) ListClaims(ctx context.Context, projectID string) ([]*model.ProjectClaim, error) {
+	items, err := pgkv.List[model.ProjectClaim](ctx, p.kv, "project_claims")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*model.ProjectClaim, 0, len(items))
+	for _, item := range items {
+		if item.ProjectID == projectID {
+			cp := item
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
+func (p *PostgresStore) ListGlobalClaims(ctx context.Context) ([]*model.ProjectClaim, error) {
+	items, err := pgkv.List[model.ProjectClaim](ctx, p.kv, "project_claims")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*model.ProjectClaim, 0, len(items))
+	for _, item := range items {
+		if item.ProjectID == "" {
+			cp := item
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
+func (p *PostgresStore) RecordClaimViolation(ctx context.Context, violation *model.ClaimViolation) error {
+	if violation.ID == "" {
+		violation.ID = pgkv.NewID("")
+	}
+	if violation.OccurredAt.IsZero() {
+		violation.OccurredAt = time.Now().UTC()
+	}
+	return p.kv.Put(ctx, "claim_violations", violation.ID, *violation)
+}
+
+func (p *PostgresStore) ListClaimViolations(ctx context.Context, projectID string) ([]*model.ClaimViolation, error) {
+	items, err := pgkv.List[model.ClaimViolation](ctx, p.kv, "claim_violations")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*model.ClaimViolation, 0, len(items))
+	for _, item := range items {
+		if item.ProjectID == projectID {
+			cp := item
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
 func (p *PostgresStore) requireDraftVersion(ctx context.Context, versionID string) error {
 	version, err := p.GetKbVersion(ctx, versionID)
 	if err != nil {

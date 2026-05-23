@@ -5,6 +5,7 @@ import json
 import time
 
 from llm_router.backends.base import LLMBackend
+from llm_router.claim_control import ClaimControl
 from llm_router.kb_client import KbRetriever
 from llm_router.models import BrainOutput, EngineHealth, LLMRequest, LLMResponse, FALLBACK_BRAIN
 from llm_router.switcher import ModelSwitcher
@@ -38,10 +39,12 @@ class LLMRouter:
         backends: dict[str, LLMBackend],
         switcher: ModelSwitcher,
         kb: KbRetriever,
+        claim_control: ClaimControl | None = None,
     ) -> None:
         self._backends = backends
         self._switcher = switcher
         self._kb = kb
+        self._claim_control = claim_control
 
     async def generate(self, req: LLMRequest, trace_id: str | None = None) -> LLMResponse:
         t0 = time.time()
@@ -71,6 +74,7 @@ class LLMRouter:
                     )
                     span["output"] = {"reply": brain.reply, "lead_score": brain.lead_score,
                                       "next_action": brain.next_action}
+                brain = await self._apply_claim_control(req, brain)
                 return LLMResponse(
                     brain=brain,
                     model_used=model_name,
@@ -87,6 +91,30 @@ class LLMRouter:
             brain=FALLBACK_BRAIN,
             model_used="fallback",
             latency_ms=int((time.time() - t0) * 1000),
+        )
+
+    async def _apply_claim_control(self, req: LLMRequest, brain: BrainOutput) -> BrainOutput:
+        if self._claim_control is None or not req.project_id:
+            return brain
+        result = await self._claim_control.check(
+            tenant_id=req.tenant_id,
+            project_id=req.project_id,
+            session_id=req.session_id,
+            channel="voice",
+            text=brain.reply,
+        )
+        if result.ok:
+            return brain
+        reply = result.rewritten or "Let me check that and get back to you."
+        reason = "; ".join(v.reason for v in result.violations) or "claim control blocked reply"
+        return brain.model_copy(
+            update={
+                "reply": reply,
+                "risk_level": "risky",
+                "next_action": "handover",
+                "should_handover_to_human": True,
+                "summary": f"{brain.summary} Claim-control block: {reason}",
+            }
         )
 
     async def engine_health(self) -> list[EngineHealth]:

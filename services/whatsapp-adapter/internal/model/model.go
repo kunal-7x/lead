@@ -161,6 +161,7 @@ type RetryTask struct {
 
 type SendTemplateRequest struct {
 	TenantID   string            `json:"tenant_id"`
+	ProjectID  string            `json:"project_id,omitempty"`
 	LeadID     string            `json:"lead_id"`
 	Phone      string            `json:"phone"`
 	TemplateID string            `json:"template_id"`
@@ -170,6 +171,7 @@ type SendTemplateRequest struct {
 
 type SendMessageRequest struct {
 	TenantID    string       `json:"tenant_id"`
+	ProjectID   string       `json:"project_id,omitempty"`
 	ThreadID    string       `json:"thread_id"`
 	Body        string       `json:"body"`
 	Attachments []Attachment `json:"attachments"`

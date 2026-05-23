@@ -42,4 +42,12 @@ type Store interface {
 	// Pronunciation
 	AddPronunciation(ctx context.Context, p *model.Pronunciation) error
 	ListPronunciations(ctx context.Context, tenantID, lang string) ([]*model.Pronunciation, error)
+
+	// Claim control
+	SaveClaim(ctx context.Context, claim *model.ProjectClaim) error
+	GetClaim(ctx context.Context, id string) (*model.ProjectClaim, error)
+	ListClaims(ctx context.Context, projectID string) ([]*model.ProjectClaim, error)
+	ListGlobalClaims(ctx context.Context) ([]*model.ProjectClaim, error)
+	RecordClaimViolation(ctx context.Context, violation *model.ClaimViolation) error
+	ListClaimViolations(ctx context.Context, projectID string) ([]*model.ClaimViolation, error)
 }

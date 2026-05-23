@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	libsvault "github.com/lead/libs/go/vault"
+	"github.com/lead/services/whatsapp-adapter/internal/claimcontrol"
 	"github.com/lead/services/whatsapp-adapter/internal/consent"
 	"github.com/lead/services/whatsapp-adapter/internal/handler"
 	"github.com/lead/services/whatsapp-adapter/internal/meta"
@@ -34,11 +36,18 @@ func main() {
 	metaClient := meta.NewCloudClient(envOr("META_GRAPH_URL", "https://graph.facebook.com/v20.0"), http.DefaultClient)
 	consentChecker := consent.StaticChecker{Allowed: true}
 	svc := service.New(st, consentChecker, metaClient)
+	svc.SetClaimControl(claimcontrol.NewHTTP(envOr("CLAIM_CONTROL_URL", envOr("KNOWLEDGE_SERVICE_URL", "http://knowledge:8110"))))
 
 	cred := loadWACredential(logger)
+	if err := validateWACredential(cred); err != nil {
+		logger.Error("whatsapp credential invalid", "err", err)
+		os.Exit(1)
+	}
 	_, _ = svc.UpsertCredential(context.Background(), cred)
 	_ = svc.SeedPrebuiltTemplates(context.Background(), "default")
-	_ = svc.SeedDemoInbox(context.Background(), "tenant-demo")
+	if demoMode() {
+		_ = svc.SeedDemoInbox(context.Background(), "tenant-demo")
+	}
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RequestID)
@@ -131,7 +140,24 @@ func newStore() (store.Store, error) {
 	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
 		return store.NewPostgres(dsn)
 	}
+	if !demoMode() {
+		return nil, fmt.Errorf("DATABASE_URL is required outside DEMO_MODE")
+	}
 	return store.NewFake(), nil
+}
+
+func validateWACredential(cred model.VaultCredential) error {
+	if demoMode() {
+		return nil
+	}
+	if cred.PhoneNumberID == "" || cred.BusinessAccountID == "" || cred.AccessToken == "" || cred.VerifyToken == "" || cred.AppSecret == "" {
+		return fmt.Errorf("META_WA_PHONE_NUMBER_ID, META_WA_BUSINESS_ACCOUNT_ID, META_WA_TOKEN, META_WA_VERIFY_TOKEN, and META_WA_APP_SECRET are required outside DEMO_MODE")
+	}
+	return nil
+}
+
+func demoMode() bool {
+	return os.Getenv("DEMO_MODE") == "1"
 }
 
 func envOr(key, fallback string) string {

@@ -216,6 +216,8 @@ func statusFor(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, service.ErrOptedOut):
 		return http.StatusForbidden
+	case errors.Is(err, service.ErrClaimBlocked):
+		return http.StatusUnprocessableEntity
 	default:
 		return http.StatusBadRequest
 	}

@@ -12,6 +12,7 @@ from llm_router.backends.vllm import VLLMBackend
 from llm_router.backends.openai_backend import (
     OpenAIBackend, AnthropicBackend, OpenRouterBackend, GoogleGeminiBackend
 )
+from llm_router.claim_control import HttpClaimControl
 from llm_router.kb_client import HttpKbRetriever
 from llm_router.models import HealthResponse, LLMRequest
 from llm_router.router import LLMRouter
@@ -36,7 +37,7 @@ def _build_router() -> LLMRouter:
         "openrouter": OpenRouterBackend(),
         "google_gemini": GoogleGeminiBackend(),
     }
-    return LLMRouter(backends, switcher, kb)
+    return LLMRouter(backends, switcher, kb, HttpClaimControl())
 
 
 @app.on_event("startup")
