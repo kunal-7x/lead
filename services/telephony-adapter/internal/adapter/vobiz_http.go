@@ -40,6 +40,16 @@ func NewVobizHTTPWithBase(baseURL string, httpc *http.Client) VobizHTTPClient {
 	if httpc == nil {
 		httpc = &http.Client{Timeout: 15 * time.Second}
 	}
+	// Do NOT auto-follow redirects. Vobiz's GET /Account/{id}/ returns a 307 to an
+	// internal host (account-service.vobiz.ai) that is not reachable from outside;
+	// following it hangs until timeout and makes the health probe (and any read) fail.
+	// Returning the redirect response directly lets CheckHealth treat the 307 as
+	// "reachable" and lets do() surface real status codes instead of stalling.
+	if httpc.CheckRedirect == nil {
+		httpc.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+	}
 	return &vobizHTTPClient{baseURL: baseURL, httpc: httpc}
 }
 

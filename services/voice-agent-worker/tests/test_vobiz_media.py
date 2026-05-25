@@ -164,15 +164,14 @@ class FakeVobizWS:
         frames.append(json.dumps({"event": "stop"}))
         self._frames = frames
 
-    async def receive_text(self) -> str:
-        """Serve the next inbound frame; simulate a tiny async delay."""
+    async def receive(self) -> dict:
+        """Serve the next inbound frame as a Starlette receive() dict."""
         if self._idx >= len(self._frames):
-            # Hang until disconnected (AgentLoop has already finished)
-            await asyncio.sleep(9999)
+            return {"type": "websocket.disconnect", "code": 1000}
         frame = self._frames[self._idx]
         self._idx += 1
         await asyncio.sleep(0)  # yield control
-        return frame
+        return {"type": "websocket.receive", "text": frame}
 
     async def send_text(self, text: str) -> None:
         """Capture outbound frames."""
@@ -361,12 +360,12 @@ class TestVobizMediaBridge:
             ])
             _idx: int = 0
 
-            async def receive_text(self):
+            async def receive(self):
                 if self._idx >= len(self._frames):
-                    await asyncio.sleep(9999)
+                    return {"type": "websocket.disconnect", "code": 1000}
                 frame = self._frames[self._idx]
                 self._idx += 1
-                return frame
+                return {"type": "websocket.receive", "text": frame}
 
             async def send_text(self, text):
                 self.sent_frames.append(text)
@@ -389,7 +388,7 @@ class TestVobizMediaBridge:
             call_id: str = "no-start"
             sent_frames: list = field(default_factory=list)
 
-            async def receive_text(self):
+            async def receive(self):
                 # Immediately raise disconnect-style error
                 raise ConnectionResetError("WS closed")
 

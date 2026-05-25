@@ -115,6 +115,8 @@ type Stream struct {
 	XMLName     xml.Name `xml:"Stream"`
 	Bidirectional string `xml:"bidirectional,attr,omitempty"`
 	ContentType   string `xml:"contentType,attr,omitempty"`
+	KeepCallAlive string `xml:"keepCallAlive,attr,omitempty"`
+	AudioTrack    string `xml:"audioTrack,attr,omitempty"`
 	URL           string `xml:",chardata"`
 }
 
@@ -128,7 +130,13 @@ func VobizStreamResponse(wsURL string) ([]byte, error) {
 	r.Add(Stream{
 		Bidirectional: "true",
 		ContentType:   "audio/x-mulaw;rate=8000",
-		URL:           wsURL,
+		// keepCallAlive keeps the PSTN leg bridged to the media stream; without
+		// it the Plivo/Vobiz <Stream> opens the WS but does not pump call audio.
+		KeepCallAlive: "true",
+		// audioTrack=inbound streams the caller's audio to us (bidirectional
+		// still lets us play audio back). Explicit for Plivo-family compatibility.
+		AudioTrack: "inbound",
+		URL:        wsURL,
 	})
 	return r.Encode()
 }

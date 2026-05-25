@@ -54,6 +54,7 @@ import asyncio
 import base64
 import json
 import logging
+import sys
 from typing import AsyncIterator
 
 from voice_agent.agent import AgentLoop
@@ -137,52 +138,94 @@ async def run_vobiz_bridge(
 
     load_ctx = _load_context_fn or _default_load_context
 
-    # We need the "start" frame first to get stream metadata before anything else.
+    # Stream metadata captured from the "start" frame, if Vobiz sends one.
+    # We do NOT block on it — the bridge starts immediately so the caller is
+    # never met with silence.
     stream_id: str | None = None
     ctx: SessionContext | None = None
 
     # PCM bytes accumulated between µ-law frames; drained into audio_source
     _pcm_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
 
+    def _log_raw(idx: int, raw) -> None:
+        # print() to stderr guarantees visibility in the uvicorn .err log
+        # regardless of logging config — critical for diagnosing the real
+        # Vobiz frame shape on a live call.
+        try:
+            preview = raw[:300] if isinstance(raw, (str, bytes)) else repr(raw)[:300]
+            print(f"[vobiz_bridge] RAW frame[{idx}] type={type(raw).__name__} {preview!r}",
+                  file=sys.stderr, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _enqueue_ulaw(ulaw_data: bytes) -> None:
+        pcm_data = ulaw_to_pcm16(ulaw_data)
+        for offset in range(0, len(pcm_data), _PCM_CHUNK_BYTES):
+            chunk = pcm_data[offset: offset + _PCM_CHUNK_BYTES]
+            if len(chunk) < _PCM_CHUNK_BYTES:
+                chunk = chunk + b"\x00" * (_PCM_CHUNK_BYTES - len(chunk))
+            _pcm_queue.put_nowait(chunk)
+
+    def _extract_payload(frame: dict) -> str:
+        # Tolerant extraction across Plivo/Twilio/Vobiz variants.
+        media = frame.get("media")
+        if isinstance(media, dict):
+            p = media.get("payload") or media.get("data")
+            if p:
+                return p
+        return frame.get("payload", "") or ""
+
     async def _receive_loop() -> None:
-        """Read WebSocket frames, decode µ-law, put PCM into queue."""
+        """Read WS frames (text JSON or raw binary µ-law) into the PCM queue."""
         nonlocal stream_id, ctx
+        idx = 0
         try:
             while True:
-                raw = await websocket.receive_text()
-                frame = json.loads(raw)
-                event = frame.get("event", "")
+                msg = await websocket.receive()
+                mtype = msg.get("type")
+                if mtype == "websocket.disconnect":
+                    break
+
+                # Binary frame → raw µ-law audio (some platforms stream bytes directly)
+                if msg.get("bytes") is not None:
+                    data = msg["bytes"]
+                    if idx < 8:
+                        _log_raw(idx, data); idx += 1
+                    if data:
+                        _enqueue_ulaw(data)
+                    continue
+
+                raw = msg.get("text")
+                if raw is None:
+                    continue
+                if idx < 8:
+                    _log_raw(idx, raw); idx += 1
+
+                try:
+                    frame = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(frame, dict):
+                    continue
+                event = (frame.get("event") or frame.get("type") or "").lower()
 
                 if event == "start":
-                    meta = frame.get("start", {})
-                    stream_id = meta.get("streamId", internal_call_id)
-                    call_id = meta.get("callId", internal_call_id)
-                    ctx = await load_ctx(call_id)
-                    logger.info("vobiz_bridge start stream_id=%s call_id=%s", stream_id, call_id)
-
-                elif event == "media":
-                    if ctx is None:
-                        # "start" hasn't arrived yet — skip
-                        continue
-                    payload_b64 = frame.get("media", {}).get("payload", "")
-                    if not payload_b64:
-                        continue
-                    ulaw_data = base64.b64decode(payload_b64)
-                    pcm_data = ulaw_to_pcm16(ulaw_data)
-                    # Repacketise into 320-byte (20ms) PCM chunks
-                    for offset in range(0, len(pcm_data), _PCM_CHUNK_BYTES):
-                        chunk = pcm_data[offset: offset + _PCM_CHUNK_BYTES]
-                        if len(chunk) < _PCM_CHUNK_BYTES:
-                            # Pad final short chunk to full 20ms
-                            chunk = chunk + b"\x00" * (_PCM_CHUNK_BYTES - len(chunk))
-                        await _pcm_queue.put(chunk)
-
-                elif event == "stop":
-                    logger.info("vobiz_bridge stop stream_id=%s", stream_id)
+                    meta = frame.get("start", {}) if isinstance(frame.get("start"), dict) else {}
+                    stream_id = meta.get("streamId") or meta.get("streamSid") or frame.get("streamId") or internal_call_id
+                    print(f"[vobiz_bridge] start stream_id={stream_id}", file=sys.stderr, flush=True)
+                elif event in ("media", "audio"):
+                    payload_b64 = _extract_payload(frame)
+                    if payload_b64:
+                        try:
+                            _enqueue_ulaw(base64.b64decode(payload_b64))
+                        except Exception:  # noqa: BLE001
+                            pass
+                elif event in ("stop", "closed"):
+                    print(f"[vobiz_bridge] stop stream_id={stream_id}", file=sys.stderr, flush=True)
                     break
 
         except Exception as exc:  # noqa: BLE001
-            logger.debug("vobiz_bridge receive_loop ended: %s", exc)
+            print(f"[vobiz_bridge] receive_loop ended: {exc!r}", file=sys.stderr, flush=True)
         finally:
             await _pcm_queue.put(None)  # sentinel: signal audio_source to stop
 
@@ -215,16 +258,14 @@ async def run_vobiz_bridge(
             # Unknown control message — log and drop
             logger.debug("vobiz_bridge send_json ignored: %s", msg)
 
-    # Wait for "start" frame before spinning up services.
-    # Start the receive loop in background; it will populate _pcm_queue.
-    receive_task = asyncio.create_task(_receive_loop())
+    # Load context immediately from the internal call id (fallback to default
+    # inside _load_context if Redis has nothing). We do NOT wait for a "start"
+    # frame — Vobiz/Plivo may not send one in the shape we expect, and blocking
+    # leaves the caller in silence. The receive loop captures stream_id later.
+    ctx = await load_ctx(internal_call_id)
 
-    # Block until ctx is populated (the "start" frame arrived)
-    while ctx is None:
-        if receive_task.done():
-            # WS closed before "start" — nothing to do
-            return
-        await asyncio.sleep(0.01)
+    # Start the receive loop in background; it populates _pcm_queue.
+    receive_task = asyncio.create_task(_receive_loop())
 
     # Instantiate services
     if _make_services_fn is not None:
