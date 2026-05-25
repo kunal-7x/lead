@@ -13,6 +13,7 @@ from voice_agent.clients import HttpSTTClient, HttpLLMClient, HttpGuardrailClien
 from voice_agent.demo_runtime import DemoEventPublisher, DemoTurnStore
 from voice_agent.models import SessionContext
 from voice_agent.vad import SileroVAD
+from voice_agent.vobiz_media import run_vobiz_bridge
 
 app = FastAPI(title="voice-agent-worker", version="0.1.0")
 
@@ -71,6 +72,16 @@ async def audio_ws(websocket: WebSocket, session_id: str) -> None:
         pass
     finally:
         await send_json({"type": "call_complete"})
+
+
+@app.websocket("/ws/vobiz/{internal_call_id}")
+async def vobiz_ws(websocket: WebSocket, internal_call_id: str) -> None:
+    """Vobiz µ-law media-stream bridge — adapts Vobiz JSON protocol to AgentLoop."""
+    await websocket.accept()
+    try:
+        await run_vobiz_bridge(websocket, internal_call_id)
+    except WebSocketDisconnect:
+        pass
 
 
 async def _load_context(session_id: str) -> SessionContext:

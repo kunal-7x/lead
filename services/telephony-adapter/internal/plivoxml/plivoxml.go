@@ -108,6 +108,31 @@ func SmokeResponse() ([]byte, error) {
 	return r.Encode()
 }
 
+// Stream is a Vobiz/Plivo bidirectional media stream element.
+// Vobiz fetches the Answer URL and expects a <Stream> element pointing
+// to the WebSocket media bridge endpoint.
+type Stream struct {
+	XMLName     xml.Name `xml:"Stream"`
+	Bidirectional string `xml:"bidirectional,attr,omitempty"`
+	ContentType   string `xml:"contentType,attr,omitempty"`
+	URL           string `xml:",chardata"`
+}
+
+// VobizStreamResponse builds the Answer URL XML for Vobiz:
+//
+//	<Response>
+//	  <Stream bidirectional="true" contentType="audio/x-mulaw;rate=8000">wss://…/ws/vobiz/{callID}</Stream>
+//	</Response>
+func VobizStreamResponse(wsURL string) ([]byte, error) {
+	r := &Response{}
+	r.Add(Stream{
+		Bidirectional: "true",
+		ContentType:   "audio/x-mulaw;rate=8000",
+		URL:           wsURL,
+	})
+	return r.Encode()
+}
+
 // BridgeToSIP builds an Answer URL XML that <Dial>s the given SIP URI
 // (used to hand the call off to FreeSWITCH once C12 lands).
 func BridgeToSIP(sipURI, callerID string) ([]byte, error) {

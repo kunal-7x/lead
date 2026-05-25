@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lead/services/telephony-adapter/internal/adapter"
+	"github.com/lead/services/telephony-adapter/internal/concurrency"
 	"github.com/lead/services/telephony-adapter/internal/model"
 	"github.com/lead/services/telephony-adapter/internal/store"
 )
@@ -21,13 +22,20 @@ type Router struct {
 	store    store.Store
 	adapters map[string]adapter.Telephony
 	window   time.Duration
+	limiter  concurrency.Limiter
 }
 
 func New(s store.Store, adapters []adapter.Telephony) *Router {
+	return NewWithLimiter(s, adapters, concurrency.New(defaultVobizMaxConcurrent()))
+}
+
+// NewWithLimiter creates a Router with an explicit concurrency limiter (useful for tests).
+func NewWithLimiter(s store.Store, adapters []adapter.Telephony, lim concurrency.Limiter) *Router {
 	r := &Router{
 		store:    s,
 		adapters: make(map[string]adapter.Telephony, len(adapters)),
 		window:   defaultHealthWindow,
+		limiter:  lim,
 	}
 	for _, a := range adapters {
 		r.adapters[a.Name()] = a
@@ -35,7 +43,33 @@ func New(s store.Store, adapters []adapter.Telephony) *Router {
 	return r
 }
 
+// defaultVobizMaxConcurrent reads VOBIZ_MAX_CONCURRENT_CALLS (default 3).
+func defaultVobizMaxConcurrent() int {
+	v := os.Getenv("VOBIZ_MAX_CONCURRENT_CALLS")
+	if v == "" {
+		return 3
+	}
+	var n int
+	fmt.Sscanf(v, "%d", &n)
+	if n <= 0 {
+		return 3
+	}
+	return n
+}
+
 func (r *Router) WithWindow(d time.Duration) *Router { r.window = d; return r }
+
+// IncrConcurrency increments the per-tenant concurrency counter.
+// Returns concurrency.ErrConcurrencyLimit if the cap is reached.
+func (r *Router) IncrConcurrency(ctx context.Context, tenantID string) error {
+	return r.limiter.Incr(ctx, tenantID)
+}
+
+// DecrConcurrency decrements the per-tenant concurrency counter (call on hangup).
+func (r *Router) DecrConcurrency(ctx context.Context, tenantID string) error {
+	r.limiter.Decr(ctx, tenantID)
+	return nil
+}
 
 // PlaceCall selects the provider, places the outbound call, and records the
 // call session in the store. Demo tenants are isolated to the mock provider.
@@ -51,8 +85,20 @@ func (r *Router) PlaceCall(ctx context.Context, req model.CallRequest) (*model.C
 	if err != nil {
 		return nil, err
 	}
+
+	// Enforce per-tenant concurrency cap for Vobiz calls.
+	if selected.Name() == "vobiz" && req.TenantID != "" {
+		if err := r.limiter.Incr(ctx, req.TenantID); err != nil {
+			return nil, fmt.Errorf("routing: %w", err)
+		}
+	}
+
 	providerCallID, err := selected.PlaceCall(ctx, req)
 	if err != nil {
+		// Roll back the concurrency counter if the call failed to initiate.
+		if selected.Name() == "vobiz" && req.TenantID != "" {
+			r.limiter.Decr(ctx, req.TenantID)
+		}
 		return nil, err
 	}
 
