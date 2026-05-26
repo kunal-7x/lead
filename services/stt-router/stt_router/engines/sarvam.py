@@ -146,19 +146,29 @@ def ulaw_to_pcm16(ulaw_bytes: bytes) -> bytes:
 class SarvamStreamingEngine:
     """Sarvam Saaras V3 real-time streaming STT via WebSocket.
 
-    Protocol (verified 2026-05-26):
+    Protocol (VERIFIED LIVE against api.sarvam.ai 2026-05-26 from BLR droplet):
       URL: wss://api.sarvam.ai/speech-to-text/ws
-      Auth: Api-Subscription-Key header
+        query: ?language-code=hi-IN&model=saaras:v3&mode=transcribe
+               &sample_rate=8000&input_audio_codec=pcm_s16le&vad_signals=true
+        MODEL: saaras:v3 is REQUIRED for realtime. saaras:v2.5 is REJECTED with
+               WS close 4000 "Invalid model 'saaras:v2.5'. Only 'saarika:v2.5' or
+               'saaras:v3' are supported." (batch translate still uses v2.5.)
+      Auth: Api-Subscription-Key header.
       Audio send: JSON {"audio": {"data": "<base64_wav>", "sample_rate": "8000", "encoding": "audio/wav"}}
-        - Each message wraps PCM16 8kHz audio in a WAV container before base64-encoding
-        - Supports 500ms-granularity chunks or larger; server VAD fires on speech end
-      Flush: JSON {"type": "flush"} — forces immediate processing
+        - Each message wraps PCM16 8kHz audio in a WAV container before base64-encoding.
+        - Chunked sends (e.g. 100-500ms) are accepted; server VAD endpoints on flush.
+      Flush: JSON {"type": "flush"} — forces immediate endpointing. REQUIRED: without
+             it, server VAD did not reliably fire END_SPEECH within the window.
       Receive:
-        - {"type": "events", "data": {"signal_type": "END_SPEECH", ...}} — VAD end
-        - {"type": "data", "data": {"transcript": "...", ...}} — final transcript
-        - {"type": "error", "data": {"message": "..."}}
+        - {"type": "events", "data": {"signal_type": "START_SPEECH"/"END_SPEECH", "occured_at": ts}}
+        - {"type": "data", "data": {"transcript": "...", "language_probability": null|float,
+            "language_code": "hi-IN", "metrics": {"audio_duration": .., "processing_latency": ..}}}
+        - WS close 4000 on protocol/model errors.
+      NOTE: language_probability is present-but-null on v3 → coalesce to 0.9.
 
-    Measured latency: ~302ms from VAD END_SPEECH to transcript (telephony streaming mode).
+    Measured latency (droplet, 237ms RTT): END_SPEECH(server)->final ~258ms,
+    speech_end(client)->final ~298ms, server processing_latency ~238ms.
+    vs batch saaras translate ~3500ms — ~3.2s saved on the critical path.
 
     µ-law input: worker sends raw G.711 µ-law 8kHz; engine transcodes to PCM16 internally
     before wrapping in WAV and base64-encoding. Worker never does codec conversion.
@@ -285,10 +295,14 @@ class SarvamStreamingEngine:
                         latency_ms = int(
                             (t_final - (t_end_speech or t_flush)) * 1000
                         )
+                        # language_probability is present-but-null in saaras:v3
+                        # responses, so .get(..., default) won't catch it.
+                        conf = data.get("language_probability")
+                        conf = float(conf) if conf is not None else 0.9
                         yield {
                             "type": "final",
                             "text": text,
-                            "confidence": data.get("language_probability", 0.9),
+                            "confidence": conf,
                             "latency_ms": latency_ms,
                             "ts": t_final,
                             "engine_used": self.name,

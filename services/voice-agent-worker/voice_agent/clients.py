@@ -103,21 +103,30 @@ class HttpSTTClient:
 
                 send_task = asyncio.create_task(_send_frames())
 
-                # 2. Collect partial + final results while sending
+                # 2. Collect partial + final results while sending.
+                # The /v1/stt/stream server emits {"type": "interim"|"final"|"error"}
+                # (matching SarvamStreamingEngine.stream_utterance). Older builds also
+                # set is_final — accept both so we never miss the transcript.
                 try:
                     async for raw in ws:
                         try:
                             msg = json.loads(raw)
                         except (ValueError, TypeError):
                             continue
+                        mtype = msg.get("type", "")
+                        if mtype == "error":
+                            # streaming_disabled / engine error → fall back to batch
+                            raise RuntimeError(msg.get("message", "stt_stream_error"))
                         text = msg.get("text", "")
                         conf = float(msg.get("confidence", 0.0))
                         eng = msg.get("engine_used", "")
-                        if msg.get("is_final"):
+                        is_final = mtype == "final" or bool(msg.get("is_final"))
+                        if is_final:
                             if text:
                                 best_text = text
                                 best_conf = conf
                                 engine_used = eng
+                            break  # final received — stop reading
                         else:
                             # Track best partial in case we never get a final
                             if text and conf >= best_conf:
@@ -125,6 +134,8 @@ class HttpSTTClient:
                                 best_conf = conf
                                 if eng:
                                     engine_used = eng
+                except RuntimeError:
+                    raise  # propagate so caller falls back to batch
                 except Exception:  # noqa: BLE001
                     pass
                 finally:
