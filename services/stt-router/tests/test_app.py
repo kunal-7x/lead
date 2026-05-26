@@ -46,6 +46,7 @@ def client(monkeypatch):
 def client_streaming_disabled(monkeypatch):
     """Client fixture with STT_STREAMING_ENGINE=disabled (default production value)."""
     import stt_router.app as app_module
+    # Must patch _build_router to avoid real Redis connection, same as `client` fixture
     monkeypatch.setattr(app_module, "_build_router", _make_test_router)
     monkeypatch.setattr(app_module, "_STT_STREAMING_ENGINE", "disabled")
     with TestClient(app) as c:
@@ -262,20 +263,24 @@ def test_stt_stream_new_protocol_empty_utterance(client):
 
 
 def test_stt_stream_new_protocol_disabled_flag(client_streaming_disabled):
-    """/v1/stt/stream query-param mode with flag=disabled: error+close immediately."""
-    import pytest
+    """/v1/stt/stream query-param mode with flag=disabled: error message returned then WS closes."""
     from starlette.websockets import WebSocketDisconnect
 
-    with pytest.raises((WebSocketDisconnect, Exception)):
+    received_error_msg: dict = {}
+    try:
         with client_streaming_disabled.websocket_connect(
             "/v1/stt/stream?lang=hi-en&session_id=disabled-test"
         ) as ws:
+            # Server sends streaming_disabled error then closes
             raw = ws.receive_text()
-            msg = json.loads(raw)
-            assert msg["type"] == "error"
-            assert msg["message"] == "streaming_disabled"
-            # Server closes; next receive should raise
-            ws.receive_text()
+            received_error_msg = json.loads(raw)
+    except (WebSocketDisconnect, Exception):
+        pass  # Server-side close may raise in TestClient context manager — acceptable
+
+    assert received_error_msg.get("type") == "error", (
+        f"Expected error message, got: {received_error_msg}"
+    )
+    assert received_error_msg.get("message") == "streaming_disabled"
 
 
 def test_stt_stream_new_protocol_legacy_unaffected(client_streaming_disabled):

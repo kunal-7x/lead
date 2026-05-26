@@ -47,6 +47,10 @@ async def startup() -> None:
     if _STT_STREAMING_ENGINE in ("sarvam", "sarvam_streaming"):
         # "sarvam" is the canonical flag value; "sarvam_streaming" kept as legacy alias
         _streaming_engine = SarvamStreamingEngine()
+    else:
+        # Explicitly reset to None so tests using disabled flag don't inherit
+        # a streaming engine set by a previous TestClient's startup lifecycle.
+        _streaming_engine = None
 
 
 @app.get("/healthz")
@@ -107,13 +111,13 @@ async def stt_stream(
     # Activated when `lang` is supplied as a query param (new worker contract).
     if lang is not None:
         if _streaming_engine is None:
-            # Streaming flag is off — inform caller immediately and close.
+            # Streaming flag is off — inform caller immediately.
+            # Returning from the handler causes Starlette to close the WS cleanly.
             await websocket.send_text(json.dumps({
                 "type": "error",
                 "message": "streaming_disabled",
                 "hint": "Set STT_STREAMING_ENGINE=sarvam to enable realtime STT",
             }))
-            await websocket.close(code=1008)  # Policy Violation
             return
 
         audio_buffer: bytearray = bytearray()
