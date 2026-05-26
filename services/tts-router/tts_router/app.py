@@ -20,6 +20,12 @@ from tts_router.switcher import EngineSwitcher
 
 log = logging.getLogger(__name__)
 
+# Primary TTS engine selection
+# TTS_PRIMARY=sarvam (default) — Sarvam Bulbul is primary; ElevenLabs is optional fallback
+# TTS_ELEVENLABS_ENABLED=false (default) — ElevenLabs disabled (returns 402 on free tier)
+# SARVAM_TTS_MODEL — override Sarvam model slug (default bulbul:v2)
+_TTS_ELEVENLABS_ENABLED = os.getenv("TTS_ELEVENLABS_ENABLED", "false").lower() == "true"
+
 app = FastAPI(title="tts-router", version="0.1.0")
 _router: TTSRouter | None = None
 _elevenlabs_engine: ElevenLabsEngine | None = None
@@ -29,13 +35,15 @@ def _build_router() -> TTSRouter:
     rdb = aioredis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"))
     switcher = EngineSwitcher(rdb)
     cache = RedisAudioCache(rdb)
-    engines = {
+    # Sarvam Bulbul is always primary; ElevenLabs only included when explicitly enabled
+    engines: dict = {
         "sarvam_bulbul": SarvamBulbulEngine(),
         "kokoro": KokoroEngine(),
         "indic_parler": IndicParlerEngine(),
         "indicf5": IndicF5Engine(),
-        "elevenlabs": ElevenLabsEngine(),
     }
+    if _TTS_ELEVENLABS_ENABLED:
+        engines["elevenlabs"] = ElevenLabsEngine()
     return TTSRouter(engines, switcher, cache)
 
 
@@ -43,7 +51,9 @@ def _build_router() -> TTSRouter:
 async def startup() -> None:
     global _router, _elevenlabs_engine
     _router = _build_router()
-    _elevenlabs_engine = ElevenLabsEngine()
+    # Only initialise ElevenLabs engine instance if the feature-flag is on
+    if _TTS_ELEVENLABS_ENABLED:
+        _elevenlabs_engine = ElevenLabsEngine()
 
 
 @app.get("/healthz")
@@ -145,8 +155,12 @@ async def tts_stream_ws(websocket: WebSocket) -> None:
                 return
             yield token
 
-    api_key = os.getenv("ELEVENLABS_API_KEY", "")
-    streaming_enabled = os.getenv("TTS_STREAMING_WS", "true").lower() != "false"
+    elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    streaming_enabled = (
+        _TTS_ELEVENLABS_ENABLED
+        and elevenlabs_api_key
+        and os.getenv("TTS_STREAMING_WS", "true").lower() != "false"
+    )
 
     t0 = time.time()
     first_chunk_sent = False
@@ -154,8 +168,8 @@ async def tts_stream_ws(websocket: WebSocket) -> None:
     receive_task = asyncio.ensure_future(_receive_loop())
 
     try:
-        if api_key and streaming_enabled:
-            # Primary path: ElevenLabs input-streaming WS
+        if streaming_enabled and engine is not None:
+            # Optional path: ElevenLabs input-streaming WS (only when TTS_ELEVENLABS_ENABLED=true)
             voice_id = os.getenv("ELEVENLABS_VOICE_ID", "")
             try:
                 async for chunk in engine.synthesize_stream(
@@ -171,10 +185,10 @@ async def tts_stream_ws(websocket: WebSocket) -> None:
                     json.dumps({"type": "done", "latency_ms": latency_ms, "engine": "elevenlabs"})
                 )
             except Exception as exc:
-                log.warning("ElevenLabs WS stream failed, falling back: %s", exc)
+                log.warning("ElevenLabs WS stream failed, falling back to Sarvam: %s", exc)
                 await _ws_batch_fallback(websocket, text_queue, t0)
         else:
-            # Fallback: drain queue, batch-synthesize via Sarvam
+            # Primary path: drain queue, batch-synthesize via Sarvam Bulbul
             await _ws_batch_fallback(websocket, text_queue, t0)
 
     except WebSocketDisconnect:

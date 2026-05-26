@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from typing import AsyncIterator
 
@@ -21,6 +22,19 @@ except Exception:  # evs_common optional outside repo
         yield {"output": None}
 
 _TIMEOUT_S = 20.0
+
+# OpenRouter / LLM provider configuration
+# Override via env vars to switch providers without code changes:
+#   LLM_BASE_URL  — defaults to OpenRouter
+#   LLM_MODEL     — defaults to google/gemini-2.0-flash-001
+#   LLM_API_KEY   — falls back to OPENROUTER_API_KEY, then GROQ_API_KEY
+_LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://openrouter.ai/api/v1/chat/completions")
+_LLM_MODEL = os.getenv("LLM_MODEL", "google/gemini-2.0-flash-001")
+_LLM_API_KEY = (
+    os.getenv("LLM_API_KEY")
+    or os.getenv("OPENROUTER_API_KEY")
+    or os.getenv("GROQ_API_KEY", "")
+)
 
 
 class LLMRouter:
@@ -123,18 +137,18 @@ class LLMRouter:
             active = DEFAULT_MODEL
         chain = _build_chain(active, list(self._backends.keys()))
 
-        # Try Groq streaming first (it supports native streaming)
-        groq_backend = None
+        # Try streaming-capable backend first (openrouter/groq_llama both support SSE streaming)
+        stream_backend = None
         for model_name in chain:
             backend = self._backends.get(model_name)
-            if backend is not None and backend.name == "groq_llama":
-                groq_backend = (model_name, backend)
+            if backend is not None and backend.name in ("openrouter", "groq_llama"):
+                stream_backend = (model_name, backend)
                 break
 
-        if groq_backend is not None:
-            model_name, backend = groq_backend
+        if stream_backend is not None:
+            model_name, backend = stream_backend
             try:
-                async for sse_line in _groq_stream(backend, req, kb_context):
+                async for sse_line in _llm_stream(backend, req, kb_context):
                     yield sse_line
                 return
             except Exception:
@@ -213,18 +227,18 @@ class LLMRouter:
             active = DEFAULT_MODEL
         chain = _build_chain(active, list(self._backends.keys()))
 
-        # Prefer Groq for plain-text streaming (fastest)
-        groq_backend = None
+        # Prefer streaming-capable backend for plain-text streaming
+        stream_backend = None
         for model_name in chain:
             backend = self._backends.get(model_name)
-            if backend is not None and backend.name == "groq_llama":
-                groq_backend = (model_name, backend)
+            if backend is not None and backend.name in ("openrouter", "groq_llama"):
+                stream_backend = (model_name, backend)
                 break
 
-        if groq_backend is not None:
-            model_name, backend = groq_backend
+        if stream_backend is not None:
+            model_name, backend = stream_backend
             try:
-                async for sse_line in _groq_stream_text(backend, req, kb_context):
+                async for sse_line in _llm_stream_text(backend, req, kb_context):
                     yield sse_line
                 return
             except Exception:
@@ -318,22 +332,28 @@ def _extract_reply_progress(buf: str):
     return "".join(out), False  # partial
 
 
-async def _groq_stream(backend, req: LLMRequest, kb_context: str) -> AsyncIterator[str]:
-    """Stream tokens from Groq using its streaming chat completions API.
+async def _llm_stream(backend, req: LLMRequest, kb_context: str) -> AsyncIterator[str]:
+    """Stream JSON-structured tokens from an OpenAI-compatible endpoint (OpenRouter or Groq).
 
-    Builds the same prompt as the batch backend, calls Groq with stream=True,
+    Builds the same prompt as the batch backend, calls the endpoint with stream=True,
     accumulates the JSON reply across chunks, then validates + emits the final event.
+
+    Provider is selected via module-level _LLM_BASE_URL / _LLM_MODEL / _LLM_API_KEY,
+    defaulting to OpenRouter with google/gemini-2.0-flash-001.
     """
-    import os
     import httpx
 
-    api_key = backend._api_key or os.getenv("GROQ_API_KEY", "")
+    api_key = getattr(backend, "_api_key", None) or _LLM_API_KEY
     if not api_key:
-        raise RuntimeError("No GROQ_API_KEY")
+        raise RuntimeError("No LLM API key configured (LLM_API_KEY / OPENROUTER_API_KEY / GROQ_API_KEY)")
+
+    # Resolve model: backend-specific override → env → default (OpenRouter gemini)
+    model = getattr(backend, "_model", None) or _LLM_MODEL
+    base_url = _LLM_BASE_URL
 
     messages = backend._build_messages(req, kb_context)
     payload = {
-        "model": "llama-3.3-70b-versatile",
+        "model": model,
         "messages": messages,
         "response_format": {"type": "json_object"},
         "temperature": 0.3,
@@ -347,7 +367,7 @@ async def _groq_stream(backend, req: LLMRequest, kb_context: str) -> AsyncIterat
     async with httpx.AsyncClient(timeout=30.0) as client:
         async with client.stream(
             "POST",
-            "https://api.groq.com/openai/v1/chat/completions",
+            base_url,
             json=payload,
             headers=headers,
         ) as resp:
@@ -389,24 +409,31 @@ async def _groq_stream(backend, req: LLMRequest, kb_context: str) -> AsyncIterat
     yield f"data: {json.dumps(final)}\n\n"
 
 
-async def _groq_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncIterator[str]:
-    """Stream PLAIN TEXT tokens from Groq — no json_object mode, ~0.8s first-token.
+async def _llm_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncIterator[str]:
+    """Stream PLAIN TEXT tokens from an OpenAI-compatible endpoint — no json_object mode.
 
     The system prompt instructs the model to respond with ONLY the spoken reply
     (no JSON wrapper). Tokens are streamed as-is. Final SSE event has done=true.
 
+    Provider is selected via module-level _LLM_BASE_URL / _LLM_MODEL / _LLM_API_KEY,
+    defaulting to OpenRouter with google/gemini-2.0-flash-001.
+
     This is the SPEECH path. Metadata (next_action, summary) comes from the
     parallel structured batch call in the worker.
     """
-    import os
     import httpx
+    import sys
 
-    api_key = getattr(backend, "_api_key", None) or os.getenv("GROQ_API_KEY", "")
+    api_key = getattr(backend, "_api_key", None) or _LLM_API_KEY
     if not api_key:
-        raise RuntimeError("No GROQ_API_KEY")
+        raise RuntimeError("No LLM API key configured (LLM_API_KEY / OPENROUTER_API_KEY / GROQ_API_KEY)")
 
     if not hasattr(backend, "_build_messages"):
         raise RuntimeError("Backend does not support _build_messages")
+
+    # Resolve model + URL from env (allows runtime switch from OpenRouter → Groq etc.)
+    model = getattr(backend, "_model", None) or _LLM_MODEL
+    base_url = _LLM_BASE_URL
 
     # Build a trimmed system prompt: same persona + KB, but instruct plain-text reply only
     system_lines = [
@@ -426,7 +453,7 @@ async def _groq_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncI
     messages.append({"role": "user", "content": req.user_turn})
 
     payload = {
-        "model": "llama-3.3-70b-versatile",
+        "model": model,
         "messages": messages,
         # NO response_format: json_object — plain text, real streaming from token 1
         "temperature": 0.3,
@@ -435,14 +462,13 @@ async def _groq_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncI
     }
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    import sys
-    t0 = __import__("time").time()
+    t0 = time.time()
     first_token_emitted = False
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         async with client.stream(
             "POST",
-            "https://api.groq.com/openai/v1/chat/completions",
+            base_url,
             json=payload,
             headers=headers,
         ) as resp:

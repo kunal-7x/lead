@@ -12,6 +12,8 @@ from tts_router.models import VoiceInfo
 _API_KEY = os.getenv("SARVAM_API_KEY", "")
 _URL = "https://api.sarvam.ai/text-to-speech"
 _TIMEOUT = 10.0
+# Override TTS model via env (default bulbul:v2)
+_TTS_MODEL = os.getenv("SARVAM_TTS_MODEL", "bulbul:v2")
 
 _VOICES = [
     VoiceInfo(id="anushka", name="Anushka", lang="hi-en", engine="sarvam_bulbul"),
@@ -51,7 +53,7 @@ class SarvamBulbulEngine(TTSEngine):
             "loudness": 1.5,
             "speech_sample_rate": 8000,
             "enable_preprocessing": True,
-            "model": "bulbul:v2",
+            "model": _TTS_MODEL,
         }
         headers = {"API-Subscription-Key": self._api_key}
         resp = await self._client.post(_URL, json=payload, headers=headers)
@@ -71,7 +73,7 @@ class SarvamBulbulEngine(TTSEngine):
                 "target_language_code": "hi-IN",
                 "speaker": _DEFAULT_SPEAKER,
                 "speech_sample_rate": 8000,
-                "model": "bulbul:v2",
+                "model": _TTS_MODEL,
             }
             resp = await self._client.post(
                 _URL, json=payload,

@@ -10,9 +10,9 @@ from tests.fakes.fake_backends import FakeBackend
 from tests.conftest import make_req
 
 
-async def test_default_model_is_groq(switcher):
+async def test_default_model_is_openrouter(switcher):
     active = await switcher.active_model("tenant-1")
-    assert active == DEFAULT_MODEL == "groq_llama"
+    assert active == DEFAULT_MODEL == "openrouter"
 
 
 async def test_global_model_switch(fake_redis):

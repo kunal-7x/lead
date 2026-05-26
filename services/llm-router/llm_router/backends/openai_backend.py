@@ -87,20 +87,34 @@ class AnthropicBackend(LLMBackend):
 
 
 class OpenRouterBackend(LLMBackend):
+    """OpenRouter backend — default LLM provider.
+
+    Env vars:
+      LLM_API_KEY / OPENROUTER_API_KEY  — API key (required)
+      LLM_MODEL                          — model slug (default google/gemini-2.0-flash-001)
+      LLM_BASE_URL                       — completions endpoint (default OpenRouter)
+    """
     name = "openrouter"
 
-    def __init__(self, api_key: str = "", model: str = "meta-llama/llama-3.3-70b-instruct") -> None:
-        self._api_key = api_key or os.getenv("OPENROUTER_API_KEY", "")
-        self._model = model
+    _DEFAULT_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
+    _DEFAULT_MODEL = "google/gemini-2.0-flash-001"
+
+    def __init__(self, api_key: str = "", model: str = "") -> None:
+        self._api_key = (
+            api_key
+            or os.getenv("LLM_API_KEY")
+            or os.getenv("OPENROUTER_API_KEY", "")
+        )
+        self._model = model or os.getenv("LLM_MODEL", self._DEFAULT_MODEL)
+        self._base_url = os.getenv("LLM_BASE_URL", self._DEFAULT_BASE_URL)
         self._client = httpx.AsyncClient(timeout=30.0)
 
     async def generate(self, req: LLMRequest, kb_context: str) -> tuple[BrainOutput, int, int]:
         messages = self._build_messages(req, kb_context)
         payload = {"model": self._model, "messages": messages,
-                   "response_format": {"type": "json_object"}}
+                   "response_format": {"type": "json_object"}, "temperature": 0.3}
         headers = {"Authorization": f"Bearer {self._api_key}"}
-        resp = await self._client.post("https://openrouter.ai/api/v1/chat/completions",
-                                       json=payload, headers=headers)
+        resp = await self._client.post(self._base_url, json=payload, headers=headers)
         resp.raise_for_status()
         body = resp.json()
         content = body["choices"][0]["message"]["content"]
@@ -111,8 +125,10 @@ class OpenRouterBackend(LLMBackend):
         if not self._api_key:
             return False
         try:
+            # Derive models list URL from base_url (strip path, use /models)
+            models_url = self._base_url.rsplit("/chat/completions", 1)[0] + "/models"
             resp = await self._client.get(
-                "https://openrouter.ai/api/v1/models",
+                models_url,
                 headers={"Authorization": f"Bearer {self._api_key}"}, timeout=3.0,
             )
             return resp.status_code == 200

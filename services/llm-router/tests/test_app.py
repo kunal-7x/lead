@@ -38,7 +38,7 @@ def test_list_models(client):
     assert resp.status_code == 200
     body = resp.json()
     assert "groq_llama" in body["models"]
-    assert body["default"] == "groq_llama"
+    assert body["default"] == "openrouter"
 
 
 def test_generate(client):
@@ -52,6 +52,7 @@ def test_generate(client):
     assert resp.status_code == 200
     body = resp.json()
     assert "brain" in body
+    # router uses groq_llama fake backend (the only one registered in test fixture)
     assert body["model_used"] == "groq_llama"
 
 

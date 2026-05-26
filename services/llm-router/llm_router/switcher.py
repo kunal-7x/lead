@@ -7,7 +7,7 @@ VALID_MODELS = {
     "groq_llama", "sarvam_105b", "openrouter",
     "openai_gpt4o", "anthropic_claude", "google_gemini",
 }
-DEFAULT_MODEL = "groq_llama"
+DEFAULT_MODEL = "openrouter"
 
 _GLOBAL_KEY = "llm:global_model"
 
