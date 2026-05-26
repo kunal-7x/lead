@@ -64,10 +64,21 @@ class HttpSTTClient:
         session_id: str,
         tenant_id: str = "",
     ) -> STTResult:
-        """Streaming STT via WebSocket.
+        """Streaming STT via WebSocket — NEW protocol (lang as query param).
+
+        Uses the NEW /v1/stt/stream protocol introduced for Sarvam streaming:
+          CONNECT: ws://stt-router:8110/v1/stt/stream?lang=hi-en&session_id=X
+          SEND:    raw binary PCM16 8kHz frames (320 bytes = 20ms each)
+                   Sentinel: empty binary frame b"" = end-of-utterance
+          RECEIVE: {"type":"interim",...} | {"type":"final",...} | {"type":"error",...}
+
+        The lang query param is REQUIRED to activate the Sarvam streaming engine path
+        in the STT router. Without it the router falls back to the legacy protocol
+        which transcribes each 20ms frame individually via batch STT, returning
+        garbage short tokens (e.g. 'Yes.') for every utterance.
 
         Pulls PCM16 8kHz frames from `audio_queue` (None = end-of-speech), streams
-        them to /v1/stt/stream, sends flush, and returns the best final transcript.
+        them, sends 0-byte sentinel, and returns the final transcript.
         Falls back to empty STTResult on any WS error (caller then uses batch path).
         """
         try:
@@ -75,38 +86,35 @@ class HttpSTTClient:
         except ImportError:
             raise RuntimeError("websockets package not installed; streaming STT unavailable")
 
-        ws_url = f"{self._ws_base}/v1/stt/stream"
+        # NEW protocol: lang + session_id as query params (activates Sarvam streaming engine)
+        ws_url = (
+            f"{self._ws_base}/v1/stt/stream"
+            f"?lang={lang}&session_id={session_id}"
+        )
         best_text = ""
         best_conf = 0.0
         engine_used = ""
 
         try:
             async with websockets.connect(ws_url, open_timeout=3, close_timeout=2) as ws:
-                # 1. Send metadata
-                await ws.send(json.dumps({
-                    "lang": lang,
-                    "session_id": session_id,
-                    "tenant_id": tenant_id,
-                }))
+                # NEW protocol: NO JSON header — go straight to binary frames.
 
                 async def _send_frames():
                     while True:
                         chunk = await audio_queue.get()
                         if chunk is None:
                             break
-                        await ws.send(chunk)
-                    # End of speech — flush
+                        await ws.send(chunk)  # binary PCM16 frame
+                    # End of speech — send 0-byte sentinel (NEW protocol)
                     try:
-                        await ws.send(json.dumps({"type": "flush"}))
+                        await ws.send(b"")
                     except Exception:  # noqa: BLE001
                         pass
 
                 send_task = asyncio.create_task(_send_frames())
 
-                # 2. Collect partial + final results while sending.
-                # The /v1/stt/stream server emits {"type": "interim"|"final"|"error"}
-                # (matching SarvamStreamingEngine.stream_utterance). Older builds also
-                # set is_final — accept both so we never miss the transcript.
+                # Collect interim + final results.
+                # NEW protocol: {"type":"interim"|"final"|"error"} — no is_final field.
                 try:
                     async for raw in ws:
                         try:
@@ -115,20 +123,22 @@ class HttpSTTClient:
                             continue
                         mtype = msg.get("type", "")
                         if mtype == "error":
-                            # streaming_disabled / engine error → fall back to batch
-                            raise RuntimeError(msg.get("message", "stt_stream_error"))
+                            err_msg = msg.get("message", "stt_stream_error")
+                            if err_msg == "streaming_disabled":
+                                # STT_STREAMING_ENGINE not set on server — fall back to batch
+                                raise RuntimeError("streaming_disabled")
+                            raise RuntimeError(err_msg)
                         text = msg.get("text", "")
                         conf = float(msg.get("confidence", 0.0))
                         eng = msg.get("engine_used", "")
-                        is_final = mtype == "final" or bool(msg.get("is_final"))
-                        if is_final:
+                        if mtype == "final":
                             if text:
                                 best_text = text
                                 best_conf = conf
                                 engine_used = eng
-                            break  # final received — stop reading
-                        else:
-                            # Track best partial in case we never get a final
+                            break  # final received — done
+                        elif mtype == "interim":
+                            # Track best interim in case we never get a final
                             if text and conf >= best_conf:
                                 best_text = text
                                 best_conf = conf
