@@ -52,3 +52,26 @@ async def test_cache_miss_count(router, fake_cache):
     await router.synthesize(make_req(text="miss this"))
     assert fake_cache.miss_count == 1
     assert fake_cache.hit_count == 0
+
+
+async def test_cache_key_includes_premium(fake_cache):
+    """Different premium flags produce different cache keys."""
+    k1 = cache_key("hello", "meera", "hi-en", premium=False)
+    k2 = cache_key("hello", "meera", "hi-en", premium=True)
+    assert k1 != k2, "Cache keys should differ for different premium values"
+
+
+async def test_premium_flag_separate_cache_entries(router):
+    """Requests with different premium flags should use different cache entries."""
+    # First request with premium=False
+    r1 = await router.synthesize(make_req(text="Test premium", tts_premium=False))
+    assert r1.cache_hit is False, "First call should miss cache"
+    
+    # Second request with same text but premium=True (should miss cache)
+    r2 = await router.synthesize(make_req(text="Test premium", tts_premium=True))
+    assert r2.cache_hit is False, "Different premium flag should miss cache"
+    
+    # Third request with premium=False again (should hit cache)
+    r3 = await router.synthesize(make_req(text="Test premium", tts_premium=False))
+    assert r3.cache_hit is True, "Same premium flag should hit cache"
+    assert r1.audio == r3.audio, "Audio should be identical for same premium value"

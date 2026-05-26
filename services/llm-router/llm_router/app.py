@@ -4,7 +4,7 @@ import os
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from llm_router.backends.groq import GroqLlamaBackend
 from llm_router.backends.sarvam import SarvamLLMBackend
@@ -69,3 +69,43 @@ async def generate(req: LLMRequest) -> JSONResponse:
     assert _router is not None
     result = await _router.generate(req)
     return JSONResponse(result.model_dump())
+
+
+@app.post("/v1/llm/generate/stream")
+async def generate_stream(req: LLMRequest) -> StreamingResponse:
+    """Stream LLM tokens as Server-Sent Events (text/event-stream).
+
+    Token events:  data: {"token":"<piece>","done":false}\\n\\n
+    Final event:   data: {"token":"","done":true,"summary":"<>","next_action":"<>"}\\n\\n
+    """
+    assert _router is not None
+    return StreamingResponse(
+        _router.generate_stream(req),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/v1/llm/generate/stream_text")
+async def generate_stream_text(req: LLMRequest) -> StreamingResponse:
+    """Stream PLAIN TEXT spoken reply tokens as SSE — NO json_object mode.
+
+    First-token latency ~0.8s (vs ~3.4s for /stream which uses json_object mode).
+    Use this endpoint for the SPEECH path; call /generate in parallel for
+    structured metadata (next_action, summary, lead fields).
+
+    Token events:  data: {"token":"<piece>","done":false}\\n\\n
+    Final event:   data: {"token":"","done":true}\\n\\n
+    """
+    assert _router is not None
+    return StreamingResponse(
+        _router.generate_stream_text(req),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

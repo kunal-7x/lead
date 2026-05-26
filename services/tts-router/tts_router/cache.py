@@ -5,9 +5,9 @@ import time
 from typing import Protocol
 
 
-def cache_key(text: str, voice_id: str, lang: str) -> str:
-    """sha256(text + voice_id + lang) → hex digest used as cache key."""
-    raw = f"{text}|{voice_id}|{lang}".encode()
+def cache_key(text: str, voice_id: str, lang: str, premium: bool = False) -> str:
+    """sha256(text + voice_id + lang + premium) → hex digest used as cache key."""
+    raw = f"{text}|{voice_id}|{lang}|{premium}".encode()
     return hashlib.sha256(raw).hexdigest()
 
 

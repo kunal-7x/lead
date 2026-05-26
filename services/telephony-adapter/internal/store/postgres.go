@@ -33,7 +33,28 @@ func (p *PostgresStore) StoreCallSession(ctx context.Context, s *model.CallSessi
 	if s.CreatedAt.IsZero() {
 		s.CreatedAt = time.Now().UTC()
 	}
-	return p.kv.Put(ctx, "call_sessions", s.ID, *s)
+	if err := p.kv.Put(ctx, "call_sessions", s.ID, *s); err != nil {
+		return err
+	}
+	// Secondary index so inbound webhooks (which only carry the provider call id)
+	// can resolve the owning session/tenant.
+	if s.ProviderCallID != "" {
+		if err := p.kv.Put(ctx, "call_sessions_by_provider_call", s.ProviderCallID, *s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *PostgresStore) GetCallSessionByProviderCallID(ctx context.Context, providerCallID string) (*model.CallSession, error) {
+	s, ok, err := pgkv.Get[model.CallSession](ctx, p.kv, "call_sessions_by_provider_call", providerCallID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("store: call session for provider_call_id %s not found", providerCallID)
+	}
+	return &s, nil
 }
 
 func (p *PostgresStore) GetCallSession(ctx context.Context, sessionID string) (*model.CallSession, error) {

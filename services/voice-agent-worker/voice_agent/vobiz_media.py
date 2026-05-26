@@ -279,7 +279,25 @@ async def run_vobiz_bridge(
         store = DemoTurnStore()
         vad = SileroVAD()
 
-    loop = AgentLoop(ctx, stt, llm, guardrail, tts, publisher, store, vad)
+    # Synthesize an opening greeting so the caller hears the agent immediately
+    # on answer (before they speak) — otherwise Vobiz reaches end-of-XML and
+    # hangs up on silence. A TTS failure here must not crash the call: we just
+    # proceed with no greeting.
+    greeting_audio: bytes | None = None
+    greeting_text = getattr(ctx, "greeting", None) or (
+        "Hello! Thank you for taking my call. How can I help you today?"
+    )
+    try:
+        greeting_result = await tts.synthesize(
+            greeting_text, ctx.lang, ctx.voice_profile_id,
+            ctx.tenant_id, ctx.session_id, ctx.tts_premium,
+        )
+        greeting_audio = greeting_result.audio
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("vobiz_bridge greeting TTS failed, no greeting: %r", exc)
+
+    loop = AgentLoop(ctx, stt, llm, guardrail, tts, publisher, store, vad,
+                     greeting_audio=greeting_audio)
 
     try:
         await loop.run(audio_source(), send_audio, send_json)

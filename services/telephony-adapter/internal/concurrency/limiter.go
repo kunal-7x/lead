@@ -170,8 +170,20 @@ func (r *redisLimiter) decrKey(ctx context.Context, key string) error {
 	if _, err := conn.Write([]byte(cmd)); err != nil {
 		return err
 	}
-	_, err = readRedisInt(conn)
-	return err
+	val, err := readRedisInt(conn)
+	if err != nil {
+		return err
+	}
+	// Floor at zero: a DECR that drops the counter below zero indicates an
+	// over-decrement; correct it back up so the cap stays accurate.
+	if val < 0 {
+		incrCmd := fmt.Sprintf("*2\r\n$4\r\nINCR\r\n$%d\r\n%s\r\n", len(key), key)
+		if _, werr := conn.Write([]byte(incrCmd)); werr != nil {
+			return werr
+		}
+		_, _ = readRedisInt(conn)
+	}
+	return nil
 }
 
 // readRedisInt reads a Redis integer reply (:N\r\n).

@@ -19,8 +19,9 @@ async def test_single_turn():
     result = await run_loop(loop, ws.all_chunks())
 
     assert stt.call_count == 1
-    assert llm.call_count == 1
-    assert tts.call_count == 1
+    assert llm.call_count == 1  # generate() called once for parallel metadata
+    # TTS call_count >= 1: filler pre-synthesis (up to 4) + reply sentences
+    assert tts.call_count >= 1
     assert len(result["audio"]) >= 1
     assert result["brain"].reply == "60 lakh hai."
 

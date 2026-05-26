@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import struct
+from typing import AsyncIterator
 from voice_agent.models import STTResult, BrainOutput, TTSResult, SessionContext
 
 _SILENT_PCM = b"\x00\x00" * 400  # 50ms silence at 8kHz
@@ -34,9 +35,7 @@ class FakeLLM:
         self.whatsapp = whatsapp
         self.call_count = 0
 
-    async def generate(self, ctx: SessionContext, user_turn: str,
-                       dialog_history: list) -> BrainOutput:
-        self.call_count += 1
+    def _make_brain(self) -> BrainOutput:
         return BrainOutput(
             reply=self.reply,
             lead_status=self.lead_status,
@@ -50,6 +49,35 @@ class FakeLLM:
             confidence=0.88,
             summary="Warm lead interested in 2BHK",
         )
+
+    async def generate(self, ctx: SessionContext, user_turn: str,
+                       dialog_history: list) -> BrainOutput:
+        self.call_count += 1
+        return self._make_brain()
+
+    async def generate_stream(
+        self, ctx: SessionContext, user_turn: str, dialog_history: list
+    ) -> AsyncIterator[tuple[str, BrainOutput | None]]:
+        """Fake streaming LLM: yields reply word-by-word then final brain."""
+        self.call_count += 1
+        brain = self._make_brain()
+        words = self.reply.split()
+        for i, word in enumerate(words):
+            token = word + (" " if i < len(words) - 1 else "")
+            yield (token, None)
+        yield ("", brain)
+
+    async def generate_stream_text(
+        self, ctx: SessionContext, user_turn: str, dialog_history: list
+    ) -> AsyncIterator[tuple[str, None]]:
+        """Fake plain-text streaming LLM: yields reply word-by-word, no final brain."""
+        # NOTE: generate() is called separately (parallel metadata) — don't increment
+        # call_count here since the agent also calls generate() concurrently.
+        brain = self._make_brain()
+        words = brain.reply.split()
+        for i, word in enumerate(words):
+            token = word + (" " if i < len(words) - 1 else "")
+            yield (token, None)
 
 
 class FakeGuardrail:

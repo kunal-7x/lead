@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 import os
-from typing import Protocol
+from typing import AsyncIterator, Protocol
 
 import httpx
 
@@ -11,6 +14,8 @@ _STT_URL = os.getenv("STT_ROUTER_URL", "http://stt-router:8110")
 _LLM_URL = os.getenv("LLM_ROUTER_URL", "http://llm-router:8111")
 _GUARDRAIL_URL = os.getenv("GUARDRAIL_URL", "http://guardrail:8112")
 _TTS_URL = os.getenv("TTS_ROUTER_URL", "http://tts-router:8113")
+
+logger = logging.getLogger(__name__)
 
 
 class STTClient(Protocol):
@@ -39,8 +44,11 @@ class HttpSTTClient:
     def __init__(self, base_url: str = "") -> None:
         self._base_url = base_url or _STT_URL
         self._client = httpx.AsyncClient(timeout=10.0)
+        # WS base: convert http(s) to ws(s)
+        self._ws_base = self._base_url.replace("https://", "wss://").replace("http://", "ws://")
 
     async def transcribe(self, audio: bytes, lang: str, session_id: str) -> STTResult:
+        """Batch STT — POST full WAV, blocks until transcript ready."""
         resp = await self._client.post(
             f"{self._base_url}/v1/stt/batch",
             files={"file": ("audio.raw", audio, "application/octet-stream")},
@@ -48,6 +56,94 @@ class HttpSTTClient:
         )
         resp.raise_for_status()
         return STTResult(**resp.json())
+
+    async def stream_transcribe(
+        self,
+        audio_queue: asyncio.Queue,  # Queue[bytes | None] — None is sentinel
+        lang: str,
+        session_id: str,
+        tenant_id: str = "",
+    ) -> STTResult:
+        """Streaming STT via WebSocket.
+
+        Pulls PCM16 8kHz frames from `audio_queue` (None = end-of-speech), streams
+        them to /v1/stt/stream, sends flush, and returns the best final transcript.
+        Falls back to empty STTResult on any WS error (caller then uses batch path).
+        """
+        try:
+            import websockets  # type: ignore
+        except ImportError:
+            raise RuntimeError("websockets package not installed; streaming STT unavailable")
+
+        ws_url = f"{self._ws_base}/v1/stt/stream"
+        best_text = ""
+        best_conf = 0.0
+        engine_used = ""
+
+        try:
+            async with websockets.connect(ws_url, open_timeout=3, close_timeout=2) as ws:
+                # 1. Send metadata
+                await ws.send(json.dumps({
+                    "lang": lang,
+                    "session_id": session_id,
+                    "tenant_id": tenant_id,
+                }))
+
+                async def _send_frames():
+                    while True:
+                        chunk = await audio_queue.get()
+                        if chunk is None:
+                            break
+                        await ws.send(chunk)
+                    # End of speech — flush
+                    try:
+                        await ws.send(json.dumps({"type": "flush"}))
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                send_task = asyncio.create_task(_send_frames())
+
+                # 2. Collect partial + final results while sending
+                try:
+                    async for raw in ws:
+                        try:
+                            msg = json.loads(raw)
+                        except (ValueError, TypeError):
+                            continue
+                        text = msg.get("text", "")
+                        conf = float(msg.get("confidence", 0.0))
+                        eng = msg.get("engine_used", "")
+                        if msg.get("is_final"):
+                            if text:
+                                best_text = text
+                                best_conf = conf
+                                engine_used = eng
+                        else:
+                            # Track best partial in case we never get a final
+                            if text and conf >= best_conf:
+                                best_text = text
+                                best_conf = conf
+                                if eng:
+                                    engine_used = eng
+                except Exception:  # noqa: BLE001
+                    pass
+                finally:
+                    send_task.cancel()
+                    try:
+                        await send_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Streaming STT WS error: %r — will fall back to batch", exc)
+            raise  # let caller fall back
+
+        return STTResult(
+            text=best_text,
+            confidence=best_conf,
+            engine_used=engine_used,
+            is_final=True,
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -58,9 +154,9 @@ class HttpLLMClient:
         self._base_url = base_url or _LLM_URL
         self._client = httpx.AsyncClient(timeout=20.0)
 
-    async def generate(self, ctx: SessionContext, user_turn: str,
-                       dialog_history: list[dict]) -> BrainOutput:
-        payload = {
+    def _build_payload(self, ctx: SessionContext, user_turn: str,
+                       dialog_history: list[dict]) -> dict:
+        return {
             "user_turn": user_turn,
             "lang": ctx.lang,
             "tenant_id": ctx.tenant_id,
@@ -69,10 +165,127 @@ class HttpLLMClient:
             "system_prompt_version": ctx.system_prompt_version,
             "dialog_history": dialog_history,
         }
+
+    async def generate(self, ctx: SessionContext, user_turn: str,
+                       dialog_history: list[dict]) -> BrainOutput:
+        """Batch LLM — waits for the full reply before returning."""
+        payload = self._build_payload(ctx, user_turn, dialog_history)
         resp = await self._client.post(f"{self._base_url}/v1/llm/generate", json=payload)
         resp.raise_for_status()
         body = resp.json()
         return BrainOutput(**body["brain"])
+
+    async def generate_stream_text(
+        self,
+        ctx: SessionContext,
+        user_turn: str,
+        dialog_history: list[dict],
+    ) -> AsyncIterator[tuple[str, None]]:
+        """Plain-text streaming LLM via SSE — ~0.8s first-token, no JSON mode.
+
+        Yields (token_text, None) for each token.
+        When the stream ends (done=true) the iterator returns.
+
+        CONTRACT: POST /v1/llm/generate/stream_text — same body as /v1/llm/generate.
+        Each SSE event: data: {"token":"...","done":false}
+        Final event:    data: {"token":"","done":true}
+        """
+        payload = self._build_payload(ctx, user_turn, dialog_history)
+        async with self._client.stream(
+            "POST",
+            f"{self._base_url}/v1/llm/generate/stream_text",
+            json=payload,
+            timeout=30.0,
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                raw = line[5:].strip()
+                if not raw:
+                    continue
+                try:
+                    msg = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+
+                token = msg.get("token", "")
+                done = msg.get("done", False)
+
+                if done:
+                    return
+                if token:
+                    yield (token, None)
+
+    async def generate_stream(
+        self,
+        ctx: SessionContext,
+        user_turn: str,
+        dialog_history: list[dict],
+    ) -> AsyncIterator[tuple[str, BrainOutput | None]]:
+        """Streaming LLM via SSE.
+
+        Yields (token_text, None) for each incremental token.
+        When the stream ends yields ("", brain_output) with the final BrainOutput.
+
+        On any HTTP/SSE error, raises so the caller can fall back to `generate`.
+
+        CONTRACT: POST /v1/llm/generate/stream — same body as /v1/llm/generate.
+        Each SSE event: data: {"token":"...","done":false}
+        Final event:    data: {"token":"","done":true,"summary":"...","next_action":"...","brain":{...}}
+        """
+        payload = self._build_payload(ctx, user_turn, dialog_history)
+        async with self._client.stream(
+            "POST",
+            f"{self._base_url}/v1/llm/generate/stream",
+            json=payload,
+            timeout=30.0,
+        ) as resp:
+            resp.raise_for_status()
+            accumulated = ""
+            summary = ""
+            next_action = "qualify"
+            brain_out: BrainOutput | None = None
+
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                raw = line[5:].strip()
+                if not raw:
+                    continue
+                try:
+                    msg = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+
+                token = msg.get("token", "")
+                done = msg.get("done", False)
+
+                if done:
+                    # Final event — build BrainOutput
+                    if "brain" in msg and isinstance(msg["brain"], dict):
+                        brain_out = BrainOutput(**msg["brain"])
+                    else:
+                        # Construct from accumulated tokens + metadata
+                        brain_out = BrainOutput(
+                            reply=accumulated.strip(),
+                            next_action=msg.get("next_action", next_action),
+                            summary=msg.get("summary", summary),
+                        )
+                    yield ("", brain_out)
+                    return
+                else:
+                    accumulated += token
+                    yield (token, None)
+
+            # Stream ended without a done=true event — build from what we have
+            if brain_out is None:
+                brain_out = BrainOutput(
+                    reply=accumulated.strip(),
+                    next_action=next_action,
+                    summary=summary,
+                )
+            yield ("", brain_out)
 
     async def aclose(self) -> None:
         await self._client.aclose()

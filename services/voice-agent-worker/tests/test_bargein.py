@@ -27,8 +27,14 @@ async def test_barge_in_stops_tts():
     loop = make_loop(stt=stt, llm=llm, tts=tts, vad=vad)
 
     # Simulate: utterance → silence (VAD triggers) → new speech while TTS plays
-    # The barge-in is modeled by having speech start while _playing_tts = True
-    chunks = [_speech()] * 10 + [_silence()] * 40
+    # The barge-in is modeled by having speech start while _playing_tts = True.
+    # Use SILENCE_THRESHOLD_MS // CHUNK_MS + 1 silence chunks so exactly 1 extra
+    # silence chunk remains after the utterance ends; after VAD reset that 1 chunk
+    # counts as "speech" (FakeVAD counts calls, not audio content), leaving the
+    # barge-in speech chunk within the first-10 window.
+    from voice_agent.vad import SILENCE_THRESHOLD_MS, CHUNK_MS
+    _n_silence = SILENCE_THRESHOLD_MS // CHUNK_MS + 1
+    chunks = [_speech()] * 10 + [_silence()] * _n_silence
 
     sent_json = []
     sent_audio = []

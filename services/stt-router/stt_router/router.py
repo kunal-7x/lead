@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from typing import Sequence
 
@@ -17,10 +18,32 @@ except Exception:
     async def trace_span(*a, **kw):  # type: ignore
         yield {"output": None}
 
-_TIMEOUT_S = 1.5        # mark engine unhealthy after 1.5s
-_UNHEALTHY_TTL_S = 60   # stay unhealthy for 60s
-_MIN_CONFIDENCE = 0.55  # re-run on next engine if confidence < this
+# Default per-engine timeout. Cloud STT APIs (sarvam/groq) need a realistic
+# round-trip budget — a real utterance measures ~1.5–5s — so 1.5s is fatal.
+# Env-overridable via STT_ENGINE_TIMEOUT_S. Self-hosted engines that are known
+# to be fast get a tighter timeout via _ENGINE_TIMEOUT_S below.
+_TIMEOUT_S = float(os.getenv("STT_ENGINE_TIMEOUT_S", "8.0"))
+
+# Per-engine timeout overrides. Self-hosted/GPU engines respond fast, so they
+# keep a tight budget; cloud engines fall back to the (larger) default.
+# Sarvam gets 20s to allow the engine's HTTP/2 retry path to complete:
+#   worst case = 8s httpx attempt 1 (ReadTimeout) + <1s client recycle + 8s retry = ~17s.
+_ENGINE_TIMEOUT_S = {
+    "faster_whisper": 1.5,
+    "indicconformer": 1.5,
+    "sarvam": float(os.getenv("STT_SARVAM_TIMEOUT_S", "20.0")),
+}
+
+_UNHEALTHY_TTL_S = 15   # stay unhealthy for 15s (was 60s — too punishing on a transient timeout)
+_MIN_CONFIDENCE = 0.55  # re-run on next engine if confidence < this (only when STT_CONFIDENCE_RERUN=1)
+# Confidence-triggered serial re-run doubles latency when Sarvam returns moderate confidence
+# (e.g. 0.4–0.54). Disabled by default; enable only for offline/batch use-cases.
+_CONFIDENCE_RERUN = os.getenv("STT_CONFIDENCE_RERUN", "0") == "1"
 _HEALTH_CACHE_TTL_S = 5.0  # cache health ping results for 5 seconds
+
+
+def _engine_timeout(name: str) -> float:
+    return _ENGINE_TIMEOUT_S.get(name, _TIMEOUT_S)
 
 
 class STTRouter:
@@ -93,7 +116,7 @@ class STTRouter:
                 ) as span:
                     result = await asyncio.wait_for(
                         engine.transcribe(audio, lang, session_id),
-                        timeout=_TIMEOUT_S,
+                        timeout=_engine_timeout(name),
                     )
                     span["output"] = {"text": result.text, "confidence": result.confidence}
             except asyncio.TimeoutError:
@@ -105,10 +128,13 @@ class STTRouter:
 
             last_result = result
 
-            # Re-run on next engine if confidence is too low
-            if result.confidence >= _MIN_CONFIDENCE:
+            # Always return immediately on first successful (non-empty) result.
+            # Serial confidence-triggered re-run is disabled by default because it
+            # doubles latency (two cloud STT calls back-to-back). Enable via env
+            # STT_CONFIDENCE_RERUN=1 for offline/batch pipelines that can afford it.
+            if not _CONFIDENCE_RERUN or result.confidence >= _MIN_CONFIDENCE:
                 return result
-            # confidence too low — try next engine, keep best result
+            # confidence too low AND rerun enabled — try next engine, keep best result
 
         if last_result is not None:
             return last_result

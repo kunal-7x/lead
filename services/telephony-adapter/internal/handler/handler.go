@@ -101,8 +101,17 @@ type createCallRequest struct {
 // Vobiz GETs/POSTs this when the callee answers; we return a <Stream> XML
 // pointing to the voice-agent-worker WebSocket media bridge.
 func (h *Handler) vobizAnswer(w http.ResponseWriter, r *http.Request) {
-	// Vobiz passes CallUUID (or call_uuid) in the query/form params.
-	callUUID := r.URL.Query().Get("CallUUID")
+	// Vobiz POSTs the call identifier in the request BODY (form-encoded or JSON),
+	// not the query string. Parse the body (parseVobizParams merges query params too,
+	// with body taking precedence) and extract the UUID using the same Plivo-family
+	// field order the REST client uses: CallUUID → call_uuid → request_uuid → message_uuid.
+	// The query string is the final fallback so existing GET-based tests still pass.
+	rawBody, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	params, _ := parseVobizParams(r, rawBody)
+	callUUID := vobizCallUUID(params)
+	if callUUID == "" {
+		callUUID = r.URL.Query().Get("CallUUID")
+	}
 	if callUUID == "" {
 		callUUID = r.URL.Query().Get("call_uuid")
 	}
@@ -147,10 +156,7 @@ func (h *Handler) vobizStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	providerCallID := params["CallUUID"]
-	if providerCallID == "" {
-		providerCallID = params["call_uuid"]
-	}
+	providerCallID := vobizCallUUID(params)
 	sigHex := r.Header.Get("X-Signature")
 	eventID := fmt.Sprintf("vbzstatus-%s-%d", providerCallID, time.Now().UnixNano())
 
@@ -168,6 +174,19 @@ func (h *Handler) vobizStatus(w http.ResponseWriter, r *http.Request) {
 	callStatus := params["CallStatus"]
 	if callStatus != "" && providerCallID != "" {
 		h.upsertCallSessionStatus(r.Context(), providerCallID, callStatus)
+	}
+
+	// On a terminal call status, release the concurrency slot. The decrement is
+	// guarded so it fires at most once per call even if the hangup webhook also
+	// arrives (see Router.DecrConcurrencyForCall).
+	if isTerminalVobizStatus(callStatus) {
+		tenantHint := params["TenantID"]
+		if tenantHint == "" {
+			tenantHint = params["tenant_id"]
+		}
+		if err := h.router.DecrConcurrencyForCall(r.Context(), providerCallID, tenantHint); err != nil {
+			log.Printf("vobizStatus: DecrConcurrencyForCall: %v", err)
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -188,10 +207,7 @@ func (h *Handler) vobizHangup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	providerCallID := params["CallUUID"]
-	if providerCallID == "" {
-		providerCallID = params["call_uuid"]
-	}
+	providerCallID := vobizCallUUID(params)
 	sigHex := r.Header.Get("X-Signature")
 	eventID := fmt.Sprintf("vbzhangup-%s-%d", providerCallID, time.Now().UnixNano())
 
@@ -213,15 +229,17 @@ func (h *Handler) vobizHangup(w http.ResponseWriter, r *http.Request) {
 		h.upsertCallSessionStatus(r.Context(), providerCallID, "completed")
 	}
 
-	// Decrement concurrency counter for this tenant.
-	tenantID := params["TenantID"]
-	if tenantID == "" {
-		tenantID = params["tenant_id"]
+	// Release the concurrency slot for this call. Vobiz hangup webhooks do not
+	// reliably carry our tenant id, so DecrConcurrencyForCall resolves the tenant
+	// from the stored call session via providerCallID (falling back to a hint if
+	// present). The decrement is guarded to fire at most once per call, so this is
+	// safe even when the terminal status webhook already decremented.
+	tenantHint := params["TenantID"]
+	if tenantHint == "" {
+		tenantHint = params["tenant_id"]
 	}
-	if tenantID != "" {
-		if err := h.router.DecrConcurrency(r.Context(), tenantID); err != nil {
-			log.Printf("vobizHangup: DecrConcurrency: %v", err)
-		}
+	if err := h.router.DecrConcurrencyForCall(r.Context(), providerCallID, tenantHint); err != nil {
+		log.Printf("vobizHangup: DecrConcurrencyForCall: %v", err)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -242,10 +260,7 @@ func (h *Handler) vobizRecording(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	providerCallID := params["CallUUID"]
-	if providerCallID == "" {
-		providerCallID = params["call_uuid"]
-	}
+	providerCallID := vobizCallUUID(params)
 	sigHex := r.Header.Get("X-Signature")
 	eventID := fmt.Sprintf("vbzrec-%s-%d", providerCallID, time.Now().UnixNano())
 
@@ -260,6 +275,28 @@ func (h *Handler) vobizRecording(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// isTerminalVobizStatus reports whether a Vobiz CallStatus marks the end of a
+// call. Mirrors the terminal statuses mapped in webhook.vobizLifecycleSubject.
+func isTerminalVobizStatus(status string) bool {
+	switch status {
+	case "completed", "failed", "busy", "no-answer", "canceled":
+		return true
+	}
+	return false
+}
+
+// vobizCallUUID extracts the provider call identifier from parsed Vobiz params,
+// trying the Plivo-family field names in the same priority the REST client uses:
+// CallUUID → call_uuid → request_uuid → message_uuid.
+func vobizCallUUID(params map[string]string) string {
+	for _, k := range []string{"CallUUID", "call_uuid", "request_uuid", "message_uuid"} {
+		if v := params[k]; v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // parseVobizParams reads form or JSON body and returns a flat string map.

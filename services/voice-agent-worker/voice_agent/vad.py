@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-SILENCE_THRESHOLD_MS = 700   # silence after this → end of utterance
+SILENCE_THRESHOLD_MS = 500   # silence after this → end of utterance (lowered 700→500ms for latency)
 CHUNK_MS = 20                # 20ms per audio chunk at 8kHz
 BYTES_PER_CHUNK = 8000 * CHUNK_MS // 1000 * 2  # 320 bytes
 

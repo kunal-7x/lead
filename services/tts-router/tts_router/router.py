@@ -42,7 +42,7 @@ class TTSRouter:
         text = normalize(req.text)
 
         # Cache check
-        key = cache_key(text, req.voice_id, req.lang)
+        key = cache_key(text, req.voice_id, req.lang, req.tts_premium)
         cached = await self._cache.get(key)
         if cached is not None:
             return TTSResult(

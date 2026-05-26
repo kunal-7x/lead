@@ -71,6 +71,61 @@ func (r *Router) DecrConcurrency(ctx context.Context, tenantID string) error {
 	return nil
 }
 
+// DecrConcurrencyForCall decrements the per-tenant concurrency counter for a
+// finished call exactly once, regardless of how many terminal signals arrive
+// (status=completed/failed/... and the hangup webhook can both fire for one call).
+//
+// Single-decrement guarantee: it claims a dedicated idempotency key
+// "vobiz:concurrency:decr:<providerCallID>" via the store before decrementing.
+// The first terminal signal for a call wins; subsequent ones see the key and
+// skip. This is independent of the per-delivery webhook event ids.
+//
+// Tenant resolution: if tenantHint is non-empty it is used directly; otherwise
+// the owning tenant is looked up from the call session by providerCallID (inbound
+// Vobiz webhooks carry only the CallUUID, not our tenant id).
+//
+// Fails open: if the tenant cannot be resolved, it does not decrement (so we
+// never decrement the wrong tenant), and any store error is non-fatal.
+func (r *Router) DecrConcurrencyForCall(ctx context.Context, providerCallID, tenantHint string) error {
+	if providerCallID == "" {
+		// No call id to dedupe on; fall back to a direct decrement if we at
+		// least know the tenant.
+		if tenantHint != "" {
+			r.limiter.Decr(ctx, tenantHint)
+		}
+		return nil
+	}
+
+	// Claim the one-shot decrement key. SetIdempotencyKey is a no-op insert if
+	// the key already exists, so we check-then-set to learn whether we are first.
+	decrKey := fmt.Sprintf("vobiz:concurrency:decr:%s", providerCallID)
+	_, exists, err := r.store.CheckIdempotencyKey(ctx, decrKey)
+	if err != nil {
+		return fmt.Errorf("routing: decr idempotency check: %w", err)
+	}
+	if exists {
+		return nil // already decremented for this call
+	}
+
+	tenantID := tenantHint
+	if tenantID == "" {
+		if sess, lerr := r.store.GetCallSessionByProviderCallID(ctx, providerCallID); lerr == nil {
+			tenantID = sess.TenantID
+		}
+	}
+	if tenantID == "" {
+		// Can't safely attribute the decrement to a tenant; do not guess.
+		return nil
+	}
+
+	// Mark first so a racing terminal event won't also decrement.
+	if err := r.store.SetIdempotencyKey(ctx, decrKey, []byte("decremented")); err != nil {
+		return fmt.Errorf("routing: decr idempotency set: %w", err)
+	}
+	r.limiter.Decr(ctx, tenantID)
+	return nil
+}
+
 // PlaceCall selects the provider, places the outbound call, and records the
 // call session in the store. Demo tenants are isolated to the mock provider.
 func (r *Router) PlaceCall(ctx context.Context, req model.CallRequest) (*model.CallSession, error) {

@@ -13,6 +13,10 @@ type Store interface {
 	// Call sessions
 	StoreCallSession(ctx context.Context, s *model.CallSession) error
 	GetCallSession(ctx context.Context, sessionID string) (*model.CallSession, error)
+	// GetCallSessionByProviderCallID looks up the session for a provider's call id
+	// (e.g. Vobiz CallUUID). Used to resolve the tenant on inbound webhooks, which
+	// only carry the provider call id, not our internal session/tenant id.
+	GetCallSessionByProviderCallID(ctx context.Context, providerCallID string) (*model.CallSession, error)
 
 	// Provider events
 	StoreProviderEvent(ctx context.Context, e *model.CallProviderEvent) error

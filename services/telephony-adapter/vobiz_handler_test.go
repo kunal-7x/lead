@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lead/services/telephony-adapter/internal/adapter"
 	"github.com/lead/services/telephony-adapter/internal/concurrency"
 	"github.com/lead/services/telephony-adapter/internal/handler"
 	"github.com/lead/services/telephony-adapter/internal/model"
@@ -244,6 +246,153 @@ func TestVobizAliasRoutes(t *testing.T) {
 	if rec4.Code != http.StatusOK {
 		t.Fatalf("/fallback alias: expected 200, got %d", rec4.Code)
 	}
+}
+
+// TestVobizAnswerHandler_CallUUIDFromBody confirms Bug E fix: the answer handler
+// reads CallUUID from the POST body (form-encoded), not just the query string, so
+// the emitted <Stream> URL carries the real call id instead of "unknown".
+func TestVobizAnswerHandler_CallUUIDFromBody(t *testing.T) {
+	os.Setenv("PUBLIC_WEBHOOK_BASE_URL", "https://example.ngrok.io")
+	defer os.Unsetenv("PUBLIC_WEBHOOK_BASE_URL")
+
+	routes, _, _ := buildVobizHandler(t)
+
+	vals := url.Values{}
+	vals.Set("CallUUID", "body-call-123")
+	vals.Set("From", "+15550001111")
+	vals.Set("To", "+919999999999")
+	req := httptest.NewRequest(http.MethodPost, "/wh/vobiz/answer", bytes.NewBufferString(vals.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	routes.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "/ws/vobiz/unknown") {
+		t.Fatalf("regression: emitted /ws/vobiz/unknown, got: %s", body)
+	}
+	if !strings.Contains(body, "wss://example.ngrok.io/ws/vobiz/body-call-123") {
+		t.Fatalf("expected ws URL with body CallUUID, got: %s", body)
+	}
+}
+
+// TestVobizAnswerHandler_CallUUIDFromJSONBody confirms the JSON-body variant.
+func TestVobizAnswerHandler_CallUUIDFromJSONBody(t *testing.T) {
+	os.Setenv("PUBLIC_WEBHOOK_BASE_URL", "https://example.ngrok.io")
+	defer os.Unsetenv("PUBLIC_WEBHOOK_BASE_URL")
+
+	routes, _, _ := buildVobizHandler(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/wh/vobiz/answer",
+		bytes.NewBufferString(`{"call_uuid":"json-call-777"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	routes.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "/ws/vobiz/json-call-777") {
+		t.Fatalf("expected ws URL with JSON call_uuid, got: %s", rec.Body.String())
+	}
+}
+
+// TestVobizConcurrency_HangupFreesSlot_NoTenantInWebhook confirms Bug F fix:
+// the hangup webhook (which carries only CallUUID, no tenant) frees the
+// concurrency slot by resolving the tenant from the stored session, so we don't
+// hit the cap forever after VOBIZ_MAX_CONCURRENT_CALLS calls.
+func TestVobizConcurrency_HangupFreesSlot_NoTenantInWebhook(t *testing.T) {
+	os.Setenv("VOBIZ_WEBHOOK_VERIFY", "true")
+	defer os.Unsetenv("VOBIZ_WEBHOOK_VERIFY")
+
+	const max = 2
+	s := store.NewFake()
+	s.ResetRoutingRules()
+	s.AddRoutingRule(model.ProviderRoutingRule{
+		ID: "rule-vobiz", ProviderID: "vobiz", Priority: 1, MaxFailRate: 1.0,
+	})
+
+	lim := concurrency.NewFake(max)
+	vobizAdapter := newFakeVobizAdapter()
+	r := routing.NewWithLimiter(s, []adapter.Telephony{vobizAdapter}, lim)
+	pub := outbox.NewFakePublisher()
+	wh := webhook.New("unused", s, pub)
+	routes := handler.New(wh, r).Routes()
+
+	ctx := context.Background()
+	tenant := "tenant-hangup"
+
+	// Place calls up to the cap.
+	uuids := []string{"uuid-1", "uuid-2"}
+	for i, u := range uuids {
+		vobizAdapter.nextUUID = u
+		if _, err := r.PlaceCall(ctx, model.CallRequest{
+			SessionID:  fmt.Sprintf("sess-%d", i),
+			TenantID:   tenant,
+			ToNumber:   "+91999",
+		}); err != nil {
+			t.Fatalf("place call %d: %v", i+1, err)
+		}
+	}
+	if lim.Count(tenant) != max {
+		t.Fatalf("expected count=%d, got %d", max, lim.Count(tenant))
+	}
+
+	// Hang up the first call via webhook carrying ONLY CallUUID (no tenant).
+	hbody := url.Values{"CallUUID": []string{"uuid-1"}}.Encode()
+	hreq := httptest.NewRequest(http.MethodPost, "/wh/vobiz/hangup", bytes.NewBufferString(hbody))
+	hreq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	hrec := httptest.NewRecorder()
+	routes.ServeHTTP(hrec, hreq)
+	if hrec.Code != http.StatusNoContent {
+		t.Fatalf("hangup: expected 204, got %d", hrec.Code)
+	}
+
+	if lim.Count(tenant) != max-1 {
+		t.Fatalf("after hangup expected count=%d, got %d", max-1, lim.Count(tenant))
+	}
+
+	// A duplicate terminal signal (status=completed) for the SAME call must NOT
+	// double-decrement.
+	sbody := url.Values{"CallUUID": []string{"uuid-1"}, "CallStatus": []string{"completed"}}.Encode()
+	sreq := httptest.NewRequest(http.MethodPost, "/wh/vobiz/status", bytes.NewBufferString(sbody))
+	sreq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	srec := httptest.NewRecorder()
+	routes.ServeHTTP(srec, sreq)
+	if srec.Code != http.StatusNoContent {
+		t.Fatalf("status: expected 204, got %d", srec.Code)
+	}
+	if lim.Count(tenant) != max-1 {
+		t.Fatalf("after duplicate terminal event expected count=%d (no double-decrement), got %d", max-1, lim.Count(tenant))
+	}
+
+	// Freed slot means a new call can be placed.
+	vobizAdapter.nextUUID = "uuid-3"
+	if _, err := r.PlaceCall(ctx, model.CallRequest{SessionID: "sess-3", TenantID: tenant, ToNumber: "+91999"}); err != nil {
+		t.Fatalf("expected slot freed, got: %v", err)
+	}
+}
+
+// fakeVobizAdapter is a minimal vobiz-named Telephony adapter for handler tests.
+type fakeVobizAdapter struct{ nextUUID string }
+
+func newFakeVobizAdapter() *fakeVobizAdapter { return &fakeVobizAdapter{nextUUID: "uuid-x"} }
+
+func (f *fakeVobizAdapter) Name() string                  { return "vobiz" }
+func (f *fakeVobizAdapter) Healthy(_ context.Context) bool { return true }
+func (f *fakeVobizAdapter) PlaceCall(_ context.Context, _ model.CallRequest) (model.ProviderCallID, error) {
+	return model.ProviderCallID(f.nextUUID), nil
+}
+func (f *fakeVobizAdapter) Hangup(_ context.Context, _ model.ProviderCallID) error { return nil }
+func (f *fakeVobizAdapter) TransferToHuman(_ context.Context, _ model.ProviderCallID, _ string) error {
+	return nil
+}
+func (f *fakeVobizAdapter) GetRecording(_ context.Context, _ model.ProviderCallID) (model.RecordingRef, error) {
+	return model.RecordingRef{}, nil
 }
 
 // Ensure ProviderRoutingRule is usable via model import.

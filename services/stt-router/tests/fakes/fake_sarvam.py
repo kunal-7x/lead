@@ -30,7 +30,7 @@ class FakeSarvamEngine(STTEngine):
     async def transcribe(self, audio: bytes, lang: str, session_id: str) -> STTResult:
         self.call_count += 1
         if self._timeout:
-            await asyncio.sleep(10)  # will be cancelled by router timeout
+            await asyncio.sleep(60)  # will be cancelled by router timeout (any value)
         t0 = time.time()
         return self._make_result(self.transcript, self.confidence, lang, t0, self.latency_ms)
 

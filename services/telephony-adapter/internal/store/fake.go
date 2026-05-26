@@ -66,6 +66,18 @@ func (f *Fake) GetCallSession(_ context.Context, id string) (*model.CallSession,
 	return &cp, nil
 }
 
+func (f *Fake) GetCallSessionByProviderCallID(_ context.Context, providerCallID string) (*model.CallSession, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, s := range f.callSessions {
+		if s.ProviderCallID == providerCallID {
+			cp := *s
+			return &cp, nil
+		}
+	}
+	return nil, fmt.Errorf("store: call session for provider_call_id %s not found", providerCallID)
+}
+
 func (f *Fake) StoreProviderEvent(_ context.Context, e *model.CallProviderEvent) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
