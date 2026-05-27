@@ -237,6 +237,10 @@ async def run_vobiz_bridge(
                 return
             yield chunk
 
+    # Mutable reference so send_audio can check _stop_playback after loop is created.
+    # Populated just before loop.run() is called (see below).
+    _agent_ref: list = []  # holds [AgentLoop] once instantiated
+
     async def send_audio(pcm_bytes: bytes) -> None:
         """Convert PCM16 → µ-law, chunk into 20ms frames, send at 20ms cadence.
 
@@ -244,17 +248,27 @@ async def run_vobiz_bridge(
         buffer to overflow and then starve — heard as choppy / breaking audio.
         Each 160-byte µ-law frame = 20ms @ 8kHz, so we wait ~20ms between frames.
         We subtract actual send time from the sleep to stay on pace even under load.
+
+        Mid-frame abort: checks _stop_playback each 20ms frame so barge-in aborts
+        playback within one frame (~20ms) rather than waiting for the whole TTS chunk.
         """
         ulaw_data = pcm16_to_ulaw(pcm_bytes)
         n_frames = (len(ulaw_data) + _ULAW_CHUNK_BYTES - 1) // _ULAW_CHUNK_BYTES
         if n_frames == 0:
             return
 
+        # Resolve _stop_playback from agent if available
+        _stop_event = _agent_ref[0]._stop_playback if _agent_ref else None
+
         # Real-time pacing: track when we should have sent each frame
         _FRAME_DURATION = 0.020  # 20ms per frame
         t_start = asyncio.get_event_loop().time()
 
         for i, offset in enumerate(range(0, len(ulaw_data), _ULAW_CHUNK_BYTES)):
+            # Mid-frame abort: stop within ~20ms of barge-in confirmation
+            if _stop_event is not None and _stop_event.is_set():
+                break
+
             chunk = ulaw_data[offset: offset + _ULAW_CHUNK_BYTES]
             # Pad last partial frame to full 160 bytes
             if len(chunk) < _ULAW_CHUNK_BYTES:
@@ -328,6 +342,7 @@ async def run_vobiz_bridge(
 
     loop = AgentLoop(ctx, stt, llm, guardrail, tts, publisher, store, vad,
                      greeting_audio=greeting_audio)
+    _agent_ref.append(loop)  # wire send_audio mid-frame abort to this agent's _stop_playback
 
     try:
         await loop.run(audio_source(), send_audio, send_json)

@@ -31,6 +31,27 @@ _NOISE_TOKENS: frozenset[str] = frozenset({
 # Confidence value that batch-Sarvam sets when it has NO real confidence data.
 _DEFAULTED_CONFIDENCE = 0.9
 
+# ── Barge-in debounce ─────────────────────────────────────────────────────────
+# Number of consecutive SileroVAD-positive 20ms chunks required to confirm a
+# real barge-in. At 20ms/chunk this is 150ms at 8 chunks and 250ms at 12.
+# A single cough / click (1-2 frames) must NOT trigger; 8 chunks ≈ 160ms is
+# a solid lower bound for intentional speech in human factors literature.
+_BARGEIN_MIN_SPEECH_CHUNKS: int = 8  # ≈ 160ms at 20ms/chunk
+
+# Backchannel tokens: short acknowledgements that should NOT count as real
+# interrupts even after VAD confirms speech. Extends _NOISE_TOKENS with Hindi
+# backchannels. If the STT result after a confirmed barge-in is ONLY one of
+# these, the AI continues rather than treating it as a new utterance.
+_BACKCHANNEL_TOKENS: frozenset[str] = frozenset({
+    # English
+    "haan", "hmm", "hmm.", "ok", "ok.", "okay", "okay.", "yes", "yes.",
+    "yeah", "yeah.", "right", "right.", "sure", "sure.", "uh huh", "uh-huh",
+    # Hindi / Hinglish
+    "हाँ", "हाँ।", "हां", "हां।", "अच्छा", "अच्छा।", "ठीक है", "ठीक है।",
+    "जी", "जी।", "जी हाँ", "जी हाँ।", "बिल्कुल", "बिल्कुल।",
+    "समझ गया", "समझ गया।", "समझ गयी", "समझ गयी।",
+})
+
 # Sentence-split pattern: split after . ! ? । or when word-count ≥ 12
 _SENTENCE_END = re.compile(r'(?<=[.!?।])\s+')
 
@@ -112,6 +133,13 @@ class AgentLoop:
         self._playing_tts = False
         self._stop_playback = asyncio.Event()
         self._filler_index = 0  # round-robin through fillers
+        # Tracks the currently-running _process_utterance Task for barge-in cancel
+        self._utterance_task: asyncio.Task | None = None
+        # Accumulates spoken text from interrupted turns (appended to history)
+        self._interrupted_partial: str | None = None
+        # Set after a barge-in so the next _process_utterance knows to check
+        # for backchannel suppression
+        self._next_utterance_is_bargein: bool = False
 
     async def _warm_fillers(self) -> None:
         """Pre-synthesize filler phrases into the module-level cache.
@@ -223,18 +251,72 @@ class AgentLoop:
                     _stt_stream_task.cancel()
                 _stt_stream_task = None
 
+        # Barge-in debounce counter: consecutive VAD-positive chunks during TTS
+        _bargein_consec: int = 0
+
         async for chunk in audio_source:
             is_speech = self._vad.is_speech(chunk)
 
-            # Barge-in: caller speaks while TTS playing
-            if is_speech and self._playing_tts:
-                self._stop_playback.set()
-                await _call(send_json, {"type": "stop_playback"})
-                self._playing_tts = False
-                audio_buffer.clear()
-                speech_started = False
-                silence_count = 0
-                await _cancel_stt_stream()
+            # ── Full-duplex barge-in path ─────────────────────────────────────
+            # While TTS is playing we count consecutive speech frames. Only after
+            # _BARGEIN_MIN_SPEECH_CHUNKS consecutive frames do we confirm a real
+            # barge-in (debounce: ignores coughs/clicks). A single non-speech
+            # frame resets the counter so the caller must sustain speech.
+            if self._playing_tts:
+                if is_speech:
+                    _bargein_consec += 1
+                    if _bargein_consec >= _BARGEIN_MIN_SPEECH_CHUNKS:
+                        # Confirmed barge-in — interrupt AI reply
+                        self._stop_playback.set()
+                        await _call(send_json, {"type": "stop_playback"})
+                        self._playing_tts = False
+                        _bargein_consec = 0
+
+                        # Cancel the utterance task (TTS will see _stop_playback)
+                        if self._utterance_task is not None and not self._utterance_task.done():
+                            self._utterance_task.cancel()
+                            try:
+                                await self._utterance_task
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                            self._utterance_task = None
+
+                        # Append partial/interrupted reply to dialog history
+                        if self._interrupted_partial:
+                            self._dialog_history.append({
+                                "role": "assistant",
+                                "content": f"[interrupted] {self._interrupted_partial}",
+                            })
+                            self._interrupted_partial = None
+
+                        # Flush in-flight STT stream; start fresh for new utterance
+                        await _cancel_stt_stream()
+                        audio_buffer.clear()
+                        speech_started = False
+                        silence_count = 0
+                        self._vad.reset()
+
+                        # Mark next utterance as post-barge-in for backchannel check
+                        self._next_utterance_is_bargein = True
+
+                        # Begin capturing the new utterance that triggered barge-in
+                        await _start_stt_stream()
+                        speech_started = True
+                        silence_count = 0
+                        audio_buffer.extend(chunk)
+                        if _stt_stream_queue is not None:
+                            _stt_stream_queue.put_nowait(chunk)
+                    else:
+                        # Accumulate the debounce chunk into buffer (will be used
+                        # if/when barge-in is confirmed or if TTS ends first)
+                        audio_buffer.extend(chunk)
+                else:
+                    # Non-speech during TTS — reset debounce counter
+                    _bargein_consec = 0
+                continue  # keep consuming; utterance task runs concurrently
+
+            # ── Normal half-duplex listen path (not playing TTS) ──────────────
+            _bargein_consec = 0  # reset whenever we're not in TTS
 
             if is_speech:
                 if not speech_started:
@@ -254,11 +336,19 @@ class AgentLoop:
                     if _stt_stream_queue is not None:
                         _stt_stream_queue.put_nowait(None)  # sentinel = flush
 
-                    # Utterance complete — run pipeline
-                    last_brain = await self._process_utterance(
-                        bytes(audio_buffer), send_audio, send_json,
-                        stt_stream_task=_stt_stream_task,
-                        stt_stream_result=_stt_stream_result,
+                    # Utterance complete — run pipeline as asyncio.Task so the
+                    # outer loop resumes reading audio (full-duplex: VAD runs
+                    # concurrently with _process_utterance / TTS playback).
+                    self._interrupted_partial = None
+                    _is_bargein = self._next_utterance_is_bargein
+                    self._next_utterance_is_bargein = False
+                    self._utterance_task = asyncio.create_task(
+                        self._process_utterance(
+                            bytes(audio_buffer), send_audio, send_json,
+                            stt_stream_task=_stt_stream_task,
+                            stt_stream_result=_stt_stream_result,
+                            is_barge_in=_is_bargein,
+                        )
                     )
                     _stt_stream_queue = None
                     _stt_stream_task = None
@@ -267,8 +357,27 @@ class AgentLoop:
                     silence_count = 0
                     self._vad.reset()
 
+                    # Await the task here: this block only runs when NOT in TTS
+                    # (we're between turns). If TTS starts mid-await the outer
+                    # loop will handle it via the barge-in path above.
+                    try:
+                        last_brain = await self._utterance_task
+                    except asyncio.CancelledError:
+                        last_brain = None
+                    finally:
+                        self._utterance_task = None
+
                     if last_brain and last_brain.next_action in _END_ACTIONS:
                         break
+
+        # If utterance task is still running (rare: stream ended mid-reply),
+        # wait for it to complete cleanly.
+        if self._utterance_task is not None and not self._utterance_task.done():
+            try:
+                last_brain = await self._utterance_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._utterance_task = None
 
         # Clean up any open stream
         await _cancel_stt_stream()
@@ -285,6 +394,7 @@ class AgentLoop:
         *,
         stt_stream_task: asyncio.Task | None = None,
         stt_stream_result: list[STTResult] | None = None,
+        is_barge_in: bool = False,
     ) -> BrainOutput:
         # t0 = speech-end (this method is invoked the moment the utterance ends)
         t0 = time.time()
@@ -373,6 +483,22 @@ class AgentLoop:
             filler_task.cancel()
             return _skip
         # ── /Noise gate ───────────────────────────────────────────────────────
+
+        # ── Backchannel suppression (barge-in only) ───────────────────────────
+        # If the caller interrupted a playing reply but the transcript is only
+        # a short acknowledgement ("haan", "hmm", "अच्छा" etc.), treat it as a
+        # backchannel — do NOT issue a new AI reply. The caller's "haan" means
+        # "I hear you, keep going" rather than "stop and answer me".
+        if is_barge_in and _text_stripped.lower() in _BACKCHANNEL_TOKENS:
+            print(
+                f"[voice_agent] turn_skipped_bargein_backchannel"
+                f" text={_text_stripped!r}"
+                f" session={self.ctx.session_id} turn={self._turn_index}",
+                file=sys.stderr,
+            )
+            filler_task.cancel()
+            return _skip
+        # ── /Backchannel suppression ──────────────────────────────────────────
 
         # Ensure filler has been sent before starting the real reply
         try:
@@ -575,15 +701,23 @@ class AgentLoop:
                         if sentence:
                             await tts_queue.put((sentence, False))
 
+                # Barge-in during LLM streaming: record partial and abort
+                if self._stop_playback.is_set():
+                    self._interrupted_partial = full_spoken.strip() or None
+                    break
+
             # Flush any remaining buffer
-            if token_buffer.strip():
+            if not self._stop_playback.is_set() and token_buffer.strip():
                 await tts_queue.put((token_buffer.strip(), False))
             await tts_queue.put(("", True))  # signal TTS worker done
 
             # Wait for TTS to finish playing
             await tts_task
 
-        except Exception:
+        except (asyncio.CancelledError, Exception):
+            # On cancellation (barge-in): record partial spoken text for history
+            if full_spoken.strip():
+                self._interrupted_partial = full_spoken.strip()
             tts_task.cancel()
             try:
                 await tts_task
