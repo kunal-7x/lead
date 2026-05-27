@@ -86,7 +86,9 @@ class STTRouter:
         return self._default_chain(lang)
 
     def _default_chain(self, lang: str) -> list[str]:
-        if lang in ("hi", "hi-en"):
+        # Treat any Hindi/Indian-language locale as Hindi-first.
+        # hi-IN is what Sarvam streaming STT reports; normalise alongside hi and hi-en.
+        if lang in ("hi", "hi-en", "hi-IN") or lang.startswith("hi"):
             return ["sarvam", "indicconformer", "groq_whisper", "faster_whisper"]
         # English-first chain
         return ["faster_whisper", "groq_whisper", "sarvam", "indicconformer"]
