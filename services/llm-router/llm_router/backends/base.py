@@ -4,6 +4,51 @@ from abc import ABC, abstractmethod
 from llm_router.models import BrainOutput, LLMRequest
 
 
+def _build_slots_block(collected_slots: dict | None) -> str:
+    """Build a Hindi slots-summary block to inject above the anti-repeat line.
+
+    Returns an empty string if no slots have been collected yet.
+    Only includes fields that are non-None/non-empty.
+    """
+    if not collected_slots:
+        return ""
+
+    _FIELD_LABELS = {
+        "budget_text": "बजट",
+        "budget_value": None,          # shown via budget_text
+        "location_pref": "जगह",
+        "property_type": "टाइप",
+        "timeline_days": "टाइमलाइन (दिन)",
+        "purpose": "मकसद",
+        "summary": "सारांश",
+    }
+    _PURPOSE_MAP = {"self_use": "खुद के लिए", "investment": "निवेश"}
+
+    parts: list[str] = []
+    if collected_slots.get("budget_text"):
+        parts.append(f"बजट: {collected_slots['budget_text']}")
+    elif collected_slots.get("budget_value"):
+        parts.append(f"बजट: {collected_slots['budget_value']}")
+    if collected_slots.get("location_pref"):
+        parts.append(f"जगह: {collected_slots['location_pref']}")
+    if collected_slots.get("property_type"):
+        parts.append(f"टाइप: {collected_slots['property_type']}")
+    if collected_slots.get("timeline_days"):
+        parts.append(f"टाइमलाइन: {collected_slots['timeline_days']} दिन")
+    if collected_slots.get("purpose"):
+        purpose_hi = _PURPOSE_MAP.get(str(collected_slots["purpose"]), str(collected_slots["purpose"]))
+        parts.append(f"मकसद: {purpose_hi}")
+
+    if not parts:
+        return ""
+
+    joined = ", ".join(parts)
+    return (
+        f"पहले से मिली जानकारी — {joined}. "
+        "ये दोबारा मत पूछो; आगे बढ़ो।\n\n"
+    )
+
+
 # Shared persona + conversation rules used by BOTH the batch (JSON) path and the
 # streaming speech path, so the agent talks identically on both.
 PERSONA_PROMPT = """\
@@ -78,8 +123,10 @@ class LLMBackend(ABC):
     async def health_check(self) -> bool: ...
 
     def _build_messages(self, req: LLMRequest, kb_context: str) -> list[dict]:
+        slots_block = _build_slots_block(req.collected_slots)
         system = (
             f"{PERSONA_PROMPT}\n"
+            f"{slots_block}"
             f"KB Context (अगर ज़रूरी हो तो इसी से जानकारी दो):\n{kb_context}\n\n"
             f"{BRAIN_SCHEMA_PROMPT}"
         )

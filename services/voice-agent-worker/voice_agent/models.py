@@ -55,6 +55,12 @@ class BrainOutput(BaseModel):
     risk_level: str = "safe"
     confidence: float = 0.8
     summary: str = ""
+    # Slot fields — passed through from llm-router for collected_slots accumulation.
+    budget: dict | None = None        # {"value": int|None, "text": str|None, ...}
+    location_pref: str | None = None
+    property_type: str | None = None
+    timeline_days: int | None = None
+    purpose: str | None = None
 
 
 class TTSResult(BaseModel):

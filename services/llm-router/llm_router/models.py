@@ -72,6 +72,10 @@ class LLMRequest(BaseModel):
     tenant_id: str
     session_id: str
     project_id: str = ""
+    # Accumulated slot values from prior turns — injected into prompt to prevent re-asking.
+    # Keys: budget_text, budget_value, location_pref, property_type, timeline_days, purpose.
+    # Only non-null fields are included. None / omitted → no slots block in prompt.
+    collected_slots: dict[str, Any] | None = None
 
 
 class LLMResponse(BaseModel):

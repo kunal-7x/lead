@@ -31,6 +31,45 @@ _NOISE_TOKENS: frozenset[str] = frozenset({
 # Confidence value that batch-Sarvam sets when it has NO real confidence data.
 _DEFAULTED_CONFIDENCE = 0.9
 
+# Single-word legitimate Hindi answers that must NOT be dropped even when
+# they appear alone with defaulted confidence.
+_VALID_HINDI_SINGLE_WORDS: frozenset[str] = frozenset({
+    "हाँ", "हां", "नहीं", "नही", "जी", "हाँ।", "नहीं।",
+    # common budget / location single-token answers are NOT ASCII, so they pass
+    # the ASCII guard automatically — listed here for documentation only.
+})
+
+# Max byte length for a single-word OOV English token to be noise-gated.
+# "Sir" = 3 chars. We gate ≤8 chars to catch "Sir", "Hmm", "Yeah", "Thanks" etc.
+_MAX_OOV_ENGLISH_TOKEN_LEN = 8
+
+
+def _is_oov_english_noise(text_stripped: str, confidence: float) -> bool:
+    """Return True if the transcript looks like a stray English background token.
+
+    Criteria (ALL must hold):
+    - Entire transcript is a single word (no spaces after stripping punctuation).
+    - Word is pure ASCII (not Hindi/Devanagari — those are multi-byte UTF-8).
+    - Word length ≤ _MAX_OOV_ENGLISH_TOKEN_LEN.
+    - Confidence equals the Sarvam batch default (0.9) — meaning no real score.
+    - Word is NOT a legitimate single-word Hindi answer (paranoia guard).
+
+    Keeps real Hindi answers safe because Devanagari is non-ASCII.
+    """
+    if abs(confidence - _DEFAULTED_CONFIDENCE) >= 1e-6:
+        return False  # has a real confidence score — trust it
+    # Strip trailing punctuation for word check
+    word = text_stripped.rstrip(".!?,।").strip()
+    if not word or " " in word:
+        return False  # multi-word or empty — not this check's concern
+    try:
+        word.encode("ascii")
+    except UnicodeEncodeError:
+        return False  # non-ASCII → Hindi/Devanagari → keep it
+    if word.lower() in _VALID_HINDI_SINGLE_WORDS:
+        return False
+    return len(word) <= _MAX_OOV_ENGLISH_TOKEN_LEN
+
 # ── Barge-in debounce ─────────────────────────────────────────────────────────
 # Number of consecutive SileroVAD-positive 20ms chunks required to confirm a
 # real barge-in. At 20ms/chunk this is 150ms at 8 chunks and 250ms at 12.
@@ -68,6 +107,31 @@ _FILLER_TEXTS = ["Hmm", "Ji", "Achha", "Ek second"]
 _filler_cache: dict[str, bytes] = {}  # text → PCM, shared across all sessions
 
 logger = logging.getLogger(__name__)
+
+
+def _update_accumulated_slots(slots: dict, brain: "BrainOutput") -> None:
+    """Merge non-null fields from brain into the accumulated slots dict.
+
+    Called after each turn's metadata brain is received. Only overwrites a slot
+    if the new value is non-None (never clears a previously set slot).
+    brain.budget is a dict (as deserialized by the worker's simpler BrainOutput).
+    """
+    budget = brain.budget if isinstance(brain.budget, dict) else None
+    if budget:
+        if budget.get("text"):
+            slots["budget_text"] = budget["text"]
+        if budget.get("value") is not None:
+            slots["budget_value"] = budget["value"]
+    if brain.location_pref is not None:
+        slots["location_pref"] = brain.location_pref
+    if brain.property_type is not None:
+        slots["property_type"] = brain.property_type
+    if brain.timeline_days is not None:
+        slots["timeline_days"] = brain.timeline_days
+    if brain.purpose is not None:
+        slots["purpose"] = brain.purpose
+    if brain.summary:
+        slots["summary"] = brain.summary
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -151,6 +215,9 @@ class AgentLoop:
         # Set after a barge-in so the next _process_utterance knows to check
         # for backchannel suppression
         self._next_utterance_is_bargein: bool = False
+        # Accumulated slot values across the call — updated after each turn that
+        # returns a meta_brain. Passed to LLM as collected_slots to prevent re-asking.
+        self._accumulated_slots: dict = {}
 
     async def _warm_fillers(self) -> None:
         """Pre-synthesize filler phrases into the module-level cache.
@@ -510,8 +577,24 @@ class AgentLoop:
             filler_task.cancel()
             return _skip
         if _is_noise_token:
+            _diag(self.ctx.session_id, self._turn_index,
+                  phase="noise_gate", reason="noise_token",
+                  text=repr(_text_stripped), conf=f"{stt_result.confidence:.3f}")
             print(
                 f"[voice_agent] turn_skipped_noise reason=noise_token"
+                f" text={_text_stripped!r} conf={stt_result.confidence:.3f}"
+                f" session={self.ctx.session_id} turn={self._turn_index}",
+                file=sys.stderr,
+            )
+            filler_task.cancel()
+            return _skip
+        _is_oov_english = _is_oov_english_noise(_text_stripped, stt_result.confidence)
+        if _is_oov_english:
+            _diag(self.ctx.session_id, self._turn_index,
+                  phase="noise_gate", reason="oov_english_token",
+                  text=repr(_text_stripped), conf=f"{stt_result.confidence:.3f}")
+            print(
+                f"[voice_agent] turn_skipped_noise reason=oov_english_token"
                 f" text={_text_stripped!r} conf={stt_result.confidence:.3f}"
                 f" session={self.ctx.session_id} turn={self._turn_index}",
                 file=sys.stderr,
@@ -705,8 +788,10 @@ class AgentLoop:
         first_audio_sent = False
 
         # ── Start parallel metadata call (non-blocking) ────────────────────────
+        _slots_snapshot = dict(self._accumulated_slots) if self._accumulated_slots else None
         metadata_task: asyncio.Task = asyncio.create_task(
-            self._llm.generate(self.ctx, stt_result.text, self._dialog_history)
+            self._llm.generate(self.ctx, stt_result.text, self._dialog_history,
+                               collected_slots=_slots_snapshot)
         )
 
         # ── TTS worker (same sentence-queue pattern as _stream_path) ──────────
@@ -766,7 +851,8 @@ class AgentLoop:
             # ── Consume plain-text token stream ────────────────────────────────
             first_token_logged = False
             async for token, _ in self._llm.generate_stream_text(
-                self.ctx, stt_result.text, self._dialog_history
+                self.ctx, stt_result.text, self._dialog_history,
+                collected_slots=_slots_snapshot,
             ):
                 if not first_token_logged and token:
                     first_token_logged = True
@@ -867,6 +953,15 @@ class AgentLoop:
             self.ctx.session_id, self._turn_index,
             (time.time() - t_stt) * 1000,
         )
+        # ── Update accumulated slots from this turn's metadata ─────────────────
+        if meta_brain is not None:
+            try:
+                _update_accumulated_slots(self._accumulated_slots, meta_brain)
+            except Exception:
+                logger.debug("_update_accumulated_slots failed — continuing", exc_info=True)
+        _diag(self.ctx.session_id, self._turn_index,
+              phase="slots",
+              collected_slots=repr(self._accumulated_slots))
         return brain_out
 
     async def _stream_path(

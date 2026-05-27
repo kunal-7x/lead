@@ -241,16 +241,29 @@ class LLMRouter:
                 async for sse_line in _llm_stream_text(backend, req, kb_context):
                     yield sse_line
                 return
-            except Exception:
-                pass  # fall through to batch fallback
+            except Exception as _stream_err:
+                import sys as _sys
+                print(
+                    f"[llm-router] stream_text error — falling back to batch"
+                    f" session={req.session_id} lang={req.lang} err={_stream_err!r}",
+                    file=_sys.stderr, flush=True,
+                )
+                # fall through to batch fallback — keeps Hindi (req.lang unchanged)
 
-        # Fallback: batch generate, stream reply word-by-word
+        # Fallback: batch generate, stream reply word-by-word.
+        # req.lang is preserved from the original request so Hindi stays Hindi.
         try:
             result = await asyncio.wait_for(
                 self.generate(req, trace_id), timeout=_TIMEOUT_S
             )
             brain = result.brain
-        except Exception:
+        except Exception as _batch_err:
+            import sys as _sys
+            print(
+                f"[llm-router] stream_text batch fallback also failed"
+                f" session={req.session_id} err={_batch_err!r}",
+                file=_sys.stderr, flush=True,
+            )
             brain = FALLBACK_BRAIN
 
         words = brain.reply.split(" ")
@@ -437,10 +450,12 @@ async def _llm_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncIt
 
     # Build a trimmed system prompt: same persona + KB, but instruct plain-text reply only.
     # Reuse the SHARED persona so the spoken path behaves identically to the batch path.
-    from llm_router.backends.base import PERSONA_PROMPT
+    from llm_router.backends.base import PERSONA_PROMPT, _build_slots_block
 
+    slots_block = _build_slots_block(req.collected_slots)
     system_lines = [
         PERSONA_PROMPT,
+        slots_block,
         f"KB Context (अगर ज़रूरी हो तो इसी से जानकारी दो):\n{kb_context}",
         "",
         "अभी सिर्फ़ बोला जाने वाला जवाब दो — कोई JSON नहीं, कोई schema नहीं, "
