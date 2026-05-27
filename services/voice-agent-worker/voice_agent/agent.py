@@ -255,6 +255,21 @@ class AgentLoop:
         _bargein_consec: int = 0
 
         async for chunk in audio_source:
+            # ── Collect completed utterance task result (non-blocking) ─────────
+            # The utterance task runs concurrently (full-duplex). We poll its
+            # done-state every iteration so we capture last_brain and can detect
+            # _END_ACTIONS without blocking the audio loop.
+            if self._utterance_task is not None and self._utterance_task.done():
+                try:
+                    _result = self._utterance_task.result()
+                    if _result is not None:
+                        last_brain = _result
+                        if last_brain.next_action in _END_ACTIONS:
+                            break
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._utterance_task = None
+
             is_speech = self._vad.is_speech(chunk)
 
             # ── Full-duplex barge-in path ─────────────────────────────────────
@@ -361,18 +376,9 @@ class AgentLoop:
                     silence_count = 0
                     self._vad.reset()
 
-                    # Await the task here: this block only runs when NOT in TTS
-                    # (we're between turns). If TTS starts mid-await the outer
-                    # loop will handle it via the barge-in path above.
-                    try:
-                        last_brain = await self._utterance_task
-                    except asyncio.CancelledError:
-                        last_brain = None
-                    finally:
-                        self._utterance_task = None
-
-                    if last_brain and last_brain.next_action in _END_ACTIONS:
-                        break
+                    # Do NOT await here — continue consuming audio so the
+                    # barge-in path (above) can fire while TTS is playing.
+                    # The task result is collected at the top of the loop once done.
 
         # If utterance task is still running (rare: stream ended mid-reply),
         # wait for it to complete cleanly.
@@ -517,6 +523,8 @@ class AgentLoop:
         # ── LLM streaming + per-sentence TTS ─────────────────────────────────
         self._stop_playback.clear()
         self._playing_tts = True
+        _milestone("playback_start", session=self.ctx.session_id,
+                   turn=self._turn_index)
         brain: BrainOutput | None = None
 
         try:
@@ -525,12 +533,17 @@ class AgentLoop:
             )
         except Exception:  # noqa: BLE001
             self._playing_tts = False
+            _milestone("playback_end", session=self.ctx.session_id,
+                       turn=self._turn_index, reason="exception")
             logger.exception(
                 "Streaming LLM+TTS failed for session=%s turn=%s — skipping turn",
                 self.ctx.session_id, self._turn_index,
             )
             return _skip
         finally:
+            if self._playing_tts:
+                _milestone("playback_end", session=self.ctx.session_id,
+                           turn=self._turn_index, reason="complete")
             self._playing_tts = False
 
         if brain is None:

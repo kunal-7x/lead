@@ -215,3 +215,60 @@ async def test_backchannel_tokens_include_hindi():
     required = {"हाँ", "अच्छा", "जी", "haan", "hmm", "ok"}
     missing = required - _BACKCHANNEL_TOKENS
     assert not missing, f"Missing Hindi/English backchannel tokens: {missing}"
+
+
+async def test_playing_tts_true_during_send_audio_false_after():
+    """_playing_tts must be True while send_audio is called and False after.
+
+    This is the core invariant the barge-in gate depends on.
+    Before the fix, _playing_tts could be False while audio was still being
+    sent (the finally block fired too early), meaning the barge-in path
+    (gated on `if self._playing_tts`) never armed.
+    """
+    import asyncio as _asyncio
+
+    stt = FakeSTT(confidence=0.90)
+    llm = FakeLLM(reply="Yeh ek test hai.", next_action="qualify")
+    tts = FakeTTS()
+    vad = FakeVAD(speech_chunks=10)
+    loop = make_loop(stt=stt, llm=llm, tts=tts, vad=vad)
+
+    flag_during_send: list[bool] = []
+    flag_after_send: list[bool] = []
+
+    _orig_send_audio_called = False
+
+    async def checking_send_audio(audio: bytes) -> None:
+        # Capture the flag state while audio is being sent
+        flag_during_send.append(loop._playing_tts)
+
+    async def audio_source():
+        # First utterance: speech + silence to trigger processing
+        for _ in range(10):
+            yield _speech()
+        for _ in range(_N_SILENCE + 2):
+            yield _silence()
+        # Allow the utterance task (TTS) to run and complete
+        # by yielding a few more silence frames; the task runs concurrently.
+        for _ in range(60):
+            yield _silence()
+            await _asyncio.sleep(0)  # yield to event loop so utterance task can run
+
+    await loop.run(audio_source(), checking_send_audio, lambda m: None)
+
+    # After run completes, flag must be False (not stuck True)
+    assert loop._playing_tts is False, (
+        "_playing_tts stuck True after audio playback ended — will freeze barge-in"
+    )
+
+    # During send_audio calls, flag must have been True at least once
+    assert any(flag_during_send), (
+        f"_playing_tts was never True during send_audio — "
+        f"barge-in gate would never arm. flags={flag_during_send}"
+    )
+
+    # Every call to send_audio must have seen _playing_tts=True
+    assert all(flag_during_send), (
+        f"_playing_tts was False during some send_audio calls — "
+        f"barge-in window was not fully covered. flags={flag_during_send}"
+    )
