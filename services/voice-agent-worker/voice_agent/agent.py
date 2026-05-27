@@ -99,11 +99,15 @@ _SENTENCE_END = re.compile(r'(?<=[.!?।])\s+')
 # Set FILLER_ENABLED=true AND FILLER_DELAY_MS to the threshold (ms) after which
 # a filler is played only if first audio hasn't started yet.
 # This avoids the robotic "Hmm/Achha/Ek second" on every single turn.
-_FILLER_ENABLED = os.getenv("FILLER_ENABLED", "false").lower() == "true"
-# Only play a filler if first TTS audio hasn't started within this many ms
-_FILLER_DELAY_MS = float(os.getenv("FILLER_DELAY_MS", "1200"))
+_FILLER_ENABLED = os.getenv("FILLER_ENABLED", "true").lower() == "true"
+# Only play a filler if first TTS audio hasn't started within this many ms after speech_end.
+# 400 ms: fast turns stay silent; only genuinely slow turns hear a filler.
+_FILLER_GAP_MS = float(os.getenv("FILLER_GAP_MS", "400"))
+# Legacy alias — FILLER_DELAY_MS is still accepted but FILLER_GAP_MS takes priority if set.
+_FILLER_DELAY_MS = float(os.getenv("FILLER_GAP_MS", os.getenv("FILLER_DELAY_MS", "400")))
 
-_FILLER_TEXTS = ["Hmm", "Ji", "Achha", "Ek second"]
+# Short, natural Hindi fillers (<1 s audio each). Rotated round-robin.
+_FILLER_TEXTS = ["जी...", "हाँ जी", "एक सेकंड", "जी बिल्कुल"]
 _filler_cache: dict[str, bytes] = {}  # text → PCM, shared across all sessions
 
 logger = logging.getLogger(__name__)
@@ -242,24 +246,32 @@ class AgentLoop:
             except Exception:
                 logger.debug("Filler pre-synthesis failed for %r — will skip", text)
 
-    async def _play_filler(self, send_audio: callable, first_audio_event: asyncio.Event) -> None:
+    async def _play_filler(self, send_audio: callable, first_audio_event: asyncio.Event,
+                           t_speech_end: float | None = None) -> None:
         """Play a filler phrase ONLY if first TTS audio is genuinely delayed.
 
-        Gated by FILLER_ENABLED=true. If first audio starts within
-        FILLER_DELAY_MS, this no-ops — filler is never heard.
+        Gap-triggered: waits _FILLER_GAP_MS after speech_end. If first audio
+        arrives in time the filler is skipped silently (fast turns = no filler).
+        At most once per turn — the task is cancelled by the caller on all early-
+        exit paths (noise-gate, backchannel suppression, STT error).
         Round-robins through _FILLER_TEXTS so consecutive fillers sound varied.
         """
         if not _FILLER_ENABLED:
             return
-        # Wait for the delay threshold before playing filler
-        delay_s = _FILLER_DELAY_MS / 1000.0
+        gap_s = _FILLER_GAP_MS / 1000.0
+        t_start = t_speech_end if t_speech_end is not None else time.time()
         try:
-            # If first audio arrives in time, abort filler
-            await asyncio.wait_for(first_audio_event.wait(), timeout=delay_s)
-            return  # First audio already sent — no filler needed
+            # If first audio arrives within the gap, abort — no filler needed.
+            await asyncio.wait_for(first_audio_event.wait(), timeout=gap_s)
+            gap_ms = (time.time() - t_start) * 1000
+            _diag(self.ctx.session_id, self._turn_index,
+                  phase="filler", status="skipped",
+                  reason="first_audio_fast", gap_ms=f"{gap_ms:.0f}")
+            return
         except asyncio.TimeoutError:
-            pass  # Delay threshold hit — play filler
+            pass  # Gap threshold hit — play filler
 
+        gap_ms = (time.time() - t_start) * 1000
         text = _FILLER_TEXTS[self._filler_index % len(_FILLER_TEXTS)]
         self._filler_index += 1
         audio = _filler_cache.get(text)
@@ -268,8 +280,19 @@ class AgentLoop:
                 await _call(send_audio, audio)
                 _milestone("filler_played", session=self.ctx.session_id,
                            turn=self._turn_index, text=text)
+                _diag(self.ctx.session_id, self._turn_index,
+                      phase="filler", status="played",
+                      reason="first_audio_delayed", gap_ms=f"{gap_ms:.0f}",
+                      text=repr(text))
             except Exception:
                 logger.debug("Filler playback failed — continuing without filler")
+                _diag(self.ctx.session_id, self._turn_index,
+                      phase="filler", status="skipped",
+                      reason="playback_error", gap_ms=f"{gap_ms:.0f}")
+        elif self._stop_playback.is_set():
+            _diag(self.ctx.session_id, self._turn_index,
+                  phase="filler", status="skipped",
+                  reason="barge_in", gap_ms=f"{gap_ms:.0f}")
 
     async def run(self, audio_source: AsyncIterator[bytes],
                   send_audio: callable, send_json: callable) -> BrainOutput | None:
@@ -544,7 +567,7 @@ class AgentLoop:
         # An event is set by the TTS worker when first audio is sent.
         # _play_filler waits for that event; if TTS is fast, no filler plays.
         _first_audio_event = asyncio.Event()
-        filler_task = asyncio.create_task(self._play_filler(send_audio, _first_audio_event))
+        filler_task = asyncio.create_task(self._play_filler(send_audio, _first_audio_event, t0))
 
         # ── STT ──────────────────────────────────────────────────────────────
         # Try streaming result first; fall back to batch.

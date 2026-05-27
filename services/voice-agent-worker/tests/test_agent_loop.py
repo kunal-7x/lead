@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
+from unittest.mock import patch
+
 from tests.conftest import make_loop, make_ctx, run_loop
 from tests.fakes.fake_services import FakeSTT, FakeLLM, FakeTTS, FakeFreeSwitchWS
 
@@ -139,4 +143,107 @@ async def test_collected_slots_accumulated_and_passed():
     )
     assert slots.get("budget_value") == 7500000, (
         f"budget_value not accumulated; got: {slots}"
+    )
+
+
+# ── Workstream H: gap-triggered filler tests ─────────────────────────────────
+
+async def test_filler_played_when_tts_delayed():
+    """Filler plays when TTS first audio is delayed beyond the gap threshold."""
+    import voice_agent.agent as agent_mod
+
+    TINY_GAP_MS = 30  # very short gap so test doesn't sleep long
+
+    # Slow TTS: sleeps longer than the gap before returning audio
+    class SlowTTS(FakeTTS):
+        async def synthesize(self, text, lang, voice_id, tenant_id, session_id,
+                             tts_premium=False):
+            await asyncio.sleep(TINY_GAP_MS / 1000 * 3)  # 3× the gap → filler fires
+            return await super().synthesize(text, lang, voice_id, tenant_id,
+                                            session_id, tts_premium)
+
+    stt = FakeSTT(confidence=0.90)
+    llm = FakeLLM()
+    tts = SlowTTS()
+
+    filler_played_texts: list[str] = []
+    original_play = agent_mod.AgentLoop._play_filler
+
+    async def spy_play_filler(self, send_audio, first_audio_event, t_speech_end=None):
+        # Pre-populate cache with a known audio blob so filler can "play"
+        for t in agent_mod._FILLER_TEXTS:
+            if t not in agent_mod._filler_cache:
+                agent_mod._filler_cache[t] = b"\x00\x00" * 100
+
+        # Capture which text would be played by wrapping send_audio
+        original_send = send_audio
+        played = []
+
+        async def capturing_send(audio):
+            played.append(audio)
+            await original_send(audio) if inspect.iscoroutinefunction(original_send) else original_send(audio)
+
+        await original_play(self, capturing_send, first_audio_event, t_speech_end)
+        if played:
+            filler_played_texts.append("played")
+
+    with patch.object(agent_mod.AgentLoop, "_play_filler", spy_play_filler), \
+         patch.object(agent_mod, "_FILLER_ENABLED", True), \
+         patch.object(agent_mod, "_FILLER_GAP_MS", float(TINY_GAP_MS)), \
+         patch.object(agent_mod, "_FILLER_DELAY_MS", float(TINY_GAP_MS)):
+        ws = FakeFreeSwitchWS()
+        loop = make_loop(stt=stt, llm=llm, tts=tts)
+        await run_loop(loop, ws.all_chunks())
+
+    # Filler must have been triggered at least once (slow TTS → gap fires)
+    assert len(filler_played_texts) >= 1, (
+        "Expected filler to play on slow TTS turn but it was skipped"
+    )
+    # At most once per turn (single utterance → single filler max)
+    assert len(filler_played_texts) <= 1, (
+        f"Filler played {len(filler_played_texts)} times on a single turn — must be at-most-once"
+    )
+
+
+async def test_filler_skipped_when_tts_fast():
+    """Filler is NOT played when TTS first audio arrives before the gap threshold."""
+    import voice_agent.agent as agent_mod
+
+    GENEROUS_GAP_MS = 5000  # very large gap — fast TTS will always beat it
+
+    stt = FakeSTT(confidence=0.90)
+    llm = FakeLLM()
+    tts = FakeTTS()  # instant TTS — no delay
+
+    filler_played_texts: list[str] = []
+    original_play = agent_mod.AgentLoop._play_filler
+
+    async def spy_play_filler(self, send_audio, first_audio_event, t_speech_end=None):
+        # Pre-populate cache
+        for t in agent_mod._FILLER_TEXTS:
+            if t not in agent_mod._filler_cache:
+                agent_mod._filler_cache[t] = b"\x00\x00" * 100
+
+        original_send = send_audio
+        played = []
+
+        async def capturing_send(audio):
+            played.append(audio)
+            await original_send(audio) if inspect.iscoroutinefunction(original_send) else original_send(audio)
+
+        await original_play(self, capturing_send, first_audio_event, t_speech_end)
+        if played:
+            filler_played_texts.append("played")
+
+    with patch.object(agent_mod.AgentLoop, "_play_filler", spy_play_filler), \
+         patch.object(agent_mod, "_FILLER_ENABLED", True), \
+         patch.object(agent_mod, "_FILLER_GAP_MS", float(GENEROUS_GAP_MS)), \
+         patch.object(agent_mod, "_FILLER_DELAY_MS", float(GENEROUS_GAP_MS)):
+        ws = FakeFreeSwitchWS()
+        loop = make_loop(stt=stt, llm=llm, tts=tts)
+        await run_loop(loop, ws.all_chunks())
+
+    # Fast TTS should have set first_audio_event before the gap fired → no filler
+    assert len(filler_played_texts) == 0, (
+        f"Filler played on a fast-TTS turn — should have been skipped; played={filler_played_texts}"
     )
