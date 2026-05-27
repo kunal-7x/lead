@@ -821,6 +821,7 @@ class AgentLoop:
         token_buffer = ""
         full_spoken = ""
         first_audio_sent = False
+        _t_first_sentence_queued: float | None = None  # when first sentence hit tts_queue
 
         # ── Start parallel metadata call (non-blocking) ────────────────────────
         _slots_snapshot = dict(self._accumulated_slots) if self._accumulated_slots else None
@@ -833,7 +834,7 @@ class AgentLoop:
         tts_queue: asyncio.Queue[tuple[str, bool]] = asyncio.Queue()
 
         async def _tts_worker():
-            nonlocal first_audio_sent
+            nonlocal first_audio_sent, _t_first_sentence_queued
             while True:
                 sentence, is_done = await tts_queue.get()
                 if is_done and not sentence:
@@ -843,6 +844,7 @@ class AgentLoop:
                 if self._stop_playback.is_set():
                     break
                 try:
+                    _t_synth_start = time.time()
                     tts_result = await self._tts.synthesize(
                         sentence,
                         self.ctx.lang,
@@ -873,6 +875,16 @@ class AgentLoop:
                                 self.ctx.session_id, self._turn_index,
                                 (t_audio - t_stt) * 1000,
                             )
+                            # [diag] first_audio breakdown: leg timings for bottleneck analysis
+                            _q_ms = (_t_synth_start - (_t_first_sentence_queued or _t_synth_start)) * 1000
+                            _synth_ms = (t_audio - _t_synth_start) * 1000
+                            _total_ms = (t_audio - t_stt) * 1000
+                            _diag(self.ctx.session_id, self._turn_index,
+                                  phase="first_audio",
+                                  total_ms=f"{_total_ms:.0f}",
+                                  llm_to_sentence_ms=f"{_q_ms:.0f}",
+                                  tts_synth_ms=f"{_synth_ms:.0f}",
+                                  sentence_chars=len(sentence))
                         await _call(send_audio, tts_result.audio)
                 except Exception:  # noqa: BLE001
                     logger.exception(
@@ -912,6 +924,8 @@ class AgentLoop:
                         sentence = token_buffer.strip()
                         token_buffer = ""
                         if sentence:
+                            if _t_first_sentence_queued is None:
+                                _t_first_sentence_queued = time.time()
                             await tts_queue.put((sentence, False))
 
                 # Barge-in during LLM streaming: record partial and abort
@@ -921,6 +935,8 @@ class AgentLoop:
 
             # Flush any remaining buffer
             if not self._stop_playback.is_set() and token_buffer.strip():
+                if _t_first_sentence_queued is None:
+                    _t_first_sentence_queued = time.time()
                 await tts_queue.put((token_buffer.strip(), False))
             await tts_queue.put(("", True))  # signal TTS worker done
 
