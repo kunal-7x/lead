@@ -317,6 +317,151 @@ class SarvamStreamingEngine:
         except Exception as exc:
             yield {"type": "error", "message": str(exc)}
 
+    async def stream_live(
+        self,
+        frame_queue: "asyncio.Queue",
+        lang: str = "hi-en",
+        session_id: str = "",
+        audio_format: str = "pcm16",
+        send_chunk_bytes: int = 1600,  # 100ms at 8kHz PCM16 — forward during speech
+    ) -> AsyncIterator[dict]:
+        """TRUE during-speech streaming.
+
+        Opens the Sarvam WS immediately and forwards PCM frames to Sarvam AS THEY
+        ARRIVE on `frame_queue` (so Sarvam processes audio WHILE the caller is
+        still speaking). On the end-of-utterance sentinel (None in the queue) we
+        send {"type":"flush"} and return the final — which arrives in ~150-300ms
+        because the audio was already streamed during speech.
+
+        Contrast with stream_utterance(), which buffers the whole utterance then
+        flushes (pays the full STT round-trip AFTER speech_end → ~3.4s wall-clock
+        when you include the real-time pacing of the inbound frames).
+
+        Args:
+            frame_queue: asyncio.Queue yielding raw audio frames (bytes). A None
+                value is the end-of-utterance sentinel.
+            lang: language code.
+            session_id: for logging.
+            audio_format: "pcm16" (default) or "ulaw" (transcoded per-frame).
+            send_chunk_bytes: bytes to accumulate before each WS send (100ms keeps
+                round-trips low while still forwarding during speech).
+
+        Yields the same event shapes as stream_utterance().
+        """
+        import websockets
+
+        lang_code = _lang_code(lang)
+        params = (
+            f"?language-code={lang_code}"
+            "&model=saaras:v3"
+            "&mode=transcribe"
+            "&sample_rate=8000"
+            "&input_audio_codec=pcm_s16le"
+            "&vad_signals=true"
+        )
+        url = _STREAMING_WS_URL + params
+        extra_headers = {"Api-Subscription-Key": self._api_key}
+
+        t_first_frame: float | None = None
+        t_flush: float | None = None
+        t_end_speech: float | None = None
+        send_buf = bytearray()
+
+        async def _send_audio_chunk(ws, pcm_chunk: bytes) -> None:
+            wav_chunk = _wrap_pcm_wav(pcm_chunk, sample_rate=8000)
+            await ws.send(json.dumps({
+                "audio": {
+                    "data": base64.b64encode(wav_chunk).decode("ascii"),
+                    "sample_rate": "8000",
+                    "encoding": "audio/wav",
+                }
+            }))
+
+        try:
+            async with websockets.connect(url, additional_headers=extra_headers) as ws:
+                # ── Producer: pull frames from queue, forward DURING speech ──────
+                async def _pump() -> None:
+                    nonlocal t_first_frame, t_flush
+                    while True:
+                        frame = await frame_queue.get()
+                        if frame is None:
+                            # End-of-utterance: flush any partial buffer, then flush WS
+                            if send_buf:
+                                chunk = bytes(send_buf)
+                                send_buf.clear()
+                                if audio_format == "ulaw":
+                                    chunk = ulaw_to_pcm16(chunk)
+                                await _send_audio_chunk(ws, chunk)
+                            await ws.send(json.dumps({"type": "flush"}))
+                            t_flush = time.time()
+                            return
+                        if t_first_frame is None:
+                            t_first_frame = time.time()
+                        send_buf.extend(frame)
+                        # Forward in ~100ms chunks while speech continues
+                        while len(send_buf) >= send_chunk_bytes:
+                            chunk = bytes(send_buf[:send_chunk_bytes])
+                            del send_buf[:send_chunk_bytes]
+                            if audio_format == "ulaw":
+                                chunk = ulaw_to_pcm16(chunk)
+                            await _send_audio_chunk(ws, chunk)
+
+                pump_task = asyncio.create_task(_pump())
+
+                try:
+                    # ── Consumer: read Sarvam events until final/error/timeout ──
+                    deadline = time.time() + 30.0  # overall cap incl. speech time
+                    while time.time() < deadline:
+                        remaining = deadline - time.time()
+                        try:
+                            raw = await asyncio.wait_for(
+                                ws.recv(), timeout=max(remaining, 0.1)
+                            )
+                        except asyncio.TimeoutError:
+                            break
+
+                        msg_obj = json.loads(raw)
+                        mtype = msg_obj.get("type")
+
+                        if mtype == "events":
+                            sig = msg_obj.get("data", {}).get("signal_type", "")
+                            if sig == "START_SPEECH":
+                                yield {"type": "interim", "text": "", "ts": time.time()}
+                            elif sig == "END_SPEECH":
+                                t_end_speech = time.time()
+
+                        elif mtype == "data":
+                            data = msg_obj.get("data", {})
+                            text = data.get("transcript", "")
+                            t_final = time.time()
+                            base_ts = t_end_speech or t_flush or t_final
+                            latency_ms = int((t_final - base_ts) * 1000)
+                            conf = data.get("language_probability")
+                            conf = float(conf) if conf is not None else 0.9
+                            yield {
+                                "type": "final",
+                                "text": text,
+                                "confidence": conf,
+                                "latency_ms": latency_ms,
+                                "ts": t_final,
+                                "engine_used": self.name,
+                            }
+                            return
+
+                        elif mtype == "error":
+                            err = msg_obj.get("data", {}).get("message", str(msg_obj))
+                            yield {"type": "error", "message": err}
+                            return
+                finally:
+                    pump_task.cancel()
+                    try:
+                        await pump_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+        except Exception as exc:
+            yield {"type": "error", "message": str(exc)}
+
     async def transcribe_streaming(
         self, audio: bytes, lang: str, session_id: str, audio_format: str = "pcm16"
     ) -> STTResult:

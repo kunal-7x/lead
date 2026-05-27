@@ -238,11 +238,38 @@ async def run_vobiz_bridge(
             yield chunk
 
     async def send_audio(pcm_bytes: bytes) -> None:
-        """Convert PCM16 → µ-law, chunk into 20ms frames, send outbound."""
+        """Convert PCM16 → µ-law, chunk into 20ms frames, send at 20ms cadence.
+
+        Pacing is critical: bursting all frames instantly causes the Vobiz jitter
+        buffer to overflow and then starve — heard as choppy / breaking audio.
+        Each 160-byte µ-law frame = 20ms @ 8kHz, so we wait ~20ms between frames.
+        We subtract actual send time from the sleep to stay on pace even under load.
+        """
         ulaw_data = pcm16_to_ulaw(pcm_bytes)
-        for offset in range(0, len(ulaw_data), _ULAW_CHUNK_BYTES):
+        n_frames = (len(ulaw_data) + _ULAW_CHUNK_BYTES - 1) // _ULAW_CHUNK_BYTES
+        if n_frames == 0:
+            return
+
+        # Real-time pacing: track when we should have sent each frame
+        _FRAME_DURATION = 0.020  # 20ms per frame
+        t_start = asyncio.get_event_loop().time()
+
+        for i, offset in enumerate(range(0, len(ulaw_data), _ULAW_CHUNK_BYTES)):
             chunk = ulaw_data[offset: offset + _ULAW_CHUNK_BYTES]
+            # Pad last partial frame to full 160 bytes
+            if len(chunk) < _ULAW_CHUNK_BYTES:
+                chunk = chunk + b"\xff" * (_ULAW_CHUNK_BYTES - len(chunk))
             await websocket.send_text(_build_outbound_media_frame(chunk))
+
+            # Pace: sleep until the next frame's scheduled send time
+            # This keeps the stream at real-time rate; avoids burst-then-underrun.
+            # We do NOT pace the very last frame (no need to wait after EOF).
+            if i < n_frames - 1:
+                next_frame_time = t_start + (i + 1) * _FRAME_DURATION
+                now = asyncio.get_event_loop().time()
+                sleep_s = next_frame_time - now
+                if sleep_s > 0.001:  # only sleep if > 1ms remains
+                    await asyncio.sleep(sleep_s)
 
     async def send_json(msg: dict) -> None:
         """Translate AgentLoop control messages to Vobiz equivalents."""
@@ -279,13 +306,14 @@ async def run_vobiz_bridge(
         store = DemoTurnStore()
         vad = SileroVAD()
 
-    # Synthesize an opening greeting so the caller hears the agent immediately
-    # on answer (before they speak) — otherwise Vobiz reaches end-of-XML and
-    # hangs up on silence. A TTS failure here must not crash the call: we just
-    # proceed with no greeting.
+    # Synthesize an opening greeting in Hindi so the caller hears the agent
+    # immediately on answer. Uses a warm real-estate telecaller opener in Hindi.
+    # Falls back gracefully on TTS failure (no greeting rather than crash).
     greeting_audio: bytes | None = None
+    # Use session greeting if set (e.g. custom per-campaign), else natural Hindi opener
     greeting_text = getattr(ctx, "greeting", None) or (
-        "Hello! Thank you for taking my call. How can I help you today?"
+        "नमस्ते! मैं आपको प्रॉपर्टी के बारे में जानकारी देने के लिए कॉल कर रही हूँ। "
+        "क्या आप अभी बात कर सकते हैं?"
     )
     try:
         greeting_result = await tts.synthesize(
@@ -293,6 +321,8 @@ async def run_vobiz_bridge(
             ctx.tenant_id, ctx.session_id, ctx.tts_premium,
         )
         greeting_audio = greeting_result.audio
+        print(f"[vobiz_bridge] greeting synthesized: {len(greeting_audio)} bytes, text={greeting_text!r}",
+              file=sys.stderr, flush=True)
     except Exception as exc:  # noqa: BLE001
         logger.warning("vobiz_bridge greeting TTS failed, no greeting: %r", exc)
 

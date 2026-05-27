@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -22,8 +23,14 @@ _END_ACTIONS = {"end_call", "opt_out"}
 _SENTENCE_END = re.compile(r'(?<=[.!?।])\s+')
 
 # ── Filler / acknowledgment phrases ──────────────────────────────────────────
-# Played instantly on end-of-speech so caller never hears dead air.
-# Synthesized once per session and cached as raw PCM bytes.
+# FILLER_ENABLED=false (default) — fillers are OFF by default.
+# Set FILLER_ENABLED=true AND FILLER_DELAY_MS to the threshold (ms) after which
+# a filler is played only if first audio hasn't started yet.
+# This avoids the robotic "Hmm/Achha/Ek second" on every single turn.
+_FILLER_ENABLED = os.getenv("FILLER_ENABLED", "false").lower() == "true"
+# Only play a filler if first TTS audio hasn't started within this many ms
+_FILLER_DELAY_MS = float(os.getenv("FILLER_DELAY_MS", "1200"))
+
 _FILLER_TEXTS = ["Hmm", "Ji", "Achha", "Ek second"]
 _filler_cache: dict[str, bytes] = {}  # text → PCM, shared across all sessions
 
@@ -95,11 +102,12 @@ class AgentLoop:
         self._filler_index = 0  # round-robin through fillers
 
     async def _warm_fillers(self) -> None:
-        """Pre-synthesize all filler phrases into the module-level cache.
+        """Pre-synthesize filler phrases into the module-level cache.
 
-        Called once per call (at greeting time). If TTS fails, we skip gracefully —
-        the filler is optional. Subsequent calls to _play_filler use cached bytes.
+        Only runs when FILLER_ENABLED=true. If TTS fails, we skip gracefully.
         """
+        if not _FILLER_ENABLED:
+            return
         for text in _FILLER_TEXTS:
             if text in _filler_cache:
                 continue
@@ -116,12 +124,24 @@ class AgentLoop:
             except Exception:
                 logger.debug("Filler pre-synthesis failed for %r — will skip", text)
 
-    async def _play_filler(self, send_audio: callable) -> None:
-        """Play the next filler phrase from cache instantly (no synthesis latency).
+    async def _play_filler(self, send_audio: callable, first_audio_event: asyncio.Event) -> None:
+        """Play a filler phrase ONLY if first TTS audio is genuinely delayed.
 
-        Round-robins through _FILLER_TEXTS so consecutive turns sound varied.
-        No-ops gracefully if cache is empty or playback is stopped.
+        Gated by FILLER_ENABLED=true. If first audio starts within
+        FILLER_DELAY_MS, this no-ops — filler is never heard.
+        Round-robins through _FILLER_TEXTS so consecutive fillers sound varied.
         """
+        if not _FILLER_ENABLED:
+            return
+        # Wait for the delay threshold before playing filler
+        delay_s = _FILLER_DELAY_MS / 1000.0
+        try:
+            # If first audio arrives in time, abort filler
+            await asyncio.wait_for(first_audio_event.wait(), timeout=delay_s)
+            return  # First audio already sent — no filler needed
+        except asyncio.TimeoutError:
+            pass  # Delay threshold hit — play filler
+
         text = _FILLER_TEXTS[self._filler_index % len(_FILLER_TEXTS)]
         self._filler_index += 1
         audio = _filler_cache.get(text)
@@ -136,8 +156,9 @@ class AgentLoop:
     async def run(self, audio_source: AsyncIterator[bytes],
                   send_audio: callable, send_json: callable) -> BrainOutput | None:
         """Main agent loop. Returns final brain output when call ends."""
-        # Pre-synthesize filler phrases so they're instant on first turn
-        asyncio.create_task(self._warm_fillers())
+        # Pre-synthesize filler phrases only when FILLER_ENABLED=true
+        if _FILLER_ENABLED:
+            asyncio.create_task(self._warm_fillers())
 
         # Play greeting if available
         if self._greeting_audio:
@@ -258,10 +279,11 @@ class AgentLoop:
         _milestone("speech_end", session=self.ctx.session_id, turn=self._turn_index)
         _skip = BrainOutput(reply="", next_action="qualify", summary="")
 
-        # ── FILLER: play instantly so caller never hears dead air ─────────────
-        # Filler audio is pre-synthesized; this is just a memcpy + send.
-        # We fire-and-forget so STT can proceed concurrently.
-        filler_task = asyncio.create_task(self._play_filler(send_audio))
+        # ── FILLER: only plays if TTS is genuinely slow (>FILLER_DELAY_MS) ──
+        # An event is set by the TTS worker when first audio is sent.
+        # _play_filler waits for that event; if TTS is fast, no filler plays.
+        _first_audio_event = asyncio.Event()
+        filler_task = asyncio.create_task(self._play_filler(send_audio, _first_audio_event))
 
         # ── STT ──────────────────────────────────────────────────────────────
         # Try streaming result first; fall back to batch.
@@ -317,7 +339,7 @@ class AgentLoop:
 
         try:
             brain = await self._run_streaming_llm_tts(
-                stt_result, send_audio, t_stt
+                stt_result, send_audio, t_stt, _first_audio_event
             )
         except Exception:  # noqa: BLE001
             self._playing_tts = False
@@ -361,6 +383,7 @@ class AgentLoop:
         stt_result: STTResult,
         send_audio: callable,
         t_stt: float,
+        first_audio_event: asyncio.Event | None = None,
     ) -> BrainOutput | None:
         """Stream LLM tokens → accumulate sentences → per-sentence TTS → play.
 
@@ -379,7 +402,7 @@ class AgentLoop:
 
         if use_stream_text:
             try:
-                brain_out = await self._stream_text_path(stt_result, send_audio, t_stt)
+                brain_out = await self._stream_text_path(stt_result, send_audio, t_stt, first_audio_event)
                 return brain_out
             except Exception as exc:
                 logger.warning(
@@ -392,7 +415,7 @@ class AgentLoop:
         use_stream = hasattr(self._llm, "generate_stream")
         if use_stream:
             try:
-                brain_out = await self._stream_path(stt_result, send_audio, t_stt)
+                brain_out = await self._stream_path(stt_result, send_audio, t_stt, first_audio_event)
                 return brain_out
             except Exception as exc:
                 logger.warning(
@@ -401,7 +424,7 @@ class AgentLoop:
                 )
 
         # ── Batch fallback ────────────────────────────────────────────────────
-        brain_out = await self._batch_path(stt_result, send_audio, t_stt)
+        brain_out = await self._batch_path(stt_result, send_audio, t_stt, first_audio_event)
         return brain_out
 
     async def _stream_text_path(
@@ -409,6 +432,7 @@ class AgentLoop:
         stt_result: STTResult,
         send_audio: callable,
         t_stt: float,
+        first_audio_event: asyncio.Event | None = None,
     ) -> BrainOutput:
         """Fast path: plain-text LLM stream for speech + parallel batch for metadata.
 
@@ -456,6 +480,9 @@ class AgentLoop:
                         t_audio = time.time()
                         if not first_audio_sent:
                             first_audio_sent = True
+                            # Signal filler task that audio is ready — no filler needed
+                            if first_audio_event is not None:
+                                first_audio_event.set()
                             _milestone(
                                 "first_audio_sent",
                                 session=self.ctx.session_id,
@@ -573,6 +600,7 @@ class AgentLoop:
         stt_result: STTResult,
         send_audio: callable,
         t_stt: float,
+        first_audio_event: asyncio.Event | None = None,
     ) -> BrainOutput:
         """
         LLM stream → sentence-chunk TTS → play immediately.
@@ -612,6 +640,9 @@ class AgentLoop:
                         t_audio = time.time()
                         if not first_audio_sent:
                             first_audio_sent = True
+                            # Signal filler task that audio is ready — no filler needed
+                            if first_audio_event is not None:
+                                first_audio_event.set()
                             _milestone(
                                 "first_audio_sent",
                                 session=self.ctx.session_id,
@@ -704,6 +735,7 @@ class AgentLoop:
         stt_result: STTResult,
         send_audio: callable,
         t_stt: float,
+        first_audio_event: asyncio.Event | None = None,
     ) -> BrainOutput:
         """Batch LLM + guardrail + per-sentence TTS (fallback path)."""
         # LLM
@@ -753,6 +785,9 @@ class AgentLoop:
                     t_audio = time.time()
                     if not first_audio_sent:
                         first_audio_sent = True
+                        # Signal filler task that audio is ready — no filler needed
+                        if first_audio_event is not None:
+                            first_audio_event.set()
                         _milestone(
                             "first_audio_sent",
                             session=self.ctx.session_id,

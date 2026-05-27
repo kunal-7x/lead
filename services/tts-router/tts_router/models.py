@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 class TTSRequest(BaseModel):
     text: str
     lang: str = "hi-en"
-    voice_id: str = "meera"
+    voice_id: str = "anushka"  # default to natural Hindi female voice
     stream: bool = False
     tenant_id: str
     session_id: str
@@ -32,7 +32,7 @@ class VoiceInfo(BaseModel):
 class WarmRequest(BaseModel):
     phrases: list[str]
     lang: str = "hi-en"
-    voice_id: str = "meera"
+    voice_id: str = "anushka"  # default to natural Hindi female voice
     tenant_id: str
     project_id: str = ""
 

@@ -11,7 +11,7 @@ class SessionContext:
     tenant_id: str
     campaign_id: str = ""
     kb_version_id: str = ""
-    voice_profile_id: str = "meera"
+    voice_profile_id: str = "anushka"  # Sarvam bulbul:v2 natural Hindi female voice
     lang: str = "hi-en"
     system_prompt_version: str = "v1"
     lead_id: str = ""

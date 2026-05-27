@@ -50,5 +50,33 @@ class FakeSarvamStreamingEngine:
             "ts": t_now,
         }
 
+    async def stream_live(
+        self,
+        frame_queue,
+        lang: str = "hi-en",
+        session_id: str = "",
+        audio_format: str = "pcm16",
+        send_chunk_bytes: int = 1600,
+    ) -> AsyncIterator[dict]:
+        """Fake live streaming: drain the queue until sentinel, then emit final."""
+        self.call_count += 1
+        while True:
+            frame = await frame_queue.get()
+            if frame is None:  # end-of-utterance sentinel
+                break
+        t_now = time.time()
+        if self.error:
+            yield {"type": "error", "message": self.error}
+            return
+        yield {"type": "interim", "text": "", "ts": t_now}
+        yield {
+            "type": "final",
+            "text": self.transcript,
+            "confidence": self.confidence,
+            "latency_ms": self.latency_ms,
+            "engine_used": self.name,
+            "ts": t_now,
+        }
+
     async def health_check(self) -> bool:
         return True

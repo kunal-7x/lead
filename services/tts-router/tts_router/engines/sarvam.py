@@ -14,18 +14,22 @@ _URL = "https://api.sarvam.ai/text-to-speech"
 _TIMEOUT = 10.0
 # Override TTS model via env (default bulbul:v2)
 _TTS_MODEL = os.getenv("SARVAM_TTS_MODEL", "bulbul:v2")
+# Override TTS speaker via env — default anushka (natural Hindi female voice)
+# Good Hindi voices: anushka (female, warm), manisha (female), vidya (female),
+#                    karun (male), abhilash (male)
+_SARVAM_TTS_SPEAKER = os.getenv("SARVAM_TTS_SPEAKER", "anushka")
 
 _VOICES = [
-    VoiceInfo(id="anushka", name="Anushka", lang="hi-en", engine="sarvam_bulbul"),
-    VoiceInfo(id="manisha", name="Manisha", lang="hi-en", engine="sarvam_bulbul"),
-    VoiceInfo(id="vidya", name="Vidya", lang="hi-en", engine="sarvam_bulbul"),
-    VoiceInfo(id="arya", name="Arya", lang="hi-en", engine="sarvam_bulbul"),
-    VoiceInfo(id="abhilash", name="Abhilash", lang="hi-en", engine="sarvam_bulbul"),
-    VoiceInfo(id="karun", name="Karun", lang="hi-en", engine="sarvam_bulbul"),
-    VoiceInfo(id="hitesh", name="Hitesh", lang="hi-en", engine="sarvam_bulbul"),
+    VoiceInfo(id="anushka", name="Anushka", lang="hi-IN", engine="sarvam_bulbul"),
+    VoiceInfo(id="manisha", name="Manisha", lang="hi-IN", engine="sarvam_bulbul"),
+    VoiceInfo(id="vidya", name="Vidya", lang="hi-IN", engine="sarvam_bulbul"),
+    VoiceInfo(id="arya", name="Arya", lang="hi-IN", engine="sarvam_bulbul"),
+    VoiceInfo(id="abhilash", name="Abhilash", lang="hi-IN", engine="sarvam_bulbul"),
+    VoiceInfo(id="karun", name="Karun", lang="hi-IN", engine="sarvam_bulbul"),
+    VoiceInfo(id="hitesh", name="Hitesh", lang="hi-IN", engine="sarvam_bulbul"),
 ]
 
-_DEFAULT_SPEAKER = "anushka"
+_DEFAULT_SPEAKER = _SARVAM_TTS_SPEAKER
 _VALID_SPEAKERS = {v.id for v in _VOICES}
 
 
@@ -91,5 +95,10 @@ class SarvamBulbulEngine(TTSEngine):
 
 
 def _lang_code(lang: str) -> str:
-    return {"hi": "hi-IN", "hi-en": "hi-IN", "en": "en-IN",
-            "mr": "mr-IN", "ta": "ta-IN"}.get(lang, "hi-IN")
+    """Map lang tag to Sarvam target_language_code.
+
+    hi, hi-IN, hi-en all map to hi-IN (pure Hindi rendering —
+    Devanagari input is rendered naturally by bulbul:v2 at hi-IN).
+    """
+    return {"hi": "hi-IN", "hi-IN": "hi-IN", "hi-en": "hi-IN", "en": "en-IN",
+            "en-IN": "en-IN", "mr": "mr-IN", "ta": "ta-IN"}.get(lang, "hi-IN")
