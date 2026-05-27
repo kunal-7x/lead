@@ -278,9 +278,24 @@ class AgentLoop:
         if _FILLER_ENABLED:
             asyncio.create_task(self._warm_fillers())
 
-        # Play greeting if available
+        # Play greeting if available.
+        # Set _playing_tts=True so that the audio loop below (which starts
+        # reading frames immediately) treats incoming ambient noise as
+        # potential barge-in rather than a new user utterance.  This kills
+        # the 3×3-4 s cold-start batch-STT round-trips on "Yes."/"Hello"/"".
+        # Barge-in still works: if the caller speaks ≥8 consecutive VAD-
+        # positive frames (~160 ms) OVER the greeting, _BARGEIN_MIN_SPEECH_CHUNKS
+        # fires and interrupts it correctly.
         if self._greeting_audio:
+            self._playing_tts = True
+            self._stop_playback.clear()
             await _call(send_audio, self._greeting_audio)
+            # Greeting finished (not interrupted) — allow normal listen loop.
+            if not self._stop_playback.is_set():
+                self._playing_tts = False
+                _diag(self.ctx.session_id, 0,
+                      phase="greeting", status="complete",
+                      audio_bytes=len(self._greeting_audio))
 
         silence_chunks_needed = SILENCE_THRESHOLD_MS // CHUNK_MS
         speech_started = False
@@ -295,6 +310,10 @@ class AgentLoop:
 
         async def _start_stt_stream():
             nonlocal _stt_stream_queue, _stt_stream_task, _stt_stream_result
+            # If a stream is already running (eager pre-connect), reuse it.
+            # This avoids creating a duplicate WS connection on first speech.
+            if _stt_stream_queue is not None and _stt_stream_task is not None and not _stt_stream_task.done():
+                return
             _stt_stream_result = []
             q: asyncio.Queue[bytes | None] = asyncio.Queue()
             _stt_stream_queue = q
@@ -333,6 +352,16 @@ class AgentLoop:
         _bargein_consec: int = 0
         # Speech chunk counter for diag (reset each utterance)
         _speech_chunk_count: int = 0
+
+        # Eager STT stream pre-connect: start the streaming WebSocket NOW, before
+        # the first real speech chunk arrives. This ensures saaras:v3 is already
+        # connected when the caller starts speaking so turn-0 never falls back to
+        # the slow batch-Sarvam path.
+        if hasattr(self._stt, "stream_transcribe"):
+            await _start_stt_stream()
+            _diag(self.ctx.session_id, 0,
+                  phase="stt_preconnect", status="started",
+                  engine="saaras:v3")
 
         async for chunk in audio_source:
             # ── Collect completed utterance task result (non-blocking) ─────────
@@ -410,6 +439,12 @@ class AgentLoop:
                         # Accumulate the debounce chunk into buffer (will be used
                         # if/when barge-in is confirmed or if TTS ends first)
                         audio_buffer.extend(chunk)
+                        # Diagnostic: brief noise during greeting suppressed (turn 0 only)
+                        if self._turn_index == 0 and _bargein_consec == 1:
+                            _diag(self.ctx.session_id, 0,
+                                  phase="stt_suppressed_greeting",
+                                  reason="noise_during_greeting",
+                                  consec_frames=_bargein_consec)
                 else:
                     # Non-speech during TTS — reset debounce counter
                     _bargein_consec = 0
