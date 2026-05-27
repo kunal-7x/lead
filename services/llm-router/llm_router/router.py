@@ -460,7 +460,8 @@ async def _llm_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncIt
         "",
         "अभी सिर्फ़ बोला जाने वाला जवाब दो — कोई JSON नहीं, कोई schema नहीं, "
         "कोई markdown या extra टिप्पणी नहीं। सिर्फ़ देवनागरी में, बोलचाल वाली "
-        "हिंदी में, एक-दो वाक्य का जवाब।",
+        "हिंदी में, MAXIMUM 1-2 छोटे वाक्य, 25 शब्दों से कम। "
+        "एक असली टेलीकॉलर की तरह — सीधा, संक्षिप्त, और असरदार।",
     ]
     system = "\n".join(system_lines)
 

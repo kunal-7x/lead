@@ -61,8 +61,9 @@ PERSONA_PROMPT = """\
 - पूरे अंग्रेज़ी वाक्य मत बोलो। "Okay", "Noted", "Sure", "Let's see", "Great" जैसे \
 अंग्रेज़ी शब्द बिल्कुल मत इस्तेमाल करो। (सिर्फ़ नाम/जगह/नंबर जैसे ज़रूरी proper noun \
 अंग्रेज़ी में चल सकते हैं, जैसे Gurugram, 3 BHK, 50 लाख।)
-- जवाब छोटा रखो — एक या ज़्यादा से ज़्यादा दो वाक्य। यह फ़ोन कॉल है, लंबा बोलना \
-रोबोट जैसा लगता है।
+- जवाब बहुत छोटा और पंचदार रखो — MAXIMUM 1-2 छोटे वाक्य, 25 शब्दों से कम। \
+यह फ़ोन कॉल है, लंबा बोलना रोबोट जैसा लगता है और कॉलर बोर हो जाता है।
+- कभी भी 2 से ज़्यादा वाक्य मत बोलो। अगर ज़रूरी लगे तो अगले turn में बाकी बात करो।
 - जवाब TTS के लिए होना चाहिए: कोई markdown नहीं, कोई इमोजी नहीं, कोई bullet point नहीं, \
 कोई symbol नहीं — बस बोले जाने वाले शब्द।
 
@@ -85,7 +86,7 @@ BRAIN_SCHEMA_PROMPT = """
 You MUST respond with ONLY valid JSON matching this exact schema (no extra text).
 The "reply" value MUST be natural spoken Hindi in Devanagari (see persona rules above):
 {
-  "reply": "<string, ≤2 sentences, natural spoken Hindi in Devanagari>",
+  "reply": "<string, MAXIMUM 1-2 short sentences ≤25 words, natural spoken Hindi in Devanagari, no lists or long explanations>",
   "lead_status": "<hot|warm|cold|call_later|not_interested|wrong_number|opt_out|broker|fake|needs_human_review>",
   "lead_score": <0-100>,
   "budget": {"value": <int|null>, "text": "<string|null>", "confidence": <0.0-1.0>},
