@@ -267,6 +267,8 @@ async def run_vobiz_bridge(
         for i, offset in enumerate(range(0, len(ulaw_data), _ULAW_CHUNK_BYTES)):
             # Mid-frame abort: stop within ~20ms of barge-in confirmation
             if _stop_event is not None and _stop_event.is_set():
+                print(f"[vobiz_bridge] playback aborted mid-frame frame={i}/{n_frames}",
+                      file=sys.stderr, flush=True)
                 break
 
             chunk = ulaw_data[offset: offset + _ULAW_CHUNK_BYTES]
@@ -291,6 +293,7 @@ async def run_vobiz_bridge(
         if msg_type == "stop_playback":
             # Barge-in: tell Vobiz to clear its audio buffer
             await websocket.send_text(_build_clear_audio_frame())
+            print("[vobiz_bridge] clearAudio sent", file=sys.stderr, flush=True)
         elif msg_type == "call_complete":
             # No standard Vobiz call-complete frame; log only
             logger.info("vobiz_bridge call_complete stream_id=%s outcome=%s",

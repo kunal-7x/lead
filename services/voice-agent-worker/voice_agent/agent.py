@@ -267,6 +267,10 @@ class AgentLoop:
                     _bargein_consec += 1
                     if _bargein_consec >= _BARGEIN_MIN_SPEECH_CHUNKS:
                         # Confirmed barge-in — interrupt AI reply
+                        _milestone("bargein_confirmed",
+                                   session=self.ctx.session_id,
+                                   turn=self._turn_index,
+                                   consec_frames=_bargein_consec)
                         self._stop_playback.set()
                         await _call(send_json, {"type": "stop_playback"})
                         self._playing_tts = False
@@ -490,6 +494,10 @@ class AgentLoop:
         # backchannel — do NOT issue a new AI reply. The caller's "haan" means
         # "I hear you, keep going" rather than "stop and answer me".
         if is_barge_in and _text_stripped.lower() in _BACKCHANNEL_TOKENS:
+            _milestone("bargein_suppressed_backchannel",
+                       session=self.ctx.session_id,
+                       turn=self._turn_index,
+                       text=repr(_text_stripped))
             print(
                 f"[voice_agent] turn_skipped_bargein_backchannel"
                 f" text={_text_stripped!r}"
