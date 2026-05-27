@@ -222,6 +222,11 @@ class AgentLoop:
         # Accumulated slot values across the call — updated after each turn that
         # returns a meta_brain. Passed to LLM as collected_slots to prevent re-asking.
         self._accumulated_slots: dict = {}
+        # Bug A guard: filler must NOT fire until at least one real user utterance
+        # has passed the noise gate. Greeting-window noise and sub-threshold VAD
+        # blips must never trigger filler. Set to True the first time noise gate
+        # accepts a user turn; never reset (filler stays eligible for the whole call).
+        self._real_utterance_seen: bool = False
 
     async def _warm_fillers(self) -> None:
         """Pre-synthesize filler phrases into the module-level cache.
@@ -252,8 +257,19 @@ class AgentLoop:
 
         Gap-triggered: waits _FILLER_GAP_MS after speech_end. If first audio
         arrives in time the filler is skipped silently (fast turns = no filler).
-        At most once per turn — the task is cancelled by the caller on all early-
-        exit paths (noise-gate, backchannel suppression, STT error).
+
+        Bug A guard — pre_utterance_lockout: filler is suppressed unless a real
+        user utterance has already passed the noise gate this call
+        (_real_utterance_seen=True). This prevents filler from firing on
+        greeting-window noise, sub-threshold VAD blips, or any audio before the
+        first genuine user turn.
+
+        At most once per turn — structurally guaranteed: exactly one filler_task
+        is created per _process_utterance call. The task is cancelled on all
+        early-exit paths (noise-gate reject, backchannel suppression, STT error).
+        On each new turn the caller creates a fresh filler_task, so filler fires
+        once per slow turn for the entire call (per-turn, not per-call).
+
         Round-robins through _FILLER_TEXTS so consecutive fillers sound varied.
         """
         if not _FILLER_ENABLED:
@@ -269,9 +285,18 @@ class AgentLoop:
                   reason="first_audio_fast", gap_ms=f"{gap_ms:.0f}")
             return
         except asyncio.TimeoutError:
-            pass  # Gap threshold hit — play filler
+            pass  # Gap threshold hit — check guards before playing
 
         gap_ms = (time.time() - t_start) * 1000
+
+        # Bug A: reject filler if no real user utterance has been accepted yet.
+        # This locks out double-fire on greeting noise / pre-utterance VAD blips.
+        if not self._real_utterance_seen:
+            _diag(self.ctx.session_id, self._turn_index,
+                  phase="filler", status="skipped",
+                  reason="pre_utterance_lockout", gap_ms=f"{gap_ms:.0f}")
+            return
+
         text = _FILLER_TEXTS[self._filler_index % len(_FILLER_TEXTS)]
         self._filler_index += 1
         audio = _filler_cache.get(text)
@@ -669,6 +694,11 @@ class AgentLoop:
             filler_task.cancel()
             return _skip
         # ── /Noise gate ───────────────────────────────────────────────────────
+
+        # Bug A: mark that a real utterance has passed the noise gate this call.
+        # From this point on, filler is eligible for this and all future turns.
+        # Must be set AFTER all noise-gate checks so blips never unlock filler.
+        self._real_utterance_seen = True
 
         # ── Backchannel suppression (barge-in only) ───────────────────────────
         # If the caller interrupted a playing reply but the transcript is only

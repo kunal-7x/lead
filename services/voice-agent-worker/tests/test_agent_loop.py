@@ -247,3 +247,194 @@ async def test_filler_skipped_when_tts_fast():
     assert len(filler_played_texts) == 0, (
         f"Filler played on a fast-TTS turn — should have been skipped; played={filler_played_texts}"
     )
+
+
+# ── Bug-fix regression tests (call 237210af) ─────────────────────────────────
+
+async def test_filler_not_fired_on_greeting_noise_or_pre_utterance():
+    """Bug A: filler must NOT fire on noise blips before the first real user turn.
+
+    Simulates the call 237210af scenario: STT is slow (>gap) AND returns empty/
+    noise transcript (noise-gate rejection). Filler must stay silent even though
+    the gap timer fires — reason=pre_utterance_lockout must appear in [diag].
+
+    A slow-STT + noise-transcript utterance is the exact double-fire scenario:
+    old code would have played filler (gap fired before noise gate cancelled);
+    new code must suppress it via pre_utterance_lockout.
+    """
+    import voice_agent.agent as agent_mod
+
+    TINY_GAP_MS = 30
+
+    class SlowSTT(FakeSTT):
+        """Returns empty transcript but only after the filler gap has elapsed."""
+        async def transcribe(self, audio, lang, session_id):
+            await asyncio.sleep(TINY_GAP_MS / 1000 * 4)  # 4× gap → filler would fire
+            return await super().transcribe(audio, lang, session_id)
+
+    # STT returns empty → noise gate rejects → _real_utterance_seen never set
+    noise_stt = SlowSTT(transcript="", confidence=0.9)
+    llm = FakeLLM()
+    tts = FakeTTS()  # TTS is irrelevant — we never reach LLM/TTS
+
+    filler_played_texts: list[str] = []
+    lockout_logged: list[str] = []
+    original_play = agent_mod.AgentLoop._play_filler
+
+    async def spy_play_filler(self, send_audio, first_audio_event, t_speech_end=None):
+        for t in agent_mod._FILLER_TEXTS:
+            if t not in agent_mod._filler_cache:
+                agent_mod._filler_cache[t] = b"\x00\x00" * 100
+
+        played = []
+        original_send = send_audio
+
+        async def capturing_send(audio):
+            played.append(audio)
+            if inspect.iscoroutinefunction(original_send):
+                await original_send(audio)
+            else:
+                original_send(audio)
+
+        # Capture lockout diag
+        original_diag = agent_mod._diag
+
+        def spy_diag(session, turn, **kw):
+            if kw.get("reason") == "pre_utterance_lockout":
+                lockout_logged.append("lockout")
+            original_diag(session, turn, **kw)
+
+        with patch.object(agent_mod, "_diag", spy_diag):
+            await original_play(self, capturing_send, first_audio_event, t_speech_end)
+        if played:
+            filler_played_texts.append("played")
+
+    with patch.object(agent_mod.AgentLoop, "_play_filler", spy_play_filler), \
+         patch.object(agent_mod, "_FILLER_ENABLED", True), \
+         patch.object(agent_mod, "_FILLER_GAP_MS", float(TINY_GAP_MS)), \
+         patch.object(agent_mod, "_FILLER_DELAY_MS", float(TINY_GAP_MS)):
+        ws = FakeFreeSwitchWS(n_speech_chunks=10, n_silence_chunks=40)
+        loop = make_loop(stt=noise_stt, llm=llm, tts=tts)
+        await run_loop(loop, ws.all_chunks())
+
+    assert len(filler_played_texts) == 0, (
+        f"Filler played on pre-utterance noise blip — must be locked out; "
+        f"played={filler_played_texts}"
+    )
+    assert len(lockout_logged) >= 1, (
+        "Expected [diag] reason=pre_utterance_lockout but none was emitted"
+    )
+
+
+async def test_filler_fires_on_each_slow_turn_per_turn_not_per_call():
+    """Bug B: filler must fire on EACH slow turn (per-turn guard, not per-call).
+
+    Runs two consecutive utterances with slow TTS. Both must trigger filler
+    independently — proves the at-most-once guard resets per turn, not per call.
+    """
+    import voice_agent.agent as agent_mod
+    from voice_agent.vad import FakeVAD
+
+    TINY_GAP_MS = 30
+
+    class SlowTTS(FakeTTS):
+        async def synthesize(self, text, lang, voice_id, tenant_id, session_id,
+                             tts_premium=False):
+            await asyncio.sleep(TINY_GAP_MS / 1000 * 3)
+            return await super().synthesize(text, lang, voice_id, tenant_id,
+                                            session_id, tts_premium)
+
+    stt = FakeSTT(transcript="kya price hai", confidence=0.90)
+    llm = FakeLLM()
+    tts = SlowTTS()
+    vad = FakeVAD(speech_chunks=10)
+
+    filler_fired_turns: list[int] = []
+    original_play = agent_mod.AgentLoop._play_filler
+
+    async def spy_play_filler(self, send_audio, first_audio_event, t_speech_end=None):
+        for t in agent_mod._FILLER_TEXTS:
+            if t not in agent_mod._filler_cache:
+                agent_mod._filler_cache[t] = b"\x00\x00" * 100
+
+        played = []
+        original_send = send_audio
+
+        async def capturing_send(audio):
+            played.append(audio)
+            if inspect.iscoroutinefunction(original_send):
+                await original_send(audio)
+            else:
+                original_send(audio)
+
+        await original_play(self, capturing_send, first_audio_event, t_speech_end)
+        if played:
+            filler_fired_turns.append(self._turn_index)
+
+    with patch.object(agent_mod.AgentLoop, "_play_filler", spy_play_filler), \
+         patch.object(agent_mod, "_FILLER_ENABLED", True), \
+         patch.object(agent_mod, "_FILLER_GAP_MS", float(TINY_GAP_MS)), \
+         patch.object(agent_mod, "_FILLER_DELAY_MS", float(TINY_GAP_MS)):
+        ws = FakeFreeSwitchWS(n_speech_chunks=10, n_silence_chunks=40)
+        chunks = ws.all_chunks() + ws.all_chunks()  # 2 real utterances
+        loop = make_loop(stt=stt, llm=llm, tts=tts, vad=vad)
+        await run_loop(loop, chunks)
+
+    assert len(filler_fired_turns) >= 2, (
+        f"Expected filler on both slow turns but only fired on turns: {filler_fired_turns}. "
+        "At-most-once guard must be per-turn, not per-call."
+    )
+
+
+async def test_filler_at_most_once_within_single_turn():
+    """Bug B: at-most-once within a single turn — filler fires at most once per turn."""
+    import voice_agent.agent as agent_mod
+
+    TINY_GAP_MS = 30
+
+    class SlowTTS(FakeTTS):
+        async def synthesize(self, text, lang, voice_id, tenant_id, session_id,
+                             tts_premium=False):
+            await asyncio.sleep(TINY_GAP_MS / 1000 * 3)
+            return await super().synthesize(text, lang, voice_id, tenant_id,
+                                            session_id, tts_premium)
+
+    stt = FakeSTT(transcript="kya price hai", confidence=0.90)
+    llm = FakeLLM()
+    tts = SlowTTS()
+
+    filler_play_count: list[int] = []
+    original_play = agent_mod.AgentLoop._play_filler
+
+    async def spy_play_filler(self, send_audio, first_audio_event, t_speech_end=None):
+        for t in agent_mod._FILLER_TEXTS:
+            if t not in agent_mod._filler_cache:
+                agent_mod._filler_cache[t] = b"\x00\x00" * 100
+
+        played = []
+        original_send = send_audio
+
+        async def capturing_send(audio):
+            played.append(audio)
+            if inspect.iscoroutinefunction(original_send):
+                await original_send(audio)
+            else:
+                original_send(audio)
+
+        await original_play(self, capturing_send, first_audio_event, t_speech_end)
+        filler_play_count.append(len(played))
+
+    with patch.object(agent_mod.AgentLoop, "_play_filler", spy_play_filler), \
+         patch.object(agent_mod, "_FILLER_ENABLED", True), \
+         patch.object(agent_mod, "_FILLER_GAP_MS", float(TINY_GAP_MS)), \
+         patch.object(agent_mod, "_FILLER_DELAY_MS", float(TINY_GAP_MS)):
+        ws = FakeFreeSwitchWS(n_speech_chunks=10, n_silence_chunks=40)
+        loop = make_loop(stt=stt, llm=llm, tts=tts)
+        await run_loop(loop, ws.all_chunks())
+
+    # _play_filler should be called once (one filler_task per _process_utterance),
+    # and within that one call, at most one audio blob sent.
+    total_played = sum(filler_play_count)
+    assert total_played <= 1, (
+        f"Filler fired {total_played} times within a single turn — must be at-most-once"
+    )
