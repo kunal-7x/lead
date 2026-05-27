@@ -252,17 +252,21 @@ class AgentLoop:
                 logger.debug("Filler pre-synthesis failed for %r — will skip", text)
 
     async def _play_filler(self, send_audio: callable, first_audio_event: asyncio.Event,
-                           t_speech_end: float | None = None) -> None:
+                           t_speech_end: float | None = None,
+                           noise_gate_event: asyncio.Event | None = None) -> None:
         """Play a filler phrase ONLY if first TTS audio is genuinely delayed.
 
         Gap-triggered: waits _FILLER_GAP_MS after speech_end. If first audio
         arrives in time the filler is skipped silently (fast turns = no filler).
 
-        Bug A guard — pre_utterance_lockout: filler is suppressed unless a real
-        user utterance has already passed the noise gate this call
-        (_real_utterance_seen=True). This prevents filler from firing on
-        greeting-window noise, sub-threshold VAD blips, or any audio before the
-        first genuine user turn.
+        Noise-gate guard: filler is only played if THIS TURN passes the noise
+        gate. A per-turn noise_gate_event is set by _process_utterance exactly
+        when the noise gate accepts the transcript (real turn). On noise/skipped
+        turns the caller cancels filler_task before setting the event, so filler
+        never plays. This replaces the stale _real_utterance_seen call-level flag
+        which caused: (a) filler blocked on the first real slow turn because the
+        flag was still False, and (b) filler firing on later noise turns because
+        the flag was True from a previous real turn.
 
         At most once per turn — structurally guaranteed: exactly one filler_task
         is created per _process_utterance call. The task is cancelled on all
@@ -285,13 +289,26 @@ class AgentLoop:
                   reason="first_audio_fast", gap_ms=f"{gap_ms:.0f}")
             return
         except asyncio.TimeoutError:
-            pass  # Gap threshold hit — check guards before playing
+            pass  # Gap threshold hit — wait for noise-gate verdict
 
         gap_ms = (time.time() - t_start) * 1000
 
-        # Bug A: reject filler if no real user utterance has been accepted yet.
-        # This locks out double-fire on greeting noise / pre-utterance VAD blips.
-        if not self._real_utterance_seen:
+        # Per-turn noise-gate guard: wait for this turn's noise gate to accept
+        # the transcript. The event is set only when the transcript passes all
+        # noise-gate checks. On noise/empty/backchannel turns the filler_task is
+        # cancelled by the caller before this event is set, so we never reach here.
+        # Timeout: 2 s max wait (STT + noise-gate should finish well within that;
+        # if something hangs we bail rather than block the call indefinitely).
+        if noise_gate_event is not None:
+            try:
+                await asyncio.wait_for(noise_gate_event.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                _diag(self.ctx.session_id, self._turn_index,
+                      phase="filler", status="skipped",
+                      reason="noise_gate_timeout", gap_ms=f"{gap_ms:.0f}")
+                return
+        elif not self._real_utterance_seen:
+            # Fallback for callers that don't pass noise_gate_event (legacy path).
             _diag(self.ctx.session_id, self._turn_index,
                   phase="filler", status="skipped",
                   reason="pre_utterance_lockout", gap_ms=f"{gap_ms:.0f}")
@@ -594,8 +611,15 @@ class AgentLoop:
         # ── FILLER: only plays if TTS is genuinely slow (>FILLER_DELAY_MS) ──
         # An event is set by the TTS worker when first audio is sent.
         # _play_filler waits for that event; if TTS is fast, no filler plays.
+        # noise_gate_event: set only when THIS turn passes the noise gate.
+        # Replaces the stale _real_utterance_seen call-level flag that caused
+        # filler to fire on noise turns (flag=True from prior real turn) and to
+        # be silenced on the first real slow turn (flag still False at 400ms).
         _first_audio_event = asyncio.Event()
-        filler_task = asyncio.create_task(self._play_filler(send_audio, _first_audio_event, t0))
+        _noise_gate_event = asyncio.Event()
+        filler_task = asyncio.create_task(
+            self._play_filler(send_audio, _first_audio_event, t0, _noise_gate_event)
+        )
 
         # ── STT ──────────────────────────────────────────────────────────────
         # Try streaming result first; fall back to batch.
@@ -622,6 +646,9 @@ class AgentLoop:
                 "STT failed for session=%s turn=%s — skipping turn",
                 self.ctx.session_id, self._turn_index,
             )
+            _diag(self.ctx.session_id, self._turn_index,
+                  phase="filler_decision", turn_type="noise",
+                  reason="stt_error", msg="filler_cancelled")
             filler_task.cancel()
             return _skip
 
@@ -655,6 +682,9 @@ class AgentLoop:
             and abs(stt_result.confidence - _DEFAULTED_CONFIDENCE) < 1e-6
         )
         if not _text_stripped:
+            _diag(self.ctx.session_id, self._turn_index,
+                  phase="filler_decision", turn_type="noise",
+                  reason="empty_transcript", msg="filler_cancelled")
             print(
                 f"[voice_agent] turn_skipped_noise reason=empty"
                 f" session={self.ctx.session_id} turn={self._turn_index}",
@@ -666,6 +696,9 @@ class AgentLoop:
             _diag(self.ctx.session_id, self._turn_index,
                   phase="noise_gate", reason="noise_token",
                   text=repr(_text_stripped), conf=f"{stt_result.confidence:.3f}")
+            _diag(self.ctx.session_id, self._turn_index,
+                  phase="filler_decision", turn_type="noise",
+                  reason="noise_token", msg="filler_cancelled")
             print(
                 f"[voice_agent] turn_skipped_noise reason=noise_token"
                 f" text={_text_stripped!r} conf={stt_result.confidence:.3f}"
@@ -679,6 +712,9 @@ class AgentLoop:
             _diag(self.ctx.session_id, self._turn_index,
                   phase="noise_gate", reason="oov_english_token",
                   text=repr(_text_stripped), conf=f"{stt_result.confidence:.3f}")
+            _diag(self.ctx.session_id, self._turn_index,
+                  phase="filler_decision", turn_type="noise",
+                  reason="oov_english_token", msg="filler_cancelled")
             print(
                 f"[voice_agent] turn_skipped_noise reason=oov_english_token"
                 f" text={_text_stripped!r} conf={stt_result.confidence:.3f}"
@@ -688,6 +724,10 @@ class AgentLoop:
             filler_task.cancel()
             return _skip
         if stt_result.confidence < _MIN_CONFIDENCE:
+            _diag(self.ctx.session_id, self._turn_index,
+                  phase="filler_decision", turn_type="noise",
+                  reason="low_confidence", msg="filler_cancelled",
+                  conf=f"{stt_result.confidence:.3f}")
             print(
                 f"[voice_agent] turn_skipped_noise reason=low_confidence"
                 f" text={_text_stripped!r} conf={stt_result.confidence:.3f}"
@@ -698,10 +738,18 @@ class AgentLoop:
             return _skip
         # ── /Noise gate ───────────────────────────────────────────────────────
 
-        # Bug A: mark that a real utterance has passed the noise gate this call.
+        # Mark that a real utterance has passed the noise gate this call.
         # From this point on, filler is eligible for this and all future turns.
         # Must be set AFTER all noise-gate checks so blips never unlock filler.
         self._real_utterance_seen = True
+
+        # Unlock filler for THIS turn: signal that the noise gate accepted the
+        # transcript so _play_filler may proceed to play (if gap timer already
+        # fired) or will know to play (if it fires shortly after this).
+        _noise_gate_event.set()
+        _diag(self.ctx.session_id, self._turn_index,
+              phase="filler_decision", turn_type="real",
+              msg="noise_gate_passed_filler_unlocked")
 
         # ── Backchannel suppression (barge-in only) ───────────────────────────
         # If the caller interrupted a playing reply but the transcript is only
@@ -713,6 +761,9 @@ class AgentLoop:
                        session=self.ctx.session_id,
                        turn=self._turn_index,
                        text=repr(_text_stripped))
+            _diag(self.ctx.session_id, self._turn_index,
+                  phase="filler_decision", turn_type="backchannel",
+                  reason="barge_in_backchannel", msg="filler_cancelled")
             print(
                 f"[voice_agent] turn_skipped_bargein_backchannel"
                 f" text={_text_stripped!r}"
