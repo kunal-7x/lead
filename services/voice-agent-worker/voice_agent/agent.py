@@ -19,6 +19,18 @@ from voice_agent.vad import VAD, SILENCE_THRESHOLD_MS, CHUNK_MS
 _MIN_CONFIDENCE = 0.3
 _END_ACTIONS = {"end_call", "opt_out"}
 
+# Noise-token blocklist: standalone utterances that are almost certainly VAD
+# artifacts / caller silence / background sound — NOT real answers.
+# Only applied when confidence equals the default-fallback value (0.9) which
+# batch-Sarvam returns when no real confidence is reported.
+_NOISE_TOKENS: frozenset[str] = frozenset({
+    "yes.", "yes", "hmm.", "hmm", "hm", "hm.", "thank you.", "thank you",
+    "okay.", "okay", "ok.", "ok", "haan", "हाँ", "हाँ।", "ha", "ha.",
+    "uh", "uh.", "um", "um.", "ah", "ah.",
+})
+# Confidence value that batch-Sarvam sets when it has NO real confidence data.
+_DEFAULTED_CONFIDENCE = 0.9
+
 # Sentence-split pattern: split after . ! ? । or when word-count ≥ 12
 _SENTENCE_END = re.compile(r'(?<=[.!?।])\s+')
 
@@ -322,9 +334,45 @@ class AgentLoop:
         _milestone("stt_final", session=self.ctx.session_id, turn=self._turn_index,
                    ms=f"{stt_ms:.0f}", text=repr(stt_result.text[:40] if stt_result.text else ""))
 
-        if not stt_result.text or stt_result.confidence < _MIN_CONFIDENCE:
+        # ── Noise gate ────────────────────────────────────────────────────────
+        # 1) Reject empty / whitespace-only transcript.
+        # 2) Reject degenerate noise tokens when confidence is the batch-Sarvam
+        #    default (0.9) — meaning no real confidence was returned.
+        #    Real engines (streaming saaras:v3) report lower, calibrated values
+        #    so a genuine short Hindi answer will not be dropped here.
+        # 3) Keep the hard _MIN_CONFIDENCE floor for engines with real scores.
+        _text_stripped = (stt_result.text or "").strip()
+        _is_noise_token = (
+            _text_stripped.lower() in _NOISE_TOKENS
+            and abs(stt_result.confidence - _DEFAULTED_CONFIDENCE) < 1e-6
+        )
+        if not _text_stripped:
+            print(
+                f"[voice_agent] turn_skipped_noise reason=empty"
+                f" session={self.ctx.session_id} turn={self._turn_index}",
+                file=sys.stderr,
+            )
             filler_task.cancel()
             return _skip
+        if _is_noise_token:
+            print(
+                f"[voice_agent] turn_skipped_noise reason=noise_token"
+                f" text={_text_stripped!r} conf={stt_result.confidence:.3f}"
+                f" session={self.ctx.session_id} turn={self._turn_index}",
+                file=sys.stderr,
+            )
+            filler_task.cancel()
+            return _skip
+        if stt_result.confidence < _MIN_CONFIDENCE:
+            print(
+                f"[voice_agent] turn_skipped_noise reason=low_confidence"
+                f" text={_text_stripped!r} conf={stt_result.confidence:.3f}"
+                f" session={self.ctx.session_id} turn={self._turn_index}",
+                file=sys.stderr,
+            )
+            filler_task.cancel()
+            return _skip
+        # ── /Noise gate ───────────────────────────────────────────────────────
 
         # Ensure filler has been sent before starting the real reply
         try:
