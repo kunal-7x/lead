@@ -302,6 +302,9 @@ class AgentLoop:
         audio = _filler_cache.get(text)
         if audio and not self._stop_playback.is_set():
             try:
+                # Arm barge-in gate while filler audio is playing so callers can
+                # interrupt the filler just like they can interrupt the main reply.
+                self._playing_tts = True
                 await _call(send_audio, audio)
                 _milestone("filler_played", session=self.ctx.session_id,
                            turn=self._turn_index, text=text)
