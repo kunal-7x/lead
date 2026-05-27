@@ -435,15 +435,17 @@ async def _llm_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncIt
     model = getattr(backend, "_model", None) or _LLM_MODEL
     base_url = _LLM_BASE_URL
 
-    # Build a trimmed system prompt: same persona + KB, but instruct plain-text reply only
+    # Build a trimmed system prompt: same persona + KB, but instruct plain-text reply only.
+    # Reuse the SHARED persona so the spoken path behaves identically to the batch path.
+    from llm_router.backends.base import PERSONA_PROMPT
+
     system_lines = [
-        f"You are Capsy, an AI real-estate sales assistant for Axcrio.",
-        f"Language: {req.lang} (use Hinglish for hi-en).",
-        f"KB Context:\n{kb_context}",
+        PERSONA_PROMPT,
+        f"KB Context (अगर ज़रूरी हो तो इसी से जानकारी दो):\n{kb_context}",
         "",
-        "INSTRUCTIONS: Respond with ONLY the agent's spoken reply — plain text, "
-        "no JSON, no markdown, no extra commentary. "
-        "Keep it ≤2 natural sentences, conversational Hinglish.",
+        "अभी सिर्फ़ बोला जाने वाला जवाब दो — कोई JSON नहीं, कोई schema नहीं, "
+        "कोई markdown या extra टिप्पणी नहीं। सिर्फ़ देवनागरी में, बोलचाल वाली "
+        "हिंदी में, एक-दो वाक्य का जवाब।",
     ]
     system = "\n".join(system_lines)
 
