@@ -101,6 +101,17 @@ def _milestone(label: str, **kw) -> None:
     print(f"[voice_agent] {label} {extra}", file=sys.stderr, flush=True)
 
 
+def _diag(session: str, turn: int, **kw) -> None:
+    """Emit a single greppable diagnostic line to stderr.
+
+    Format: [diag] session=X turn=N key=val ...
+    Grep 'session=X' to reconstruct a full call, '[diag]' for all diag lines.
+    Values are kept concise — no audio bytes, no secrets.
+    """
+    extra = " ".join(f"{k}={v}" for k, v in kw.items())
+    print(f"[diag] session={session} turn={turn} {extra}", file=sys.stderr, flush=True)
+
+
 class AgentLoop:
     """Core per-call agent loop.
 
@@ -253,6 +264,8 @@ class AgentLoop:
 
         # Barge-in debounce counter: consecutive VAD-positive chunks during TTS
         _bargein_consec: int = 0
+        # Speech chunk counter for diag (reset each utterance)
+        _speech_chunk_count: int = 0
 
         async for chunk in audio_source:
             # ── Collect completed utterance task result (non-blocking) ─────────
@@ -322,6 +335,7 @@ class AgentLoop:
                         await _start_stt_stream()
                         speech_started = True
                         silence_count = 0
+                        _speech_chunk_count = 1  # this chunk is the first of the new utterance
                         audio_buffer.extend(chunk)
                         if _stt_stream_queue is not None:
                             _stt_stream_queue.put_nowait(chunk)
@@ -341,8 +355,10 @@ class AgentLoop:
                 if not speech_started:
                     # New utterance starting — kick off streaming STT
                     await _start_stt_stream()
+                    _speech_chunk_count = 0
                 speech_started = True
                 silence_count = 0
+                _speech_chunk_count += 1
                 audio_buffer.extend(chunk)
                 # Feed chunk into STT stream
                 if _stt_stream_queue is not None:
@@ -361,16 +377,19 @@ class AgentLoop:
                     self._interrupted_partial = None
                     _is_bargein = self._next_utterance_is_bargein
                     self._next_utterance_is_bargein = False
+                    _utterance_chunk_count = _speech_chunk_count
                     self._utterance_task = asyncio.create_task(
                         self._process_utterance(
                             bytes(audio_buffer), send_audio, send_json,
                             stt_stream_task=_stt_stream_task,
                             stt_stream_result=_stt_stream_result,
                             is_barge_in=_is_bargein,
+                            speech_chunk_count=_utterance_chunk_count,
                         )
                     )
                     _stt_stream_queue = None
                     _stt_stream_task = None
+                    _speech_chunk_count = 0
                     audio_buffer.clear()
                     speech_started = False
                     silence_count = 0
@@ -405,10 +424,18 @@ class AgentLoop:
         stt_stream_task: asyncio.Task | None = None,
         stt_stream_result: list[STTResult] | None = None,
         is_barge_in: bool = False,
+        speech_chunk_count: int = 0,
     ) -> BrainOutput:
         # t0 = speech-end (this method is invoked the moment the utterance ends)
         t0 = time.time()
+        _speech_duration_ms = speech_chunk_count * CHUNK_MS
         _milestone("speech_end", session=self.ctx.session_id, turn=self._turn_index)
+        _diag(self.ctx.session_id, self._turn_index,
+              phase="speech",
+              chunks=speech_chunk_count,
+              speech_ms=_speech_duration_ms,
+              audio_bytes=len(audio),
+              barge_in=is_barge_in)
         _skip = BrainOutput(reply="", next_action="qualify", summary="")
 
         # ── FILLER: only plays if TTS is genuinely slow (>FILLER_DELAY_MS) ──
@@ -453,6 +480,14 @@ class AgentLoop:
         )
         _milestone("stt_final", session=self.ctx.session_id, turn=self._turn_index,
                    ms=f"{stt_ms:.0f}", text=repr(stt_result.text[:40] if stt_result.text else ""))
+        _stt_engine = stt_result.engine_used or ("streaming" if stt_stream_task is not None and stt_result.text else "batch")
+        _diag(self.ctx.session_id, self._turn_index,
+              phase="stt",
+              engine=_stt_engine,
+              lang=self.ctx.lang,
+              conf=f"{stt_result.confidence:.3f}",
+              ms=f"{stt_ms:.0f}",
+              text=repr((stt_result.text or "")[:60]))
 
         # ── Noise gate ────────────────────────────────────────────────────────
         # 1) Reject empty / whitespace-only transcript.
@@ -526,6 +561,8 @@ class AgentLoop:
         _milestone("playback_start", session=self.ctx.session_id,
                    turn=self._turn_index)
         brain: BrainOutput | None = None
+        # Per-turn TTS accumulator: [total_chars, total_audio_bytes, sentence_count]
+        self._tts_diag: list[int] = [0, 0, 0]
 
         try:
             brain = await self._run_streaming_llm_tts(
@@ -550,12 +587,35 @@ class AgentLoop:
             return _skip
 
         t_done = time.time()
+        _turn_total_ms = (t_done - t0) * 1000
         _milestone("reply_done", session=self.ctx.session_id, turn=self._turn_index,
-                   total_ms=f"{(t_done - t0) * 1000:.0f}")
+                   total_ms=f"{_turn_total_ms:.0f}")
         logger.info(
             "latency session=%s turn=%s leg=total ms=%.0f",
-            self.ctx.session_id, self._turn_index, (t_done - t0) * 1000,
+            self.ctx.session_id, self._turn_index, _turn_total_ms,
         )
+        # ── [diag] LLM summary ────────────────────────────────────────────────
+        _diag(self.ctx.session_id, self._turn_index,
+              phase="llm",
+              user_turn=repr((stt_result.text or "")[:60]),
+              history_turns=len(self._dialog_history),
+              slots_collected=len(getattr(self.ctx, "__dict__", {})),
+              reply=repr((brain.reply or "")[:80]),
+              next_action=brain.next_action,
+              total_ms=f"{_turn_total_ms:.0f}")
+        # ── [diag] TTS summary ────────────────────────────────────────────────
+        _tts_chars, _tts_bytes, _tts_sentences = getattr(self, "_tts_diag", [0, 0, 0])
+        _diag(self.ctx.session_id, self._turn_index,
+              phase="tts",
+              model=os.getenv("SARVAM_TTS_MODEL", "bulbul:v3"),
+              speaker=os.getenv("SARVAM_TTS_SPEAKER", "priya"),
+              sentences=_tts_sentences,
+              chars=_tts_chars,
+              audio_bytes=_tts_bytes)
+        # ── [diag] spoken text ────────────────────────────────────────────────
+        _diag(self.ctx.session_id, self._turn_index,
+              phase="spoken",
+              text=repr((brain.reply or "")[:120]))
 
         # Record turn
         await record_turn(
@@ -671,6 +731,11 @@ class AgentLoop:
                         self.ctx.session_id,
                         self.ctx.tts_premium,
                     )
+                    # Accumulate TTS diag stats
+                    if hasattr(self, "_tts_diag"):
+                        self._tts_diag[0] += len(sentence)
+                        self._tts_diag[1] += len(tts_result.audio)
+                        self._tts_diag[2] += 1
                     if not self._stop_playback.is_set():
                         t_audio = time.time()
                         if not first_audio_sent:
@@ -705,12 +770,18 @@ class AgentLoop:
             ):
                 if not first_token_logged and token:
                     first_token_logged = True
+                    _t_first_token_ms = (time.time() - t_stt) * 1000
                     _milestone(
                         "llm_first_token",
                         session=self.ctx.session_id,
                         turn=self._turn_index,
-                        ms=f"{(time.time() - t_stt) * 1000:.0f}",
+                        ms=f"{_t_first_token_ms:.0f}",
                     )
+                    _diag(self.ctx.session_id, self._turn_index,
+                          phase="llm_first_token",
+                          path="stream_text",
+                          history_turns=len(self._dialog_history),
+                          first_token_ms=f"{_t_first_token_ms:.0f}")
 
                 if token:
                     token_buffer += token
@@ -839,6 +910,11 @@ class AgentLoop:
                         self.ctx.session_id,
                         self.ctx.tts_premium,
                     )
+                    # Accumulate TTS diag stats
+                    if hasattr(self, "_tts_diag"):
+                        self._tts_diag[0] += len(sentence)
+                        self._tts_diag[1] += len(tts_result.audio)
+                        self._tts_diag[2] += 1
                     if not self._stop_playback.is_set():
                         t_audio = time.time()
                         if not first_audio_sent:
@@ -984,6 +1060,11 @@ class AgentLoop:
                     self.ctx.session_id,
                     self.ctx.tts_premium,
                 )
+                # Accumulate TTS diag stats
+                if hasattr(self, "_tts_diag"):
+                    self._tts_diag[0] += len(sentence)
+                    self._tts_diag[1] += len(tts_result.audio)
+                    self._tts_diag[2] += 1
                 if not self._stop_playback.is_set():
                     t_audio = time.time()
                     if not first_audio_sent:
