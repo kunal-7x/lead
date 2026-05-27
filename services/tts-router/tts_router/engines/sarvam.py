@@ -9,7 +9,7 @@ from tts_router.audio import strip_wav_header
 from tts_router.engines.base import TTSEngine
 from tts_router.models import VoiceInfo
 
-_API_KEY = os.getenv("SARVAM_API_KEY", "")
+_API_KEY = os.getenv("SARVAM_API_KEY", "").strip()  # strip \r\n from Windows .env files
 _URL = "https://api.sarvam.ai/text-to-speech"
 _TIMEOUT = 10.0
 # Override TTS model via env (default bulbul:v2)
@@ -42,7 +42,7 @@ class SarvamBulbulEngine(TTSEngine):
     name = "sarvam_bulbul"
 
     def __init__(self, api_key: str = "", timeout: float = _TIMEOUT) -> None:
-        self._api_key = api_key or _API_KEY
+        self._api_key = (api_key or _API_KEY).strip()  # strip \r\n from Windows .env
         self._timeout = timeout
         self._client = httpx.AsyncClient(timeout=timeout)
 
