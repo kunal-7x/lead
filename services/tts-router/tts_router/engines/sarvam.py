@@ -16,8 +16,9 @@ log = logging.getLogger(__name__)
 
 _API_KEY = os.getenv("SARVAM_API_KEY", "").strip()  # strip \r\n from Windows .env files
 _URL = "https://api.sarvam.ai/text-to-speech"
-# Streaming WS endpoint (bulbul:v3). model is a query param per Sarvam contract.
-_WS_URL = "wss://api.sarvam.ai/text-to-speech/stream"
+# Streaming WS endpoint (bulbul:v3). Correct endpoint: /ws (NOT /stream).
+# model goes into the config JSON frame — NOT as a URL query param.
+_WS_URL = "wss://api.sarvam.ai/text-to-speech/ws"
 _TIMEOUT = 10.0
 # Streaming sample rate: bulbul:v3 WS defaults to 24000 Hz PCM16. We request the
 # Sarvam default and resample to 8 kHz on the worker side (audio output is L16 PCM).
@@ -113,9 +114,9 @@ class SarvamBulbulEngine(TTSEngine):
         via its own client wrapper (see voice_agent.clients).
 
         Protocol (bulbul:v3 streaming, per tts_sarvam_research.md):
-          1. open WS to wss://api.sarvam.ai/text-to-speech/stream
+          1. open WS to wss://api.sarvam.ai/text-to-speech/ws  (NO query params)
              auth header: API-Subscription-Key: <SARVAM_API_KEY>
-          2. send {"type":"config","data":{...}} FIRST — model bulbul:v3,
+          2. send {"type":"config","data":{...}} FIRST — model bulbul:v3 IN config,
              language hi-IN, speaker priya, pace 1.0, temperature 0.6,
              output_audio_codec linear16, sample_rate 24000.
              bulbul:v3 REJECTS pitch/loudness — never send them.
@@ -142,12 +143,14 @@ class SarvamBulbulEngine(TTSEngine):
             raise RuntimeError("websockets package not installed; streaming TTS unavailable") from exc
 
         speaker = voice_id if voice_id in _VALID_SPEAKERS else _DEFAULT_SPEAKER
-        url = f"{_WS_URL}?model={_TTS_MODEL}"
+        # URL is plain (no query params) — model goes inside the config frame.
+        url = _WS_URL
         headers = {"API-Subscription-Key": self._api_key}
 
         config = {
             "type": "config",
             "data": {
+                "model": _TTS_MODEL,           # model in config frame, NOT in URL
                 "target_language_code": _lang_code(lang),
                 "speaker": speaker,
                 "pace": 1.0,
@@ -156,39 +159,59 @@ class SarvamBulbulEngine(TTSEngine):
                 "output_audio_codec": "linear16",
                 "min_buffer_size": 50,
                 "max_chunk_length": 250,
+                "sample_rate": _STREAM_SAMPLE_RATE,
             },
         }
-        # Request 8kHz directly if Sarvam honours it; otherwise it emits 24kHz and
-        # the worker resamples. Both are L16 PCM.
-        config["data"]["sample_rate"] = _STREAM_SAMPLE_RATE
         # bulbul:v3 rejects pitch/loudness — intentionally omitted.
+        # bulbul:v3 accepts only pace (0.5-2.0) + temperature (0.01-1.0).
 
-        async with websockets.connect(
-            url, additional_headers=headers, open_timeout=3, close_timeout=2
-        ) as ws:
-            await ws.send(json.dumps(config))
-            await ws.send(json.dumps({"type": "text", "data": {"text": text}}))
-            await ws.send(json.dumps({"type": "flush"}))
+        try:
+            ws_cm = websockets.connect(
+                url, additional_headers=headers, open_timeout=3, close_timeout=2
+            )
+        except Exception as exc:
+            log.error("sarvam_ws_connect_failed url=%s error=%r", url, exc)
+            raise
 
-            async for raw in ws:
-                if isinstance(raw, bytes):
-                    # Some deployments stream raw PCM frames directly.
-                    yield raw
-                    continue
-                try:
-                    msg = json.loads(raw)
-                except (ValueError, TypeError):
-                    continue
-                mtype = msg.get("type", "")
-                if mtype in ("audio", "audio_chunk"):
-                    data = msg.get("data", {})
-                    audio_b64 = data.get("audio") or data.get("audio_chunk") or ""
-                    if audio_b64:
-                        yield base64.b64decode(audio_b64)
-                elif mtype in ("flush_done", "done", "complete", "completion"):
-                    break
-                elif mtype == "error":
-                    raise RuntimeError(f"sarvam_stream_error: {msg.get('data') or msg.get('message')}")
+        try:
+            async with ws_cm as ws:
+                await ws.send(json.dumps(config))
+                await ws.send(json.dumps({"type": "text", "data": {"text": text}}))
+                await ws.send(json.dumps({"type": "flush"}))
+
+                async for raw in ws:
+                    if isinstance(raw, bytes):
+                        # Some deployments stream raw PCM frames directly.
+                        yield raw
+                        continue
+                    try:
+                        msg = json.loads(raw)
+                    except (ValueError, TypeError):
+                        continue
+                    mtype = msg.get("type", "")
+                    if mtype in ("audio", "audio_chunk"):
+                        data_field = msg.get("data", {})
+                        audio_b64 = data_field.get("audio") or data_field.get("audio_chunk") or ""
+                        if audio_b64:
+                            yield base64.b64decode(audio_b64)
+                    elif mtype in ("flush_done", "done", "complete", "completion"):
+                        break
+                    elif mtype == "error":
+                        err_data = msg.get("data") or msg.get("message") or msg
+                        err_code = (msg.get("data") or {}).get("code") if isinstance(msg.get("data"), dict) else None
+                        log.error(
+                            "sarvam_ws_error_frame type=error code=%s body=%r", err_code, err_data
+                        )
+                        raise RuntimeError(f"sarvam_stream_error code={err_code}: {err_data}")
+        except websockets.exceptions.InvalidStatus as exc:
+            # Capture the full HTTP response body from 403/4xx rejections.
+            status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+            body = getattr(getattr(exc, "response", None), "body", b"") or b""
+            log.error(
+                "sarvam_ws_upgrade_failed status=%s url=%s body=%r headers=%r",
+                status, url, body[:500], dict(getattr(getattr(exc, "response", None), "headers", {})),
+            )
+            raise
 
     async def health_check(self) -> bool:
         """Real ping: tiny TTS call. Cached at the router layer (5s TTL)."""
