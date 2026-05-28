@@ -355,3 +355,10 @@ async def run_vobiz_bridge(
             await receive_task
         except (asyncio.CancelledError, Exception):
             pass
+        # Close per-session Sarvam streaming TTS WS (no-op if streaming was off).
+        _aclose = getattr(tts, "aclose", None)
+        if _aclose is not None:
+            try:
+                await _aclose()
+            except Exception:  # noqa: BLE001
+                pass

@@ -154,3 +154,24 @@ def resample_16k_to_8k(pcm16k: bytes) -> bytes:
     x_out = np.linspace(0, len(samples) - 1, n_out)
     downsampled = np.interp(x_out, x_in, samples).astype(np.int16)
     return downsampled.astype("<i2").tobytes()
+
+
+def resample_24k_to_8k(pcm24k: bytes) -> bytes:
+    """Downsample 24 kHz PCM16 LE to 8 kHz via linear interpolation (3:1 decimation).
+
+    Used for the Sarvam streaming-TTS path: bulbul:v3 over WebSocket emits 24 kHz
+    PCM16 by default, but Vobiz expects 8 kHz. Each output sample maps to a position
+    in the input via np.interp, giving a 3:1 ratio.
+
+    Streaming caveat: callers MUST pass whole 24 kHz frames (chunk lengths that are
+    multiples of 6 bytes = 3 samples) so successive chunks decimate cleanly. The
+    Sarvam engine accumulates a byte buffer and only resamples aligned spans.
+    """
+    samples = np.frombuffer(pcm24k, dtype="<i2").astype(np.float32)
+    if len(samples) == 0:
+        return b""
+    n_out = max(1, len(samples) // 3)
+    x_in = np.arange(len(samples), dtype=np.float32)
+    x_out = np.linspace(0, len(samples) - 1, n_out)
+    downsampled = np.interp(x_out, x_in, samples).astype(np.int16)
+    return downsampled.astype("<i2").tobytes()

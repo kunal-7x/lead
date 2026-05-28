@@ -93,16 +93,30 @@ class FakeGuardrail:
 
 class FakeTTS:
     def __init__(self, audio: bytes | None = None,
-                 tier: str = "sarvam_bulbul") -> None:
+                 tier: str = "sarvam_bulbul",
+                 stream_chunks: list[bytes] | None = None,
+                 stream_raises: bool = False) -> None:
         self._audio = audio or _SILENT_PCM
         self._tier = tier
         self.call_count = 0
+        self.stream_call_count = 0
+        # If set, synthesize_stream yields these PCM16 8kHz chunks.
+        self._stream_chunks = stream_chunks
+        self._stream_raises = stream_raises
 
     async def synthesize(self, text: str, lang: str, voice_id: str,
                          tenant_id: str, session_id: str,
                          tts_premium: bool = False) -> TTSResult:
         self.call_count += 1
         return TTSResult(audio=self._audio, tier_used=self._tier, cache_hit=False)
+
+    async def synthesize_stream(self, text: str, lang: str, voice_id: str):
+        self.stream_call_count += 1
+        if self._stream_raises:
+            raise RuntimeError("streaming_disabled")
+        chunks = self._stream_chunks if self._stream_chunks is not None else [_SILENT_PCM]
+        for c in chunks:
+            yield c
 
 
 class FakeFreeSwitchWS:

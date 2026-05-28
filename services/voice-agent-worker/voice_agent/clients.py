@@ -38,6 +38,9 @@ class TTSClient(Protocol):
                          tenant_id: str, session_id: str,
                          tts_premium: bool) -> TTSResult: ...
 
+    def synthesize_stream(self, text: str, lang: str,
+                          voice_id: str) -> AsyncIterator[bytes]: ...
+
 
 # ── HTTP implementations ──────────────────────────────────────────────────────
 
@@ -344,6 +347,10 @@ class HttpTTSClient:
     def __init__(self, base_url: str = "") -> None:
         self._base_url = base_url or _TTS_URL
         self._client = httpx.AsyncClient(timeout=10.0)
+        self._ws_base = self._base_url.replace("https://", "wss://").replace("http://", "ws://")
+        # Per-session Sarvam streaming WS (reused across turns; closed on hangup).
+        self._stream_ws = None  # type: ignore[assignment]
+        self._stream_lock = asyncio.Lock()
 
     async def synthesize(self, text: str, lang: str, voice_id: str,
                          tenant_id: str, session_id: str,
@@ -361,5 +368,73 @@ class HttpTTSClient:
             cache_hit=resp.headers.get("X-Cache-Hit", "false") == "true",
         )
 
+    async def _ensure_stream_ws(self):
+        """Open (or reuse) the per-session Sarvam streaming WS.
+
+        Reconnects if the existing connection is closed. One WS per session is
+        reused across turns; closed via aclose() on hangup.
+        """
+        import websockets  # type: ignore
+
+        ws = self._stream_ws
+        if ws is not None and getattr(ws, "close_code", None) is None:
+            try:
+                # websockets >=11 exposes .state; treat OPEN as reusable.
+                if getattr(ws, "state", None) is None or str(ws.state).endswith("OPEN"):
+                    return ws
+            except Exception:  # noqa: BLE001
+                pass
+        ws_url = f"{self._ws_base}/v1/tts/sarvam/stream"
+        self._stream_ws = await websockets.connect(ws_url, open_timeout=3, close_timeout=2)
+        return self._stream_ws
+
+    async def synthesize_stream(self, text: str, lang: str,
+                                voice_id: str) -> AsyncIterator[bytes]:
+        """Stream PCM16 8kHz audio chunks for one utterance via the Sarvam WS.
+
+        Yields raw PCM16 LE 8kHz bytes AS THEY ARRIVE (first chunk ~0.3s) so the
+        worker can feed them to send_audio immediately. Reuses a single WS per
+        session. On 'streaming_disabled' (TTS_STREAMING_WS=false on the router) or
+        any WS error, raises so the caller falls back to the batch synthesize() path.
+
+        Wire protocol with /v1/tts/sarvam/stream:
+          send {"text","voice_id","lang"} → recv binary PCM16 chunks → recv
+          {"type":"done",...} terminates this utterance (WS stays open for reuse).
+        """
+        async with self._stream_lock:
+            ws = await self._ensure_stream_ws()
+            await ws.send(json.dumps({"text": text, "voice_id": voice_id, "lang": lang}))
+            async for frame in ws:
+                if isinstance(frame, bytes):
+                    if frame:
+                        yield frame
+                    continue
+                try:
+                    msg = json.loads(frame)
+                except (ValueError, TypeError):
+                    continue
+                mtype = msg.get("type", "")
+                if mtype == "done":
+                    logger.info(
+                        "[diag] phase=tts_stream first_chunk_ms=%s total_chunks=%s",
+                        msg.get("first_chunk_ms"), msg.get("total_chunks"),
+                    )
+                    return
+                if mtype == "error":
+                    err = msg.get("message", "tts_stream_error")
+                    # streaming_disabled = flag off; reset WS so we don't reuse it.
+                    await self._close_stream_ws()
+                    raise RuntimeError(err)
+
+    async def _close_stream_ws(self) -> None:
+        ws = self._stream_ws
+        self._stream_ws = None
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+
     async def aclose(self) -> None:
+        await self._close_stream_ws()
         await self._client.aclose()

@@ -100,6 +100,11 @@ _SENTENCE_END = re.compile(r'(?<=[.!?।])\s+')
 # a filler is played only if first audio hasn't started yet.
 # This avoids the robotic "Hmm/Achha/Ek second" on every single turn.
 _FILLER_ENABLED = os.getenv("FILLER_ENABLED", "true").lower() == "true"
+# Sarvam streaming-TTS WS path (HIGH risk — touches real-time audio). DEFAULT OFF.
+# When true, _tts_worker consumes streaming PCM chunks and feeds send_audio as they
+# arrive (first-audio ~0.3s). When false, the batch synthesize() path is used UNCHANGED.
+# On any streaming error the worker transparently falls back to batch synthesize().
+_TTS_STREAMING_WS = os.getenv("TTS_STREAMING_WS", "false").lower() == "true"
 # Only play a filler if first TTS audio hasn't started within this many ms after speech_end.
 # 1200 ms: Groq first-token ~400ms so filler fires only on genuinely slow turns.
 _FILLER_GAP_MS = float(os.getenv("FILLER_GAP_MS", "1200"))
@@ -236,6 +241,37 @@ class AgentLoop:
         # blips must never trigger filler. Set to True the first time noise gate
         # accepts a user turn; never reset (filler stays eligible for the whole call).
         self._real_utterance_seen: bool = False
+
+    async def _synth_and_play_stream(self, sentence: str, send_audio: callable) -> bool:
+        """Stream one sentence via Sarvam WS, feeding chunks to send_audio as they
+        arrive. Returns True if streaming produced audio; False if it should fall
+        back to batch (error / no client support / disabled).
+
+        Barge-in: each chunk is gated on _stop_playback; send_audio itself also
+        aborts mid-frame within ~20ms. On barge-in we stop consuming immediately.
+        """
+        if not _TTS_STREAMING_WS or not hasattr(self._tts, "synthesize_stream"):
+            return False
+        produced = False
+        try:
+            async for pcm_chunk in self._tts.synthesize_stream(
+                sentence, self.ctx.lang, self.ctx.voice_profile_id,
+            ):
+                if self._stop_playback.is_set():
+                    # Barge-in mid-stream: stop consuming/sending. send_json
+                    # clearAudio is driven by the existing barge-in handler.
+                    break
+                if pcm_chunk:
+                    produced = True
+                    await _call(send_audio, pcm_chunk)
+            return produced
+        except Exception as exc:  # noqa: BLE001
+            # streaming_disabled or WS failure → caller falls back to batch.
+            logger.warning(
+                "TTS streaming failed (%r) — falling back to batch for session=%s",
+                exc, self.ctx.session_id,
+            )
+            return False
 
     async def _warm_fillers(self) -> None:
         """Pre-synthesize filler phrases into the module-level cache.
@@ -961,19 +997,23 @@ class AgentLoop:
                     break
                 try:
                     _t_synth_start = time.time()
-                    tts_result = await self._tts.synthesize(
-                        sentence,
-                        self.ctx.lang,
-                        self.ctx.voice_profile_id,
-                        self.ctx.tenant_id,
-                        self.ctx.session_id,
-                        self.ctx.tts_premium,
-                    )
-                    # Accumulate TTS diag stats
-                    if hasattr(self, "_tts_diag"):
-                        self._tts_diag[0] += len(sentence)
-                        self._tts_diag[1] += len(tts_result.audio)
-                        self._tts_diag[2] += 1
+                    # Flag-gated streaming path (first-audio ~0.3s). Streams chunks
+                    # to send_audio as they arrive. Returns False → use batch below.
+                    streamed = await self._synth_and_play_stream(sentence, send_audio)
+                    if not streamed and not self._stop_playback.is_set():
+                        tts_result = await self._tts.synthesize(
+                            sentence,
+                            self.ctx.lang,
+                            self.ctx.voice_profile_id,
+                            self.ctx.tenant_id,
+                            self.ctx.session_id,
+                            self.ctx.tts_premium,
+                        )
+                        # Accumulate TTS diag stats
+                        if hasattr(self, "_tts_diag"):
+                            self._tts_diag[0] += len(sentence)
+                            self._tts_diag[1] += len(tts_result.audio)
+                            self._tts_diag[2] += 1
                     if not self._stop_playback.is_set():
                         t_audio = time.time()
                         if not first_audio_sent:
@@ -997,11 +1037,13 @@ class AgentLoop:
                             _total_ms = (t_audio - t_stt) * 1000
                             _diag(self.ctx.session_id, self._turn_index,
                                   phase="first_audio",
+                                  mode="stream" if streamed else "batch",
                                   total_ms=f"{_total_ms:.0f}",
                                   llm_to_sentence_ms=f"{_q_ms:.0f}",
                                   tts_synth_ms=f"{_synth_ms:.0f}",
                                   sentence_chars=len(sentence))
-                        await _call(send_audio, tts_result.audio)
+                        if not streamed:
+                            await _call(send_audio, tts_result.audio)
                 except Exception:  # noqa: BLE001
                     logger.exception(
                         "TTS failed for sentence=%r session=%s",
@@ -1164,19 +1206,22 @@ class AgentLoop:
                 if self._stop_playback.is_set():
                     break
                 try:
-                    tts_result = await self._tts.synthesize(
-                        sentence,
-                        self.ctx.lang,
-                        self.ctx.voice_profile_id,
-                        self.ctx.tenant_id,
-                        self.ctx.session_id,
-                        self.ctx.tts_premium,
-                    )
-                    # Accumulate TTS diag stats
-                    if hasattr(self, "_tts_diag"):
-                        self._tts_diag[0] += len(sentence)
-                        self._tts_diag[1] += len(tts_result.audio)
-                        self._tts_diag[2] += 1
+                    # Flag-gated streaming path (first-audio ~0.3s); False → batch.
+                    streamed = await self._synth_and_play_stream(sentence, send_audio)
+                    if not streamed and not self._stop_playback.is_set():
+                        tts_result = await self._tts.synthesize(
+                            sentence,
+                            self.ctx.lang,
+                            self.ctx.voice_profile_id,
+                            self.ctx.tenant_id,
+                            self.ctx.session_id,
+                            self.ctx.tts_premium,
+                        )
+                        # Accumulate TTS diag stats
+                        if hasattr(self, "_tts_diag"):
+                            self._tts_diag[0] += len(sentence)
+                            self._tts_diag[1] += len(tts_result.audio)
+                            self._tts_diag[2] += 1
                     if not self._stop_playback.is_set():
                         t_audio = time.time()
                         if not first_audio_sent:
@@ -1194,7 +1239,8 @@ class AgentLoop:
                                 self.ctx.session_id, self._turn_index,
                                 (t_audio - t_stt) * 1000,
                             )
-                        await _call(send_audio, tts_result.audio)
+                        if not streamed:
+                            await _call(send_audio, tts_result.audio)
                 except Exception:  # noqa: BLE001
                     logger.exception(
                         "TTS failed for sentence=%r session=%s",
