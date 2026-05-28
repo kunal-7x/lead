@@ -28,7 +28,9 @@ def _build_router() -> LLMRouter:
     switcher = ModelSwitcher(rdb)
     kb = HttpKbRetriever()
     backends = {
+        # groq_llama = meta-llama/llama-4-scout-17b-16e-instruct, 2-key round-robin
         "groq_llama": GroqLlamaBackend(),
+        # groq_instant kept for manual selection only (not in active fallback chain)
         "groq_instant": GroqInstantBackend(),
         "cerebras_llama": CerebrasBackend(),
         "sarvam_llm": SarvamLLMBackend(),

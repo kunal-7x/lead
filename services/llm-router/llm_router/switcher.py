@@ -8,6 +8,7 @@ VALID_MODELS = {
     "groq_llama", "groq_instant", "cerebras_llama", "sarvam_105b", "openrouter",
     "openai_gpt4o", "anthropic_claude", "google_gemini",
 }
+# groq_llama = meta-llama/llama-4-scout-17b-16e-instruct (Groq, ~594-750 tok/s)
 DEFAULT_MODEL = "groq_llama"
 
 

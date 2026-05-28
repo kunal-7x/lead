@@ -137,11 +137,11 @@ class LLMRouter:
             active = DEFAULT_MODEL
         chain = _build_chain(active, list(self._backends.keys()))
 
-        # Try streaming-capable backend first (groq_llama primary, cerebras_llama fallback, openrouter last)
+        # Try streaming-capable backend first (groq_llama/scout primary, cerebras_llama fallback, openrouter last)
         stream_backend = None
         for model_name in chain:
             backend = self._backends.get(model_name)
-            if backend is not None and backend.name in ("groq_llama", "groq_instant", "cerebras_llama", "openrouter"):
+            if backend is not None and backend.name in ("groq_llama", "cerebras_llama", "openrouter"):
                 stream_backend = (model_name, backend)
                 break
 
@@ -228,10 +228,11 @@ class LLMRouter:
         chain = _build_chain(active, list(self._backends.keys()))
 
         # Try each streaming-capable backend in chain order.
-        # On 429 or any error, skip that model and advance to the next one —
-        # do NOT restart the chain from groq_llama (which would re-429).
-        # Chain order: groq_llama → groq_instant → cerebras_llama → openrouter.
-        _STREAMING_CAPABLE = ("groq_llama", "groq_instant", "cerebras_llama", "openrouter")
+        # On 429 or any error, skip that model and advance to the next one.
+        # Within groq_llama(scout), 2-key round-robin absorbs 429 before escalating.
+        # Chain order: groq_llama(scout) → cerebras_llama → openrouter.
+        # groq_instant removed from chain (low token limits).
+        _STREAMING_CAPABLE = ("groq_llama", "cerebras_llama", "openrouter")
         import sys as _sys
         brain = None
         for model_name in chain:
@@ -283,22 +284,19 @@ def _format_kb(chunks) -> str:
 
 
 _PREFERRED_ORDER = [
-    "groq_llama",
-    "groq_instant",
-    "cerebras_llama",
-    "openrouter",
+    "groq_llama",       # scout (meta-llama/llama-4-scout-17b-16e-instruct) — 2-key round-robin
+    "cerebras_llama",   # gpt-oss-120b reasoning_effort=low — batch fallback
+    "openrouter",       # last resort
 ]
 
 
 def _build_chain(active: str, available: list[str]) -> list[str]:
     """Active model first, then remaining in preferred fallback order.
 
-    Preferred order: groq_llama → groq_instant → cerebras_llama → openrouter.
+    Preferred order: groq_llama(scout) → cerebras_llama → openrouter.
+    groq_instant removed from chain (low token limits, rate-limits fast).
+    2-key round-robin inside GroqLlamaBackend handles Groq 429 before escalating.
     Models not in the preferred list come last (in their registration order).
-
-    On Groq versatile 429, the chain advances to groq_instant (same key, different
-    model — usually not rate-limited simultaneously) BEFORE falling to cerebras batch,
-    avoiding the 7-8s cerebras first-token spike.
     """
     rest_ordered = []
     # First pass: preferred order, excluding active

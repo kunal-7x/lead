@@ -43,42 +43,41 @@ async def test_primary_timeout_uses_next(switcher):
 
 
 def test_build_chain_preferred_order():
-    """groq_llama primary → groq_instant → cerebras_llama → openrouter fallback."""
+    """groq_llama(scout) primary → cerebras_llama → openrouter fallback (groq_instant dropped)."""
     available = ["groq_llama", "groq_instant", "cerebras_llama", "openrouter",
                  "sarvam_llm", "openai_gpt4o"]
     chain = _build_chain("groq_llama", available)
     assert chain[0] == "groq_llama"
-    assert chain[1] == "groq_instant"
-    assert chain[2] == "cerebras_llama"
-    assert chain[3] == "openrouter"
+    assert chain[1] == "cerebras_llama"
+    assert chain[2] == "openrouter"
+    # groq_instant is NOT in the preferred order (removed from chain)
+    assert "groq_instant" not in chain[:3]
 
 
 def test_build_chain_429_active_is_groq_instant():
-    """When LLM_ACTIVE_MODEL=groq_instant, groq_llama drops behind it."""
+    """When LLM_ACTIVE_MODEL=groq_instant (manual override), it is placed first."""
     available = ["groq_llama", "groq_instant", "cerebras_llama", "openrouter"]
     chain = _build_chain("groq_instant", available)
     assert chain[0] == "groq_instant"
-    # groq_llama should still appear (just not first)
+    # groq_llama should still appear (it is in preferred order as position 0)
     assert "groq_llama" in chain
     # cerebras_llama comes after groq_llama in preferred order
     assert chain.index("groq_llama") < chain.index("cerebras_llama")
 
 
-async def test_groq_llama_429_falls_to_groq_instant(switcher):
-    """Simulate groq_llama 429 → chain falls to groq_instant (not cerebras batch)."""
-    groq_versatile = FakeBackend(name="groq_llama", raise_error=True)
-    groq_instant = FakeBackend(name="groq_instant")
+async def test_groq_llama_all_keys_fail_falls_to_cerebras(switcher):
+    """When groq_llama fails (both keys exhausted), chain falls to cerebras_llama."""
+    groq_scout = FakeBackend(name="groq_llama", raise_error=True)
     cerebras = FakeBackend(name="cerebras_llama")
     router = LLMRouter(
-        {"groq_llama": groq_versatile, "groq_instant": groq_instant, "cerebras_llama": cerebras},
+        {"groq_llama": groq_scout, "cerebras_llama": cerebras},
         switcher,
         FakeKbRetriever(),
     )
     resp = await router.generate(make_req())
-    assert resp.model_used == "groq_instant"
-    assert groq_versatile.call_count == 1
-    assert groq_instant.call_count == 1
-    assert cerebras.call_count == 0  # not reached
+    assert resp.model_used == "cerebras_llama"
+    assert groq_scout.call_count == 1
+    assert cerebras.call_count == 1
 
 
 async def test_all_fail_returns_fallback(switcher):
@@ -94,11 +93,11 @@ async def test_all_fail_returns_fallback(switcher):
     assert resp.brain.should_handover_to_human is True
 
 
-async def test_stream_text_groq_llama_429_skips_to_groq_instant(switcher, monkeypatch):
-    """groq_llama 429 on stream_text → groq_instant tried via streaming, NOT cerebras batch.
+async def test_stream_text_groq_llama_429_falls_to_cerebras(switcher, monkeypatch):
+    """groq_llama 429 on stream_text (all keys exhausted) → cerebras_llama tried next.
 
-    Monkeypatches _llm_stream_text so groq_llama raises (simulating 429) and
-    groq_instant succeeds. Asserts: groq_instant is tried; cerebras is never reached.
+    Monkeypatches _llm_stream_text so groq_llama raises (simulating all-keys-429) and
+    cerebras succeeds. groq_instant is NOT in the streaming chain.
     """
     import llm_router.router as router_module
 
@@ -108,18 +107,17 @@ async def test_stream_text_groq_llama_429_skips_to_groq_instant(switcher, monkey
         called.append(backend.name)
         if backend.name == "groq_llama":
             raise RuntimeError("429 rate_limit_exceeded")
-        # groq_instant succeeds
+        # cerebras succeeds
         yield f"data: {json.dumps({'token': 'नमस्ते', 'done': False})}\n\n"
         yield f"data: {json.dumps({'token': '', 'done': True})}\n\n"
 
     monkeypatch.setattr(router_module, "_llm_stream_text", fake_stream_text)
 
-    groq_versatile = FakeBackend(name="groq_llama")
-    groq_instant = FakeBackend(name="groq_instant")
+    groq_scout = FakeBackend(name="groq_llama")
     cerebras = FakeBackend(name="cerebras_llama")
 
     router = LLMRouter(
-        {"groq_llama": groq_versatile, "groq_instant": groq_instant, "cerebras_llama": cerebras},
+        {"groq_llama": groq_scout, "cerebras_llama": cerebras},
         switcher,
         FakeKbRetriever(),
     )
@@ -128,11 +126,9 @@ async def test_stream_text_groq_llama_429_skips_to_groq_instant(switcher, monkey
     async for sse in router.generate_stream_text(make_req()):
         tokens.append(sse)
 
-    # groq_llama was tried (and 429'd), groq_instant was tried next via streaming
+    # groq_llama was tried (and 429'd), cerebras was tried next via streaming
     assert called[0] == "groq_llama"
-    assert called[1] == "groq_instant"
-    # cerebras was never reached (groq_instant succeeded)
-    assert "cerebras_llama" not in called
+    assert called[1] == "cerebras_llama"
     # SSE tokens include the reply token
     token_data = [json.loads(t[len("data: "):].strip()) for t in tokens if t.startswith("data:")]
     assert any(d.get("token") == "नमस्ते" for d in token_data)
