@@ -72,13 +72,15 @@ def _is_oov_english_noise(text_stripped: str, confidence: float) -> bool:
 
 # ── Barge-in debounce ─────────────────────────────────────────────────────────
 # Number of consecutive SileroVAD-positive 20ms chunks required to confirm a
-# real barge-in. Raised to 22 (~440ms) to prevent acoustic echo / faint
-# backchannels from self-interrupting the AI mid-sentence.
+# real barge-in. Lowered to 16 (~320ms) — fast enough for deliberate "रुको रुको"
+# but still blocks brief echo/backchannels (which lack STT partial text).
 # Tunable via BARGEIN_MIN_SPEECH_CHUNKS env var.
-# At 20ms/chunk: 22 ≈ 440ms (deliberate caller interruption), 8 ≈ 160ms (old).
+# At 20ms/chunk: 16 ≈ 320ms (deliberate caller interruption), 8 ≈ 160ms (old).
+# Gate: VAD ≥ threshold AND (real STT partial word seen) → confirmed.
+# Echo has no STT text → still blocked. Real interruption has text → fires ~300-500ms.
 _BARGEIN_MIN_SPEECH_CHUNKS: int = int(
-    os.getenv("BARGEIN_MIN_SPEECH_CHUNKS", "22")
-)  # ≈ 440ms at 20ms/chunk — requires sustained deliberate speech
+    os.getenv("BARGEIN_MIN_SPEECH_CHUNKS", "16")
+)  # ≈ 320ms at 20ms/chunk — requires sustained deliberate speech + real STT text
 
 # Backchannel tokens: short acknowledgements that should NOT count as real
 # interrupts even after VAD confirms speech. Extends _NOISE_TOKENS with Hindi
@@ -96,6 +98,10 @@ _BACKCHANNEL_TOKENS: frozenset[str] = frozenset({
 
 # Sentence-split pattern: split after . ! ? । or when word-count ≥ 12
 _SENTENCE_END = re.compile(r'(?<=[.!?।])\s+')
+# First-chunk early-flush: also flush on comma/।-pause for the FIRST chunk only.
+# This lets a tiny 4-6 word opener go to TTS immediately before the full sentence
+# arrives, dropping first-audio from 5-9s → <2.5s.
+_FIRST_CHUNK_EARLY_FLUSH = re.compile(r'(?<=[,،।])\s+')
 
 # ── Filler / acknowledgment phrases ──────────────────────────────────────────
 # FILLER_ENABLED=false (default) — fillers are OFF by default.
@@ -158,17 +164,18 @@ def _word_count(text: str) -> int:
 
 _CHUNK_MIN_WORDS = 12   # below this, hold and join with next clause (avoid choppy packets)
 _CHUNK_MAX_WORDS = 35   # force-flush regardless of punctuation (human breath window)
-_CHUNK_FIRST_WORDS = 8  # flush first chunk earlier to keep first-audio latency low
+_CHUNK_FIRST_WORDS = 5  # flush first chunk at comma/pause for fast first-audio onset
 
 def _should_flush(buffer: str, is_first_chunk: bool = False, llm_done: bool = False) -> bool:
     """Breath-rhythm chunking: flush on sentence-end + minimum word threshold.
 
     - Force-flush at MAX words (hard ceiling).
-    - First chunk: flush at first sentence-end with >=8 words for low first-audio latency.
+    - First chunk ONLY: flush at first comma/pause/।-break with >=5 words for fast
+      first-audio onset (<2.5s target). Only the first chunk is small — subsequent
+      chunks use the normal 12-word minimum to avoid choppy audio.
     - Subsequent chunks: flush on sentence-end only if >=12 words (thought-group buffering).
       If buffer is under MIN and LLM stream is still active, HOLD — join with next clause.
     - Always flush when LLM stream ends (llm_done=True) regardless of word count.
-    - Never split on comma alone; a lone comma-clause joins the next sentence.
 
     [diag] phase=chunk info is logged by the caller with actual sizes.
     """
@@ -177,9 +184,16 @@ def _should_flush(buffer: str, is_first_chunk: bool = False, llm_done: bool = Fa
         return True
     if llm_done:
         return bool(buffer.strip())
-    if _SENTENCE_END.search(buffer):
-        threshold = _CHUNK_FIRST_WORDS if is_first_chunk else _CHUNK_MIN_WORDS
-        return wc >= threshold
+    if is_first_chunk:
+        # Fast first-audio: flush on any clause boundary (comma, ।, sentence-end)
+        # once we have at least _CHUNK_FIRST_WORDS words.
+        if wc >= _CHUNK_FIRST_WORDS and (
+            _SENTENCE_END.search(buffer) or _FIRST_CHUNK_EARLY_FLUSH.search(buffer)
+        ):
+            return True
+    else:
+        if _SENTENCE_END.search(buffer):
+            return wc >= _CHUNK_MIN_WORDS
     return False
 
 
@@ -614,19 +628,25 @@ class AgentLoop:
                     if _bargein_consec >= _BARGEIN_MIN_SPEECH_CHUNKS:
                         # VAD threshold met — but ALSO require real STT partial text.
                         # Echo/bot-audio produces VAD energy but no coherent words.
-                        # Yield a few ticks to let the probe STT task process queued
-                        # audio and fire partial_callback if real words are present.
-                        for _ in range(3):
+                        # Yield ticks to let the probe STT task process queued audio
+                        # and fire partial_callback if real words are present.
+                        # Use 8 ticks (was 3) — fragmented Hindi words like "रुको"
+                        # may need extra STT decode time across async boundaries.
+                        for _ in range(8):
                             await asyncio.sleep(0)
                         if not _bargein_has_real_partial:
-                            # VAD says speech but STT sees no real words → echo/noise
+                            # VAD says speech but STT sees no real words → echo/noise.
+                            # Don't hard-reset to 0 — instead back off to half-threshold
+                            # so a continuing real interruption re-triggers within ~160ms
+                            # rather than requiring a full new 320ms window. Echo (no text)
+                            # still can't accumulate past the threshold.
                             _diag(self.ctx.session_id, self._turn_index,
                                   phase="bargein_rejected",
                                   reason="no_real_text",
                                   consec_frames=_bargein_consec,
                                   chunk_seq=self._tts_chunk_seq)
-                            _bargein_consec = 0
-                            await _cancel_probe_stream()
+                            _bargein_consec = _BARGEIN_MIN_SPEECH_CHUNKS // 2
+                            # Keep probe running — real words may still arrive
                         else:
                             # Also apply backchannel check via _BACKCHANNEL_TOKENS
                             # (the partial text is a rough preview — full check happens
