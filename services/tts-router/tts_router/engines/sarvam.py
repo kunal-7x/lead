@@ -71,17 +71,38 @@ _DEFAULT_SPEAKER = _SARVAM_TTS_SPEAKER
 _VALID_SPEAKERS = {v.id for v in _VOICES}
 
 # Frame types that signal a REAL end of synthesis for the current utterance.
-# Only these mark the stream "completed". A ConnectionClosed / idle / error
-# BEFORE one of these means the audio was TRUNCATED — never treat as success.
 _COMPLETION_TYPES = ("flush_done", "done", "complete", "completion")
+
+# LIVE-VERIFIED Sarvam WS behaviour (probe 2026-05-28, droplet blr1):
+#   * The /text-to-speech/ws endpoint runs bulbul:v2 — the `model` field in the
+#     config is ACCEPTED but IGNORED (a v3 speaker like "priya" errors with
+#     "not compatible with model bulbul:v2"). So the WS path MUST use a v2 speaker.
+#   * output_audio_codec="mulaw" + speech_sample_rate=8000 works and the audio
+#     frames carry content_type="audio/mulaw" → µ-law 8k DIRECTLY (no resample).
+#   * Sarvam delivers the WHOLE utterance in ONE audio frame, then goes IDLE and
+#     NEVER sends a flush_done/done completion event (it eventually 408-closes).
+#     So end-of-utterance is detected by an IDLE GAP after audio, not a frame.
+# WS-path speaker: map any requested voice to a valid v2 speaker (default anushka).
+_WS_DEFAULT_SPEAKER = os.getenv("SARVAM_WS_SPEAKER", "anushka")
+_WS_VALID_SPEAKERS = {v.id for v in _VOICES_V2}
+# Idle gap (s) after the last audio frame that we treat as "utterance complete".
+# Sarvam sends all audio up-front in one frame then idles, so a short gap is a
+# reliable terminator. Must be small to keep turn latency low.
+_STREAM_IDLE_DONE_S = float(os.getenv("SARVAM_WS_IDLE_DONE_S", "0.6"))
+
+
+def _ws_speaker(voice_id: str) -> str:
+    """Pick a bulbul:v2-compatible speaker for the WS path (v3 voices error)."""
+    return voice_id if voice_id in _WS_VALID_SPEAKERS else _WS_DEFAULT_SPEAKER
 
 
 def _build_stream_config(speaker: str, lang: str) -> dict:
-    """bulbul:v3 streaming config frame.
+    """Sarvam WS config frame (bulbul:v2 — see _WS_VALID_SPEAKERS note above).
 
-    model goes IN the config (NOT the URL — URL-model caused the old 403).
     output_audio_codec=mulaw + speech_sample_rate=8000 → Sarvam emits µ-law 8k
-    DIRECTLY. v3 REJECTS pitch/loudness, so they are never sent.
+    DIRECTLY (content_type audio/mulaw), so the worker needs no 24k→8k resample.
+    `model` is included for forward-compat but is ignored by the WS today. pitch/
+    loudness are never sent (rejected by newer models).
     """
     return {
         "type": "config",
@@ -103,7 +124,7 @@ def _build_stream_config(speaker: str, lang: str) -> dict:
 def _ulaw_to_pcm16(ulaw: bytes) -> bytes:
     """Decode G.711 µ-law bytes → PCM16 LE 8kHz (matches CPython audioop.ulaw2lin).
 
-    Sarvam v3 emits µ-law 8k on the wire; the worker's send_audio expects PCM16 8k
+    Sarvam WS emits µ-law 8k on the wire; the worker's send_audio expects PCM16 8k
     (it µ-law-encodes itself). Decoding here keeps the existing worker contract and
     avoids a double-encode while still removing the old 24k→8k resample.
     """
@@ -121,16 +142,69 @@ def _ulaw_to_pcm16(ulaw: bytes) -> bytes:
 
 
 class _StreamTruncated(RuntimeError):
-    """Raised when the Sarvam WS closes/errors BEFORE a real completion event.
-
-    Carries the count of audio chunks already produced so callers can decide
-    whether to recover the remainder via REST. The presence of this exception
-    type (vs a normal return) is how truncation is distinguished from success.
+    """Raised when the Sarvam WS yields NO audio at all (closed/errored before any
+    audio frame). The caller recovers the full text via REST. NOTE: because Sarvam
+    sends all audio in one frame then idles WITHOUT a completion event, a normal
+    end-of-utterance is an idle gap AFTER audio — that is success, NOT truncation.
+    Only a zero-audio outcome is a truncation worth recovering.
     """
 
     def __init__(self, msg: str, chunks_produced: int = 0) -> None:
         super().__init__(msg)
         self.chunks_produced = chunks_produced
+
+
+async def _consume_stream(ws, log_prefix: str):
+    """Async-generator: yield PCM16 8k chunks for one utterance, completion-correct.
+
+    Live Sarvam WS reality: the whole utterance arrives in one (or a few) audio
+    frame(s), then the socket goes IDLE and never sends a completion event. So:
+      * a completion frame OR a post-audio IDLE GAP (>_STREAM_IDLE_DONE_S) ends the
+        utterance SUCCESSFULLY once at least one audio chunk has been produced;
+      * a close/idle/error BEFORE any audio => _StreamTruncated (caller does REST).
+    Raises RuntimeError on an explicit error frame.
+    """
+    import websockets  # type: ignore
+
+    produced = 0
+    while True:
+        # First chunk: wait the WS open/synthesis budget. After audio: a short idle
+        # gap means the utterance is done (Sarvam won't send a completion event).
+        timeout = _STREAM_IDLE_DONE_S if produced else None
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+        except asyncio.TimeoutError:
+            # Idle gap after audio = utterance complete (success).
+            return
+        except websockets.exceptions.ConnectionClosed as exc:
+            if produced:
+                log.debug("%s closed after audio (normal end)", log_prefix)
+                return
+            raise _StreamTruncated(f"{log_prefix} closed before any audio", produced) from exc
+
+        if isinstance(raw, bytes):
+            if raw:
+                produced += 1
+                yield _ulaw_to_pcm16(raw)
+            continue
+        try:
+            msg = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        mtype = msg.get("type", "")
+        if mtype in ("audio", "audio_chunk"):
+            data_field = msg.get("data", {})
+            audio_b64 = data_field.get("audio") or data_field.get("audio_chunk") or ""
+            if audio_b64:
+                produced += 1
+                yield _ulaw_to_pcm16(base64.b64decode(audio_b64))
+        elif mtype in _COMPLETION_TYPES:
+            return  # explicit completion (rare on this WS, but honour it)
+        elif mtype == "error":
+            err_data = msg.get("data") or msg.get("message") or msg
+            err_code = (msg.get("data") or {}).get("code") if isinstance(msg.get("data"), dict) else None
+            log.error("%s error_frame code=%s body=%r", log_prefix, err_code, err_data)
+            raise RuntimeError(f"sarvam_stream_error code={err_code}: {err_data}")
 
 
 class SarvamBulbulEngine(TTSEngine):
@@ -172,30 +246,31 @@ class SarvamBulbulEngine(TTSEngine):
     async def synthesize_stream(
         self, text: str, voice_id: str, lang: str
     ) -> AsyncIterator[bytes]:
-        """Stream TTS audio from Sarvam Bulbul:v3 over WebSocket.
+        """Stream TTS audio from the Sarvam WS (bulbul:v2; µ-law 8k direct).
 
-        LATENCY: first-audio ~0.3s vs ~2.2s for the blocking REST synthesize().
+        LATENCY: first-audio ~0.5s vs ~2.2s for the blocking REST synthesize().
         We open one WS per call here; the worker reuses a single WS per session
         via its own client wrapper (see voice_agent.clients).
 
-        Protocol (bulbul:v3 streaming):
+        Protocol (LIVE-verified):
           1. open WS to wss://api.sarvam.ai/text-to-speech/ws  (NO query params)
              auth header: API-Subscription-Key: <SARVAM_API_KEY>
-          2. send config FIRST — model bulbul:v3 IN config (NOT url), speaker priya,
-             output_audio_codec mulaw, speech_sample_rate 8000.
-             bulbul:v3 REJECTS pitch/loudness — never send them.
-          3. send {"type":"text",...} then {"type":"flush"}.
-          4. receive µ-law 8k audio chunks; a completion event ends the stream.
+          2. send config FIRST — v2 speaker (anushka), output_audio_codec mulaw,
+             speech_sample_rate 8000. (model field is ignored by this WS.)
+          3. send {"type":"text","data":{"text":...}} then {"type":"flush"}.
+          4. Sarvam sends the whole utterance in one audio frame then idles WITHOUT
+             a completion event → end-of-utterance is an idle gap after audio.
 
         Yields:
-            bytes: PCM16 LE 8kHz. Sarvam emits µ-law 8k on the wire; we decode it to
-            PCM16 here so the worker's send_audio (which µ-law-encodes) sees the same
-            PCM16 8k contract as the batch path — NO double-encode, NO 24k→8k resample.
+            bytes: PCM16 LE 8kHz. Sarvam emits µ-law 8k (content_type audio/mulaw);
+            we decode it to PCM16 here so the worker's send_audio (which µ-law-
+            encodes) sees the same PCM16 8k contract as the batch path — NO double-
+            encode, NO 24k→8k resample.
 
         Raises:
             ValueError: if API key missing.
-            _StreamTruncated: if the WS closes/errors BEFORE a real completion event —
-                the sentence was cut short; caller MUST recover the remainder (REST).
+            _StreamTruncated: only if the WS yields ZERO audio (closed/errored before
+                any audio frame); caller recovers the full text via REST.
             Exception: on other WS failure — caller falls back to batch synthesize().
         """
         if not self._api_key:
@@ -205,8 +280,8 @@ class SarvamBulbulEngine(TTSEngine):
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("websockets package not installed; streaming TTS unavailable") from exc
 
-        # bulbul:v3 speakers; default to priya for unknown ids.
-        speaker = voice_id if voice_id in _VALID_SPEAKERS else _DEFAULT_SPEAKER
+        # WS path is bulbul:v2 (model field ignored); v3 voices error → map to v2.
+        speaker = _ws_speaker(voice_id)
 
         # URL is plain (no query params, no path model) — model goes in config frame.
         url = _WS_URL
@@ -227,53 +302,10 @@ class SarvamBulbulEngine(TTSEngine):
                 await ws.send(json.dumps({"type": "text", "data": {"text": text,
                                                                     "send_completion_event": True}}))
                 await ws.send(json.dumps({"type": "flush"}))
-
-                completed = False
-                produced = 0
-                try:
-                    async for raw in ws:
-                        if isinstance(raw, bytes):
-                            # Raw binary frame: Sarvam v3 µ-law 8k → decode to PCM16 8k.
-                            if raw:
-                                produced += 1
-                                yield _ulaw_to_pcm16(raw)
-                            continue
-                        try:
-                            msg = json.loads(raw)
-                        except (ValueError, TypeError):
-                            continue
-                        mtype = msg.get("type", "")
-                        if mtype in ("audio", "audio_chunk"):
-                            data_field = msg.get("data", {})
-                            audio_b64 = data_field.get("audio") or data_field.get("audio_chunk") or ""
-                            if audio_b64:
-                                produced += 1
-                                yield _ulaw_to_pcm16(base64.b64decode(audio_b64))
-                        elif mtype in _COMPLETION_TYPES:
-                            completed = True
-                            break
-                        elif mtype == "error":
-                            err_data = msg.get("data") or msg.get("message") or msg
-                            err_code = (msg.get("data") or {}).get("code") if isinstance(msg.get("data"), dict) else None
-                            log.error(
-                                "sarvam_ws_error_frame type=error code=%s body=%r", err_code, err_data
-                            )
-                            raise RuntimeError(f"sarvam_stream_error code={err_code}: {err_data}")
-                except websockets.exceptions.ConnectionClosed as exc:
-                    # THE BUG FIX: a close BEFORE a real completion event means the
-                    # sentence was TRUNCATED. Do NOT swallow it as a normal end — raise
-                    # so the caller recovers the un-spoken remainder (REST fallback).
-                    if not completed:
-                        log.warning("sarvam_ws_closed_before_completion produced=%d: %r", produced, exc)
-                        raise _StreamTruncated(
-                            f"closed before completion (produced={produced})", produced
-                        ) from exc
-                    log.debug("sarvam_ws_connection_closed_after_completion")
-                if not completed:
-                    # Iterator drained with no close and no completion frame → truncated.
-                    raise _StreamTruncated(
-                        f"stream ended without completion (produced={produced})", produced
-                    )
+                # Completion-correct consumption: idle-after-audio = done; zero-audio
+                # close/error = _StreamTruncated → caller REST-recovers the full text.
+                async for pcm in _consume_stream(ws, "sarvam_ws"):
+                    yield pcm
         except websockets.exceptions.InvalidStatus as exc:
             # Capture the full HTTP response body from 403/4xx rejections.
             status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
@@ -377,7 +409,7 @@ class SarvamStreamingSession:
         except ImportError as exc:
             raise RuntimeError("websockets not installed") from exc
 
-        speaker = voice_id if voice_id in _VALID_SPEAKERS else _DEFAULT_SPEAKER
+        speaker = _ws_speaker(voice_id)
         headers = {"API-Subscription-Key": self._engine._api_key}
         config = _build_stream_config(speaker, lang)
         # websockets.connect() returns an async CM; enter it and hold it open so
@@ -437,61 +469,19 @@ class SarvamStreamingSession:
                 await ws.send(json.dumps({"type": "text", "data": {"text": text,
                                                                     "send_completion_event": True}}))
                 await ws.send(json.dumps({"type": "flush"}))
-                completed = False
-                produced = 0
-                try:
-                    import websockets  # type: ignore
-                    async for raw in ws:
-                        if isinstance(raw, bytes):
-                            if raw:
-                                produced += 1
-                                yield _ulaw_to_pcm16(raw)
-                            continue
-                        try:
-                            msg = json.loads(raw)
-                        except (ValueError, TypeError):
-                            continue
-                        mtype = msg.get("type", "")
-                        if mtype in ("audio", "audio_chunk"):
-                            data_field = msg.get("data", {})
-                            audio_b64 = (data_field.get("audio") or
-                                         data_field.get("audio_chunk") or "")
-                            if audio_b64:
-                                produced += 1
-                                yield _ulaw_to_pcm16(base64.b64decode(audio_b64))
-                        elif mtype in _COMPLETION_TYPES:
-                            completed = True
-                            break
-                        elif mtype == "error":
-                            err_data = msg.get("data") or msg.get("message") or msg
-                            err_code = (
-                                (msg.get("data") or {}).get("code")
-                                if isinstance(msg.get("data"), dict) else None
-                            )
-                            raise RuntimeError(f"sarvam_stream_error code={err_code}: {err_data}")
-                except websockets.exceptions.ConnectionClosed as exc:
-                    # Mark WS dead so next utterance reconnects, then decide:
-                    self._ws = None
-                    self._ws_cm = None
-                    if self._ping_task:
-                        self._ping_task.cancel()
-                        self._ping_task = None
-                    if not completed:
-                        # TRUNCATION: closed before a real completion event. Raise so the
-                        # endpoint recovers the remainder via REST — never silent-drop.
-                        log.warning("sarvam_ws_session_closed_before_completion produced=%d: %r", produced, exc)
-                        raise _StreamTruncated(
-                            f"session closed before completion (produced={produced})", produced
-                        ) from exc
-                    log.debug("sarvam_ws_session_closed_after_completion")
-                if not completed:
-                    raise _StreamTruncated(
-                        f"session stream ended without completion (produced={produced})", produced
-                    )
-                return  # success — full sentence streamed to completion
+                # Completion-correct: idle-gap-after-audio = done (Sarvam sends no
+                # completion event); the WS stays OPEN for the next turn's reuse.
+                async for pcm in _consume_stream(ws, "sarvam_ws_session"):
+                    yield pcm
+                return  # success — full utterance streamed
             except _StreamTruncated:
-                # Truncation is a real error to surface (endpoint does REST remainder).
-                # It is NOT a transient connect failure, so do not burn the retry on it.
+                # Zero audio (WS dropped before any frame). Mark dead so the next
+                # utterance reconnects, then surface so the endpoint does REST.
+                self._ws = None
+                self._ws_cm = None
+                if self._ping_task:
+                    self._ping_task.cancel()
+                    self._ping_task = None
                 raise
             except Exception as exc:
                 log.warning("sarvam_ws_session attempt=%d error=%r", attempt, exc)

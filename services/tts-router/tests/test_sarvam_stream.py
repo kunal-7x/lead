@@ -25,7 +25,12 @@ class _FakeWS:
     """Minimal async-context-manager / async-iterator stand-in for a Sarvam WS."""
 
     def __init__(self, audio_msgs: list[bytes]):
-        self._audio_msgs = audio_msgs
+        # Frames returned by recv() in order: each audio msg then a 'done'.
+        self._frames = [
+            json.dumps({"type": "audio", "data": {"audio": base64.b64encode(p).decode()}})
+            for p in audio_msgs
+        ] + [json.dumps({"type": "done"})]
+        self._i = 0
         self.sent: list[str] = []
 
     async def __aenter__(self):
@@ -37,14 +42,13 @@ class _FakeWS:
     async def send(self, data):
         self.sent.append(data)
 
-    def __aiter__(self):
-        async def _gen():
-            for pcm in self._audio_msgs:
-                yield json.dumps(
-                    {"type": "audio", "data": {"audio": base64.b64encode(pcm).decode()}}
-                )
-            yield json.dumps({"type": "done"})
-        return _gen()
+    async def recv(self):
+        if self._i >= len(self._frames):
+            import websockets
+            raise websockets.exceptions.ConnectionClosed(None, None)
+        f = self._frames[self._i]
+        self._i += 1
+        return f
 
 
 def _patch_ws(monkeypatch, fake_ws):
@@ -93,38 +97,52 @@ class TestSynthesizeStream:
         assert json.loads(fake.sent[1])["type"] == "text"
         assert json.loads(fake.sent[2])["type"] == "flush"
 
-    async def test_early_close_before_completion_raises_truncated(self, monkeypatch):
-        """THE BUG FIX: WS close BEFORE a completion event => _StreamTruncated, not
-        a silent normal end. The endpoint uses this to trigger REST recovery."""
+    async def test_audio_then_idle_close_is_success_not_truncation(self, monkeypatch):
+        """LIVE reality: Sarvam sends the whole utterance in one audio frame then
+        closes WITHOUT a completion event. That is a NORMAL end (success) — NOT
+        truncation — so it must NOT raise (else we'd REST-resynth every turn)."""
         import websockets
         from tts_router.engines.sarvam import _StreamTruncated
 
-        class _EarlyCloseWS:
-            def __init__(self):
-                self.sent = []
-
+        class _AudioThenCloseWS:
+            def __init__(self): self.sent = []
             async def __aenter__(self): return self
             async def __aexit__(self, *a): return False
             async def send(self, d): self.sent.append(d)
 
-            def __aiter__(self):
-                async def _gen():
-                    # one partial audio chunk, then the socket closes WITHOUT a
-                    # done/flush_done frame (premature Sarvam close — the real bug).
-                    yield json.dumps({"type": "audio", "data":
-                                      {"audio": base64.b64encode(_pcm24k()).decode()}})
-                    raise websockets.exceptions.ConnectionClosed(None, None)
-                return _gen()
+            async def recv(self):
+                if not getattr(self, "_done", False):
+                    self._done = True
+                    return json.dumps({"type": "audio", "data":
+                                       {"audio": base64.b64encode(_pcm24k()).decode()}})
+                raise websockets.exceptions.ConnectionClosed(None, None)
 
-        monkeypatch.setattr(websockets, "connect", lambda *a, **k: _EarlyCloseWS())
+        monkeypatch.setattr(websockets, "connect", lambda *a, **k: _AudioThenCloseWS())
         engine = SarvamBulbulEngine(api_key="test-key")
-        got = []
+        got = []  # no _StreamTruncated expected
+        async for c in engine.synthesize_stream("poora vakya", "priya", "hi-IN"):
+            got.append(c)
+        assert len(got) == 1  # the full-utterance frame was delivered
+
+    async def test_zero_audio_close_raises_truncated(self, monkeypatch):
+        """If the WS closes with NO audio at all, THAT is truncation =>
+        _StreamTruncated so the endpoint REST-recovers the full text."""
+        import websockets
+        from tts_router.engines.sarvam import _StreamTruncated
+
+        class _NoAudioWS:
+            def __init__(self): self.sent = []
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def send(self, d): self.sent.append(d)
+            async def recv(self):
+                raise websockets.exceptions.ConnectionClosed(None, None)
+
+        monkeypatch.setattr(websockets, "connect", lambda *a, **k: _NoAudioWS())
+        engine = SarvamBulbulEngine(api_key="test-key")
         with pytest.raises(_StreamTruncated):
-            async for c in engine.synthesize_stream("lambi hindi vakya", "priya", "hi-IN"):
-                got.append(c)
-        # The partial chunk WAS yielded (we don't drop what arrived) but the stream
-        # is still flagged truncated so the remainder gets recovered.
-        assert len(got) == 1
+            async for _ in engine.synthesize_stream("kuch nahi", "priya", "hi-IN"):
+                pass
 
 
 # ── Endpoint tests ────────────────────────────────────────────────────────────
@@ -159,6 +177,8 @@ class _PersistentFakeWS:
     def __init__(self, audio_msgs_per_call: list[list[bytes]]):
         self._calls = audio_msgs_per_call
         self._call_idx = -1
+        self._frames: list[str] = []
+        self._fi = 0
         self.connect_count = 0
         self.ping_count = 0
         self.sent: list[str] = []
@@ -171,24 +191,30 @@ class _PersistentFakeWS:
 
     async def send(self, data):
         self.sent.append(data)
+        # First 'flush' of a new utterance arms the next batch of recv frames.
+        if data == json.dumps({"type": "flush"}):
+            self._call_idx += 1
+            idx = self._call_idx
+            msgs = self._calls[idx] if idx < len(self._calls) else []
+            self._frames = [
+                json.dumps({"type": "audio", "data": {"audio": base64.b64encode(p).decode()}})
+                for p in msgs
+            ] + [json.dumps({"type": "done"})]
+            self._fi = 0
+
+    async def recv(self):
+        if self._fi >= len(self._frames):
+            import websockets
+            raise websockets.exceptions.ConnectionClosed(None, None)
+        f = self._frames[self._fi]
+        self._fi += 1
+        return f
 
     async def ping(self):
         self.ping_count += 1
 
     async def close(self):
         pass
-
-    def __aiter__(self):
-        self._call_idx += 1
-        idx = self._call_idx
-        audio_msgs = self._calls[idx] if idx < len(self._calls) else []
-        async def _gen():
-            for pcm in audio_msgs:
-                yield json.dumps(
-                    {"type": "audio", "data": {"audio": base64.b64encode(pcm).decode()}}
-                )
-            yield json.dumps({"type": "done"})
-        return _gen()
 
 
 class TestSarvamStreamingSession:
@@ -264,6 +290,13 @@ class TestSarvamStreamingSession:
             def __init__(self, alive: bool):
                 self._alive = alive
                 self.sent: list[str] = []
+                self._frames = (
+                    [json.dumps({"type": "audio", "data":
+                                 {"audio": base64.b64encode(_pcm24k()).decode()}}),
+                     json.dumps({"type": "done"})]
+                    if alive else []
+                )
+                self._i = 0
 
             async def __aenter__(self): return self
             async def __aexit__(self, *a): return False
@@ -274,15 +307,12 @@ class TestSarvamStreamingSession:
 
             async def close(self): pass
 
-            def __aiter__(self):
-                async def _gen():
-                    if self._alive:
-                        yield json.dumps({"type": "audio", "data":
-                                          {"audio": base64.b64encode(_pcm24k()).decode()}})
-                        yield json.dumps({"type": "done"})
-                    else:
-                        raise websockets.exceptions.ConnectionClosed(None, None)
-                return _gen()
+            async def recv(self):
+                if self._i >= len(self._frames):
+                    raise websockets.exceptions.ConnectionClosed(None, None)
+                f = self._frames[self._i]
+                self._i += 1
+                return f
 
         wss = [_DeadThenAliveWS(True), _DeadThenAliveWS(True)]
         idx = [0]
