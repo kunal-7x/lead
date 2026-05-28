@@ -29,6 +29,10 @@ class CerebrasBackend(LLMBackend):
         self._client = httpx.AsyncClient(timeout=timeout)
         self._model = _MODEL
         self._url = _CEREBRAS_URL
+        # Extra params merged into the streaming (_llm_stream_text) payload.
+        # gpt-oss-120b is a reasoning model — without this the streamed
+        # delta.content stays empty (all output goes to the reasoning channel).
+        self._stream_extra_payload = {"reasoning_effort": "none"}
 
     async def generate(self, req: LLMRequest, kb_context: str) -> tuple[BrainOutput, int, int]:
         messages = self._build_messages(req, kb_context)
@@ -37,6 +41,9 @@ class CerebrasBackend(LLMBackend):
             "messages": messages,
             "response_format": {"type": "json_object"},
             "temperature": 0.3,
+            # gpt-oss-120b is a reasoning model; disable reasoning so it emits
+            # real reply content (otherwise delta.content can be empty).
+            "reasoning_effort": "none",
         }
         headers = {"Authorization": f"Bearer {self._api_key}"}
         resp = await self._client.post(_CEREBRAS_URL, json=payload, headers=headers)

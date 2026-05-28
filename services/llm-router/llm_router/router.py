@@ -481,6 +481,11 @@ async def _llm_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncIt
         "stream": True,
         "max_tokens": 400,  # allow genuine multi-sentence natural spoken replies
     }
+    # Backend-specific extra payload (e.g. Cerebras gpt-oss-120b needs
+    # reasoning_effort=none so it streams real delta.content, not reasoning).
+    extra = getattr(backend, "_stream_extra_payload", None)
+    if extra:
+        payload.update(extra)
     headers = {"Authorization": f"Bearer {api_key}"}
 
     t0 = time.time()
