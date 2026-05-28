@@ -84,6 +84,54 @@ def test_flag_on_error_falls_back(monkeypatch):
     assert result is False  # error → caller uses batch synth
 
 
+def test_client_stream_without_done_raises(monkeypatch):
+    """HttpTTSClient.synthesize_stream: if the router WS ends WITHOUT a 'done'
+    frame (truncation / mid-relay drop), it must RAISE so _synth_and_play_stream
+    falls back to batch REST — never silently treat the partial as complete."""
+    import json as _json
+
+    from voice_agent.clients import HttpTTSClient
+
+    class _NoDoneWS:
+        """Yields a binary chunk then ends the iterator with NO 'done' frame."""
+        def __init__(self):
+            self.close_code = None
+            self.state = "OPEN"
+
+        async def send(self, _data):
+            pass
+
+        async def close(self):
+            self.close_code = 1000
+
+        def __aiter__(self):
+            async def _gen():
+                yield b"\x11\x11" * 80   # one partial PCM chunk
+                # iterator ends here: NO {"type":"done"} — simulates truncation
+            return _gen()
+
+    client = HttpTTSClient(base_url="http://x")
+
+    async def _fake_ensure():
+        client._stream_ws = _NoDoneWS()
+        return client._stream_ws
+    client._ensure_stream_ws = _fake_ensure  # type: ignore[assignment]
+
+    async def _run():
+        got = []
+        raised = False
+        try:
+            async for c in client.synthesize_stream("namaste duniya", "hi-en", "priya"):
+                got.append(c)
+        except RuntimeError as exc:
+            raised = "truncated" in str(exc)
+        return got, raised
+
+    got, raised = asyncio.run(_run())
+    assert got == [b"\x11\x11" * 80]   # the partial chunk WAS yielded
+    assert raised is True              # but absence of 'done' raised => fallback
+
+
 def test_bargein_stops_stream(monkeypatch):
     monkeypatch.setattr(agent_mod, "_TTS_STREAMING_WS", True)
     tts = FakeTTS(stream_chunks=[_PCM] * 10)

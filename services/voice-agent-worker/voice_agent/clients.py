@@ -404,27 +404,40 @@ class HttpTTSClient:
         async with self._stream_lock:
             ws = await self._ensure_stream_ws()
             await ws.send(json.dumps({"text": text, "voice_id": voice_id, "lang": lang}))
-            async for frame in ws:
-                if isinstance(frame, bytes):
-                    if frame:
-                        yield frame
-                    continue
-                try:
-                    msg = json.loads(frame)
-                except (ValueError, TypeError):
-                    continue
-                mtype = msg.get("type", "")
-                if mtype == "done":
-                    logger.info(
-                        "[diag] phase=tts_stream first_chunk_ms=%s total_chunks=%s",
-                        msg.get("first_chunk_ms"), msg.get("total_chunks"),
-                    )
-                    return
-                if mtype == "error":
-                    err = msg.get("message", "tts_stream_error")
-                    # streaming_disabled = flag off; reset WS so we don't reuse it.
+            completed = False
+            try:
+                async for frame in ws:
+                    if isinstance(frame, bytes):
+                        if frame:
+                            yield frame
+                        continue
+                    try:
+                        msg = json.loads(frame)
+                    except (ValueError, TypeError):
+                        continue
+                    mtype = msg.get("type", "")
+                    if mtype == "done":
+                        completed = True
+                        logger.info(
+                            "[diag] phase=tts_stream first_chunk_ms=%s total_chunks=%s engine=%s",
+                            msg.get("first_chunk_ms"), msg.get("total_chunks"),
+                            msg.get("engine"),
+                        )
+                        return
+                    if mtype == "error":
+                        err = msg.get("message", "tts_stream_error")
+                        # streaming_disabled = flag off; reset WS so we don't reuse it.
+                        await self._close_stream_ws()
+                        raise RuntimeError(err)
+            finally:
+                if not completed:
+                    # Router WS dropped mid-relay BEFORE the done frame => the sentence
+                    # was truncated. Reset the WS and signal the caller (agent.py) so it
+                    # recovers the full sentence via batch REST — never silent-drop.
                     await self._close_stream_ws()
-                    raise RuntimeError(err)
+            # Stream ended without a 'done' frame: truncation. Raise so _synth_and_play_stream
+            # returns False and the batch REST path re-speaks the full sentence.
+            raise RuntimeError("tts_stream_truncated_no_done")
 
     async def _close_stream_ws(self) -> None:
         ws = self._stream_ws
