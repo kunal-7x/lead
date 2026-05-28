@@ -203,14 +203,15 @@ async def test_full_duplex_utterance_task_cancelled_on_bargein():
 
 
 async def test_bargein_min_speech_chunks_constant():
-    """_BARGEIN_MIN_SPEECH_CHUNKS must be in [6, 30] for production safety.
+    """_BARGEIN_MIN_SPEECH_CHUNKS must be in [6, 25] for production safety.
 
     Too low (< 6) → false triggers from background noise / acoustic echo.
-    Too high (> 30) → perceptible lag before barge-in is felt (600ms+).
-    Default raised to 22 (~440ms) to avoid self-interrupt from echo.
+    Too high (> 25) → deliberate "रुको रुको" misses — perceptible 500ms+ lag.
+    Lowered default to 16 (~320ms) so real interruptions fire within 300-500ms
+    while echo (no STT partial text) is still blocked by the STT gate.
     """
-    assert 6 <= _BARGEIN_MIN_SPEECH_CHUNKS <= 30, (
-        f"_BARGEIN_MIN_SPEECH_CHUNKS={_BARGEIN_MIN_SPEECH_CHUNKS} out of safe range [6,30]"
+    assert 6 <= _BARGEIN_MIN_SPEECH_CHUNKS <= 25, (
+        f"_BARGEIN_MIN_SPEECH_CHUNKS={_BARGEIN_MIN_SPEECH_CHUNKS} out of safe range [6,25]"
     )
 
 
@@ -499,4 +500,75 @@ async def test_backchannel_stt_partial_does_not_trigger_bargein():
     assert "stop_playback" in types, (
         f"Backchannel 'हाँ' is a real word — barge-in should fire (LLM suppressed "
         f"by post-barge-in backchannel logic). Got: {types}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# FIX B tests: lowered threshold (22→16) + no_real_text back-off (not hard reset)
+# ---------------------------------------------------------------------------
+
+async def test_bargein_fires_with_real_partial_within_window():
+    """FIX B: deliberate 'रुको रुको' — VAD sustained >= threshold AND real STT
+    partial present — must fire barge-in within ~320ms (16 frames at 20ms each).
+
+    With the old 22-frame threshold + hard-reset on no_real_text, fragmented
+    speech like 'रु-को' could miss the partial window and never confirm. Now:
+    - threshold lowered to 16 (~320ms)
+    - probe STT gets 8 async yield ticks (was 3) to return a partial
+    - Result: deliberate interruption confirmed within 300-500ms.
+    """
+    stt = FakeSTT(
+        transcript="रुको रुको",
+        confidence=0.85,
+        partial_text="रुको",  # real Hindi word arrives in probe stream
+    )
+    loop = make_loop(stt=stt, vad=FakeVAD(speech_chunks=_BARGEIN_MIN_SPEECH_CHUNKS + 5))
+    sent_json = []
+
+    async def source():
+        loop._playing_tts = True
+        # Provide exactly the (new, lower) threshold of sustained speech
+        for _ in range(_BARGEIN_MIN_SPEECH_CHUNKS):
+            yield _speech()
+        for _ in range(20):
+            yield _silence()
+
+    await loop.run(source(), lambda a: None, lambda m: sent_json.append(m))
+
+    types = [m.get("type") for m in sent_json]
+    assert "stop_playback" in types, (
+        f"Deliberate 'रुको रुको' with real STT partial MUST trigger barge-in within "
+        f"{_BARGEIN_MIN_SPEECH_CHUNKS} frames (~{_BARGEIN_MIN_SPEECH_CHUNKS * 20}ms). "
+        f"Got: {types}"
+    )
+
+
+async def test_echo_without_stt_partial_still_rejected_after_threshold_lower():
+    """FIX B regression: lowering threshold to 16 must NOT enable echo barge-in.
+
+    Echo has no STT partial text → _bargein_has_real_partial stays False →
+    barge-in must be rejected even though VAD threshold is easier to reach.
+    The STT gate is the essential guard against echo self-interrupt.
+    """
+    stt = FakeSTT(transcript="", confidence=0.0, partial_text=None)  # no partial
+    loop = make_loop(stt=stt, vad=FakeVAD(speech_chunks=_BARGEIN_MIN_SPEECH_CHUNKS + 5))
+    sent_json = []
+
+    async def source():
+        loop._playing_tts = True
+        # Sustain VAD above new (lower) threshold — but no STT text
+        for _ in range(_BARGEIN_MIN_SPEECH_CHUNKS + 4):
+            yield _speech()
+        for _ in range(10):
+            yield _silence()
+        loop._playing_tts = False
+        for _ in range(20):
+            yield _silence()
+
+    await loop.run(source(), lambda a: None, lambda m: sent_json.append(m))
+
+    types = [m.get("type") for m in sent_json]
+    assert "stop_playback" not in types, (
+        f"Echo (VAD only, no STT partial) must NOT trigger barge-in even with "
+        f"lowered threshold={_BARGEIN_MIN_SPEECH_CHUNKS}. Got: {types}"
     )
