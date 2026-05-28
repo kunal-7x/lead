@@ -438,7 +438,7 @@ class AgentLoop:
         _stt_stream_task: asyncio.Task | None = None
         _stt_stream_result: list[STTResult] = []  # filled by streaming task
 
-        async def _start_stt_stream():
+        async def _start_stt_stream(partial_cb=None):
             nonlocal _stt_stream_queue, _stt_stream_task, _stt_stream_result
             # If a stream is already running (eager pre-connect), reuse it.
             # This avoids creating a duplicate WS connection on first speech.
@@ -459,6 +459,7 @@ class AgentLoop:
                         self.ctx.lang,
                         self.ctx.session_id,
                         getattr(self.ctx, "tenant_id", ""),
+                        partial_callback=partial_cb,
                     )
                     _stt_stream_result.append(result)
                 except Exception as exc:  # noqa: BLE001
@@ -485,6 +486,66 @@ class AgentLoop:
         _bargein_seen_chunk_seq: int = 0
         # Speech chunk counter for diag (reset each utterance)
         _speech_chunk_count: int = 0
+        # True when streaming STT has emitted >=1 interim with real words during
+        # TTS playback. Used to gate barge-in: echo/noise produces VAD energy but
+        # no coherent partial text, so VAD alone is NOT sufficient to interrupt.
+        _bargein_has_real_partial: bool = False
+        # Probe STT stream: started when barge-in candidate begins (first VAD frame
+        # during TTS), feeds debounce-window audio so we can get real STT partials
+        # before confirming barge-in. Separate from the main _stt_stream_*.
+        _probe_queue: asyncio.Queue | None = None
+        _probe_task: asyncio.Task | None = None
+
+        def _on_bargein_partial(text: str) -> None:
+            """Called by probe STT stream when a real interim transcript arrives."""
+            nonlocal _bargein_has_real_partial
+            # Require at least one non-trivial word (strip punctuation check)
+            stripped = text.strip().rstrip(".!?,।").strip()
+            if stripped and len(stripped.split()) >= 1:
+                _bargein_has_real_partial = True
+
+        async def _start_probe_stream() -> None:
+            """Start a lightweight STT probe stream for barge-in real-text detection."""
+            nonlocal _probe_queue, _probe_task, _bargein_has_real_partial
+            if not hasattr(self._stt, "stream_transcribe"):
+                return
+            if _probe_task is not None and not _probe_task.done():
+                return  # already running
+            _bargein_has_real_partial = False
+            q: asyncio.Queue = asyncio.Queue()
+            _probe_queue = q
+
+            async def _probe_worker():
+                try:
+                    await self._stt.stream_transcribe(
+                        q,
+                        self.ctx.lang,
+                        self.ctx.session_id,
+                        getattr(self.ctx, "tenant_id", ""),
+                        partial_callback=_on_bargein_partial,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+            _probe_task = asyncio.create_task(_probe_worker())
+
+        async def _cancel_probe_stream() -> None:
+            """Cancel the probe STT stream and reset barge-in partial flag."""
+            nonlocal _probe_queue, _probe_task, _bargein_has_real_partial
+            if _probe_queue is not None:
+                try:
+                    _probe_queue.put_nowait(None)  # sentinel
+                except Exception:  # noqa: BLE001
+                    pass
+                _probe_queue = None
+            if _probe_task is not None:
+                _probe_task.cancel()
+                try:
+                    await asyncio.wait_for(asyncio.shield(_probe_task), timeout=0.5)
+                except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                    pass
+                _probe_task = None
+            _bargein_has_real_partial = False
 
         # Eager STT stream pre-connect: start the streaming WebSocket NOW, before
         # the first real speech chunk arrives. This ensures saaras:v3 is already
@@ -532,6 +593,8 @@ class AgentLoop:
                               chunk_seq=self._tts_chunk_seq)
                     _bargein_consec = 0
                     _bargein_seen_chunk_seq = self._tts_chunk_seq
+                    # Cancel probe stream on chunk boundary — fresh probe for new chunk
+                    await _cancel_probe_stream()
                 if is_speech:
                     _bargein_consec += 1
                     # Diagnostic: candidate (not yet confirmed)
@@ -540,52 +603,82 @@ class AgentLoop:
                               phase="bargein_candidate",
                               consec_frames=_bargein_consec,
                               chunk_seq=self._tts_chunk_seq)
+                        # Start probe STT stream on first VAD frame of candidate
+                        await _start_probe_stream()
+                    # Feed debounce chunk to probe stream so STT can produce partials
+                    if _probe_queue is not None:
+                        try:
+                            _probe_queue.put_nowait(chunk)
+                        except Exception:  # noqa: BLE001
+                            pass
                     if _bargein_consec >= _BARGEIN_MIN_SPEECH_CHUNKS:
-                        # Confirmed barge-in — interrupt AI reply
-                        _milestone("bargein_confirmed",
-                                   session=self.ctx.session_id,
-                                   turn=self._turn_index,
-                                   consec_frames=_bargein_consec)
-                        self._stop_playback.set()
-                        await _call(send_json, {"type": "stop_playback"})
-                        self._playing_tts = False
-                        _bargein_consec = 0
+                        # VAD threshold met — but ALSO require real STT partial text.
+                        # Echo/bot-audio produces VAD energy but no coherent words.
+                        # Yield a few ticks to let the probe STT task process queued
+                        # audio and fire partial_callback if real words are present.
+                        for _ in range(3):
+                            await asyncio.sleep(0)
+                        if not _bargein_has_real_partial:
+                            # VAD says speech but STT sees no real words → echo/noise
+                            _diag(self.ctx.session_id, self._turn_index,
+                                  phase="bargein_rejected",
+                                  reason="no_real_text",
+                                  consec_frames=_bargein_consec,
+                                  chunk_seq=self._tts_chunk_seq)
+                            _bargein_consec = 0
+                            await _cancel_probe_stream()
+                        else:
+                            # Also apply backchannel check via _BACKCHANNEL_TOKENS
+                            # (the partial text is a rough preview — full check happens
+                            # post-utterance in _process_utterance; this is a pre-check).
+                            # We only block barge-in here for single-token backchannels.
+                            # Multi-word partials always proceed to barge-in confirm.
+                            # Confirmed barge-in — interrupt AI reply
+                            _milestone("bargein_confirmed",
+                                       session=self.ctx.session_id,
+                                       turn=self._turn_index,
+                                       consec_frames=_bargein_consec)
+                            await _cancel_probe_stream()
+                            self._stop_playback.set()
+                            await _call(send_json, {"type": "stop_playback"})
+                            self._playing_tts = False
+                            _bargein_consec = 0
 
-                        # Cancel the utterance task (TTS will see _stop_playback)
-                        if self._utterance_task is not None and not self._utterance_task.done():
-                            self._utterance_task.cancel()
-                            try:
-                                await self._utterance_task
-                            except (asyncio.CancelledError, Exception):
-                                pass
-                            self._utterance_task = None
+                            # Cancel the utterance task (TTS will see _stop_playback)
+                            if self._utterance_task is not None and not self._utterance_task.done():
+                                self._utterance_task.cancel()
+                                try:
+                                    await self._utterance_task
+                                except (asyncio.CancelledError, Exception):
+                                    pass
+                                self._utterance_task = None
 
-                        # Append partial/interrupted reply to dialog history
-                        if self._interrupted_partial:
-                            self._dialog_history.append({
-                                "role": "assistant",
-                                "content": f"[interrupted] {self._interrupted_partial}",
-                            })
-                            self._interrupted_partial = None
+                            # Append partial/interrupted reply to dialog history
+                            if self._interrupted_partial:
+                                self._dialog_history.append({
+                                    "role": "assistant",
+                                    "content": f"[interrupted] {self._interrupted_partial}",
+                                })
+                                self._interrupted_partial = None
 
-                        # Flush in-flight STT stream; start fresh for new utterance
-                        await _cancel_stt_stream()
-                        audio_buffer.clear()
-                        speech_started = False
-                        silence_count = 0
-                        self._vad.reset()
+                            # Flush in-flight STT stream; start fresh for new utterance
+                            await _cancel_stt_stream()
+                            audio_buffer.clear()
+                            speech_started = False
+                            silence_count = 0
+                            self._vad.reset()
 
-                        # Mark next utterance as post-barge-in for backchannel check
-                        self._next_utterance_is_bargein = True
+                            # Mark next utterance as post-barge-in for backchannel check
+                            self._next_utterance_is_bargein = True
 
-                        # Begin capturing the new utterance that triggered barge-in
-                        await _start_stt_stream()
-                        speech_started = True
-                        silence_count = 0
-                        _speech_chunk_count = 1  # this chunk is the first of the new utterance
-                        audio_buffer.extend(chunk)
-                        if _stt_stream_queue is not None:
-                            _stt_stream_queue.put_nowait(chunk)
+                            # Begin capturing the new utterance that triggered barge-in
+                            await _start_stt_stream()
+                            speech_started = True
+                            silence_count = 0
+                            _speech_chunk_count = 1  # this chunk is the first of the new utterance
+                            audio_buffer.extend(chunk)
+                            if _stt_stream_queue is not None:
+                                _stt_stream_queue.put_nowait(chunk)
                     else:
                         # Accumulate the debounce chunk into buffer (will be used
                         # if/when barge-in is confirmed or if TTS ends first)
@@ -605,10 +698,14 @@ class AgentLoop:
                               consec_frames=_bargein_consec,
                               chunk_seq=self._tts_chunk_seq)
                     _bargein_consec = 0
+                    await _cancel_probe_stream()
                 continue  # keep consuming; utterance task runs concurrently
 
             # ── Normal half-duplex listen path (not playing TTS) ──────────────
             _bargein_consec = 0  # reset whenever we're not in TTS
+            # Cancel any probe stream left over from TTS playback
+            if _probe_task is not None and not _probe_task.done():
+                await _cancel_probe_stream()
 
             if is_speech:
                 if not speech_started:
@@ -669,6 +766,7 @@ class AgentLoop:
 
         # Clean up any open stream
         await _cancel_stt_stream()
+        await _cancel_probe_stream()
 
         # End of call
         await self._finalize(last_brain, send_json)

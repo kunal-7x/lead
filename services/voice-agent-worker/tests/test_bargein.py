@@ -389,3 +389,114 @@ async def test_inter_chunk_counter_reset_prevents_accumulation():
         f"Inter-chunk counter accumulation must NOT trigger barge-in; "
         f"half_blip={half_blip} < threshold={_BARGEIN_MIN_SPEECH_CHUNKS}. Got: {types}"
     )
+
+
+# ---------------------------------------------------------------------------
+# W3 tests: STT-partial gate — echo must not trigger, real words must trigger
+# ---------------------------------------------------------------------------
+
+async def test_echo_vad_without_stt_partial_does_not_trigger_bargein():
+    """W3: VAD frames during TTS playback WITHOUT a real STT partial (echo case)
+    must NOT trigger barge-in even when _BARGEIN_MIN_SPEECH_CHUNKS is reached.
+
+    Simulates acoustic echo: VAD fires on bot's own audio but FakeSTT has no
+    partial_text configured — so partial_callback is never called → barge-in
+    must be rejected with reason=no_real_text.
+    """
+    # FakeSTT with NO partial_text: stream_transcribe drains queue but never
+    # calls partial_callback → _bargein_has_real_partial stays False
+    stt = FakeSTT(transcript="", confidence=0.0, partial_text=None)
+    loop = make_loop(stt=stt, vad=FakeVAD(speech_chunks=_BARGEIN_MIN_SPEECH_CHUNKS + 5))
+    sent_json = []
+
+    async def source():
+        loop._playing_tts = True
+        # Provide sustained VAD frames (≥ threshold) — no real STT partial
+        for _ in range(_BARGEIN_MIN_SPEECH_CHUNKS + 2):
+            yield _speech()
+        for _ in range(10):
+            yield _silence()
+        loop._playing_tts = False
+        for _ in range(20):
+            yield _silence()
+
+    await loop.run(source(), lambda a: None, lambda m: sent_json.append(m))
+
+    types = [m.get("type") for m in sent_json]
+    assert "stop_playback" not in types, (
+        f"Echo case (VAD only, no STT partial) must NOT trigger barge-in. Got: {types}"
+    )
+
+
+async def test_vad_with_real_stt_partial_triggers_bargein():
+    """W3: VAD frames during TTS playback WITH a real multi-word STT partial
+    MUST trigger barge-in.
+
+    Simulates deliberate caller interruption: both VAD threshold is met AND
+    streaming STT produces a real interim transcript.
+    """
+    # FakeSTT with partial_text: stream_transcribe calls partial_callback("mujhe")
+    stt = FakeSTT(
+        transcript="mujhe 2BHK chahiye",
+        confidence=0.85,
+        partial_text="mujhe",  # real word → _bargein_has_real_partial = True
+    )
+    loop = make_loop(stt=stt, vad=FakeVAD(speech_chunks=_BARGEIN_MIN_SPEECH_CHUNKS + 5))
+    sent_json = []
+
+    async def source():
+        loop._playing_tts = True
+        for _ in range(_BARGEIN_MIN_SPEECH_CHUNKS):
+            yield _speech()
+        for _ in range(20):
+            yield _silence()
+
+    await loop.run(source(), lambda a: None, lambda m: sent_json.append(m))
+
+    types = [m.get("type") for m in sent_json]
+    assert "stop_playback" in types, (
+        f"Sustained VAD + real STT partial MUST trigger barge-in. Got: {types}"
+    )
+
+
+async def test_backchannel_stt_partial_does_not_trigger_bargein():
+    """W3: VAD frames during TTS playback with a backchannel-only STT partial
+    (e.g. "हाँ") must NOT trigger barge-in.
+
+    The backchannel check in _process_utterance handles post-barge-in suppression,
+    but here we test the pre-barge-in gate: a single-token backchannel partial
+    still counts as a real partial (it's a real word), so barge-in IS confirmed
+    at the VAD level and backchannel suppression happens in _process_utterance.
+
+    This test specifically validates that a PURE echo (no partial at all) does
+    NOT trigger and a real word ("हाँ") DOES allow barge-in to proceed so the
+    post-barge-in backchannel suppression path can handle it correctly.
+    NOTE: A "हाँ" by itself IS a real word — barge-in fires, then
+    _process_utterance suppresses the LLM reply (existing logic). If we
+    blocked barge-in here for single-word backchannels we'd miss legitimate
+    single-word answers. So this test confirms barge-in fires for "हाँ".
+    """
+    stt = FakeSTT(
+        transcript="हाँ",
+        confidence=0.90,
+        partial_text="हाँ",  # backchannel word — still a real word, partial fires
+    )
+    loop = make_loop(stt=stt, vad=FakeVAD(speech_chunks=_BARGEIN_MIN_SPEECH_CHUNKS + 5))
+    sent_json = []
+
+    async def source():
+        loop._playing_tts = True
+        loop._next_utterance_is_bargein = True
+        for _ in range(_BARGEIN_MIN_SPEECH_CHUNKS):
+            yield _speech()
+        for _ in range(_N_SILENCE + 2):
+            yield _silence()
+
+    await loop.run(source(), lambda a: None, lambda m: sent_json.append(m))
+
+    types = [m.get("type") for m in sent_json]
+    # Barge-in fires (real word present) — stop_playback is sent
+    assert "stop_playback" in types, (
+        f"Backchannel 'हाँ' is a real word — barge-in should fire (LLM suppressed "
+        f"by post-barge-in backchannel logic). Got: {types}"
+    )

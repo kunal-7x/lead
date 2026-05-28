@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import AsyncIterator, Protocol
+from typing import AsyncIterator, Callable, Protocol
 
 import httpx
 
@@ -67,6 +67,7 @@ class HttpSTTClient:
         lang: str,
         session_id: str,
         tenant_id: str = "",
+        partial_callback: "Callable[[str], None] | None" = None,
     ) -> STTResult:
         """Streaming STT via WebSocket — NEW protocol (lang as query param).
 
@@ -148,6 +149,12 @@ class HttpSTTClient:
                                 best_conf = conf
                                 if eng:
                                     engine_used = eng
+                            # Notify caller of real interim text (barge-in guard)
+                            if text and partial_callback is not None:
+                                try:
+                                    partial_callback(text)
+                                except Exception:  # noqa: BLE001
+                                    pass
                 except RuntimeError:
                     raise  # propagate so caller falls back to batch
                 except Exception:  # noqa: BLE001

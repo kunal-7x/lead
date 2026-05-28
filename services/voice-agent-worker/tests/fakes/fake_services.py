@@ -9,14 +9,57 @@ _SILENT_PCM = b"\x00\x00" * 400  # 50ms silence at 8kHz
 
 class FakeSTT:
     def __init__(self, transcript: str = "2BHK ka price kya hai",
-                 confidence: float = 0.90, engine: str = "sarvam") -> None:
+                 confidence: float = 0.90, engine: str = "sarvam",
+                 partial_text: str | None = "test speech") -> None:
         self.transcript = transcript
         self.confidence = confidence
         self.engine = engine
         self.call_count = 0
+        # If set, stream_transcribe will emit this as an interim partial
+        # before returning the final transcript. Used to simulate real caller
+        # speech producing STT partials during barge-in probe.
+        self.partial_text = partial_text
 
     async def transcribe(self, audio: bytes, lang: str, session_id: str) -> STTResult:
         self.call_count += 1
+        return STTResult(text=self.transcript, confidence=self.confidence,
+                         engine_used=self.engine, is_final=True)
+
+    async def stream_transcribe(
+        self,
+        audio_queue: "asyncio.Queue",
+        lang: str,
+        session_id: str,
+        tenant_id: str = "",
+        partial_callback=None,
+    ) -> STTResult:
+        """Fake streaming STT: drains queue, emits partial_text if configured.
+
+        Emits the partial on the FIRST chunk received so it's available before
+        the barge-in confirmation check (which does asyncio.sleep(0)).
+        """
+        import asyncio as _asyncio
+        first_chunk_received = False
+        while True:
+            try:
+                chunk = audio_queue.get_nowait()
+            except Exception:
+                # Nothing immediately available — yield to event loop and retry once
+                await _asyncio.sleep(0)
+                try:
+                    chunk = audio_queue.get_nowait()
+                except Exception:
+                    break
+            if chunk is None:
+                break
+            if not first_chunk_received:
+                first_chunk_received = True
+                # Emit interim partial immediately on first chunk
+                if self.partial_text and partial_callback is not None:
+                    partial_callback(self.partial_text)
+        # Emit partial even if queue was empty (pre-connected probe case)
+        if not first_chunk_received and self.partial_text and partial_callback is not None:
+            partial_callback(self.partial_text)
         return STTResult(text=self.transcript, confidence=self.confidence,
                          engine_used=self.engine, is_final=True)
 
