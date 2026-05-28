@@ -11,12 +11,12 @@ from llm_router.models import BrainOutput, LLMRequest
 
 _CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
 _CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions"
-_MODEL = "llama-3.3-70b"
+_MODEL = "gpt-oss-120b"
 _TIMEOUT = 20.0
 
 
 class CerebrasBackend(LLMBackend):
-    """Cerebras Llama 3.3 — fallback backend, OpenAI-compatible endpoint.
+    """Cerebras gpt-oss-120b — fallback backend, OpenAI-compatible endpoint.
 
     Production: set CEREBRAS_API_KEY env var.
     Used as fallback when Groq is unavailable or rate-limited.
