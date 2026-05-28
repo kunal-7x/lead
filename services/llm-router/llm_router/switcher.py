@@ -1,13 +1,25 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 VALID_MODELS = {
     "qwen3_32b", "llama3_70b", "mistral_7b",
-    "groq_llama", "cerebras_llama", "sarvam_105b", "openrouter",
+    "groq_llama", "groq_instant", "cerebras_llama", "sarvam_105b", "openrouter",
     "openai_gpt4o", "anthropic_claude", "google_gemini",
 }
 DEFAULT_MODEL = "groq_llama"
+
+
+def _env_default_model() -> str:
+    """Active model from env LLM_ACTIVE_MODEL (default groq_llama / versatile).
+
+    Read at call time so a restart with a new env value flips routing without
+    requiring any Redis key to be set. An invalid value falls back to the
+    hardcoded DEFAULT_MODEL.
+    """
+    name = os.getenv("LLM_ACTIVE_MODEL", DEFAULT_MODEL)
+    return name if name in VALID_MODELS else DEFAULT_MODEL
 
 _GLOBAL_KEY = "llm:global_model"
 
@@ -44,7 +56,8 @@ class ModelSwitcher:
             if name in VALID_MODELS:
                 return name
 
-        return DEFAULT_MODEL
+        # No Redis override → env-selected default (LLM_ACTIVE_MODEL).
+        return _env_default_model()
 
     async def set_global_model(self, model: str) -> None:
         _validate(model)

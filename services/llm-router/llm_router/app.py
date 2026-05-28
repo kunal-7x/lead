@@ -6,7 +6,7 @@ import redis.asyncio as aioredis
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from llm_router.backends.groq import GroqLlamaBackend
+from llm_router.backends.groq import GroqLlamaBackend, GroqInstantBackend
 from llm_router.backends.cerebras import CerebrasBackend
 from llm_router.backends.sarvam import SarvamLLMBackend
 from llm_router.backends.vllm import VLLMBackend
@@ -29,6 +29,7 @@ def _build_router() -> LLMRouter:
     kb = HttpKbRetriever()
     backends = {
         "groq_llama": GroqLlamaBackend(),
+        "groq_instant": GroqInstantBackend(),
         "cerebras_llama": CerebrasBackend(),
         "sarvam_llm": SarvamLLMBackend(),
         "qwen3_32b": VLLMBackend("qwen3_32b"),

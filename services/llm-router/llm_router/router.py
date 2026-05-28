@@ -141,7 +141,7 @@ class LLMRouter:
         stream_backend = None
         for model_name in chain:
             backend = self._backends.get(model_name)
-            if backend is not None and backend.name in ("groq_llama", "cerebras_llama", "openrouter"):
+            if backend is not None and backend.name in ("groq_llama", "groq_instant", "cerebras_llama", "openrouter"):
                 stream_backend = (model_name, backend)
                 break
 
@@ -231,7 +231,7 @@ class LLMRouter:
         stream_backend = None
         for model_name in chain:
             backend = self._backends.get(model_name)
-            if backend is not None and backend.name in ("groq_llama", "cerebras_llama", "openrouter"):
+            if backend is not None and backend.name in ("groq_llama", "groq_instant", "cerebras_llama", "openrouter"):
                 stream_backend = (model_name, backend)
                 break
 

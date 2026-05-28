@@ -12,6 +12,7 @@ from llm_router.models import BrainOutput, LLMRequest
 _GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _MODEL = "llama-3.3-70b-versatile"
+_INSTANT_MODEL = "llama-3.1-8b-instant"
 _TIMEOUT = 20.0
 
 
@@ -33,7 +34,7 @@ class GroqLlamaBackend(LLMBackend):
     async def generate(self, req: LLMRequest, kb_context: str) -> tuple[BrainOutput, int, int]:
         messages = self._build_messages(req, kb_context)
         payload = {
-            "model": _MODEL,
+            "model": self._model,
             "messages": messages,
             "response_format": {"type": "json_object"},
             "temperature": 0.3,
@@ -62,3 +63,16 @@ class GroqLlamaBackend(LLMBackend):
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+class GroqInstantBackend(GroqLlamaBackend):
+    """Groq Llama 3.1 8B Instant — faster/cheaper variant.
+
+    Same code path as GroqLlamaBackend, only the model differs. Selectable at
+    runtime via LLM_ACTIVE_MODEL=groq_instant (default is groq_llama/versatile).
+    """
+    name = "groq_instant"
+
+    def __init__(self, api_key: str = "", timeout: float = _TIMEOUT) -> None:
+        super().__init__(api_key=api_key, timeout=timeout)
+        self._model = _INSTANT_MODEL
