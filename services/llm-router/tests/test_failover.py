@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from llm_router.router import LLMRouter, _build_chain
 from llm_router.kb_client import FakeKbRetriever
 from tests.fakes.fake_backends import FakeBackend, FakeVLLMBackend, FakeGroqBackend
@@ -90,3 +92,48 @@ async def test_all_fail_returns_fallback(switcher):
     resp = await router.generate(make_req())
     assert resp.model_used == "fallback"
     assert resp.brain.should_handover_to_human is True
+
+
+async def test_stream_text_groq_llama_429_skips_to_groq_instant(switcher, monkeypatch):
+    """groq_llama 429 on stream_text → groq_instant tried via streaming, NOT cerebras batch.
+
+    Monkeypatches _llm_stream_text so groq_llama raises (simulating 429) and
+    groq_instant succeeds. Asserts: groq_instant is tried; cerebras is never reached.
+    """
+    import llm_router.router as router_module
+
+    called: list[str] = []
+
+    async def fake_stream_text(backend, req, kb_context):
+        called.append(backend.name)
+        if backend.name == "groq_llama":
+            raise RuntimeError("429 rate_limit_exceeded")
+        # groq_instant succeeds
+        yield f"data: {json.dumps({'token': 'नमस्ते', 'done': False})}\n\n"
+        yield f"data: {json.dumps({'token': '', 'done': True})}\n\n"
+
+    monkeypatch.setattr(router_module, "_llm_stream_text", fake_stream_text)
+
+    groq_versatile = FakeBackend(name="groq_llama")
+    groq_instant = FakeBackend(name="groq_instant")
+    cerebras = FakeBackend(name="cerebras_llama")
+
+    router = LLMRouter(
+        {"groq_llama": groq_versatile, "groq_instant": groq_instant, "cerebras_llama": cerebras},
+        switcher,
+        FakeKbRetriever(),
+    )
+
+    tokens = []
+    async for sse in router.generate_stream_text(make_req()):
+        tokens.append(sse)
+
+    # groq_llama was tried (and 429'd), groq_instant was tried next via streaming
+    assert called[0] == "groq_llama"
+    assert called[1] == "groq_instant"
+    # cerebras was never reached (groq_instant succeeded)
+    assert "cerebras_llama" not in called
+    # SSE tokens include the reply token
+    token_data = [json.loads(t[len("data: "):].strip()) for t in tokens if t.startswith("data:")]
+    assert any(d.get("token") == "नमस्ते" for d in token_data)
+    assert token_data[-1]["done"] is True

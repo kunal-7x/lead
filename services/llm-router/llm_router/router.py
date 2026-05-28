@@ -227,44 +227,37 @@ class LLMRouter:
             active = DEFAULT_MODEL
         chain = _build_chain(active, list(self._backends.keys()))
 
-        # Prefer streaming-capable backend for plain-text streaming (groq_llama primary, cerebras_llama fallback, openrouter last)
-        stream_backend = None
+        # Try each streaming-capable backend in chain order.
+        # On 429 or any error, skip that model and advance to the next one —
+        # do NOT restart the chain from groq_llama (which would re-429).
+        # Chain order: groq_llama → groq_instant → cerebras_llama → openrouter.
+        _STREAMING_CAPABLE = ("groq_llama", "groq_instant", "cerebras_llama", "openrouter")
+        import sys as _sys
+        brain = None
         for model_name in chain:
             backend = self._backends.get(model_name)
-            if backend is not None and backend.name in ("groq_llama", "groq_instant", "cerebras_llama", "openrouter"):
-                stream_backend = (model_name, backend)
-                break
-
-        if stream_backend is not None:
-            model_name, backend = stream_backend
+            if backend is None or backend.name not in _STREAMING_CAPABLE:
+                continue
             try:
                 async for sse_line in _llm_stream_text(backend, req, kb_context):
                     yield sse_line
-                return
+                return  # success — done
             except Exception as _stream_err:
-                import sys as _sys
                 print(
-                    f"[llm-router] stream_text error — falling back to batch"
+                    f"[llm-router] stream_text {model_name} failed — trying next chain member"
                     f" session={req.session_id} lang={req.lang} err={_stream_err!r}",
                     file=_sys.stderr, flush=True,
                 )
-                # fall through to batch fallback — keeps Hindi (req.lang unchanged)
+                # continue to next model in chain (skip this 429'd / failed model)
 
-        # Fallback: batch generate, stream reply word-by-word.
+        # All streaming backends failed — emit FALLBACK as a single word-by-word stream.
         # req.lang is preserved from the original request so Hindi stays Hindi.
-        try:
-            result = await asyncio.wait_for(
-                self.generate(req, trace_id), timeout=_TIMEOUT_S
-            )
-            brain = result.brain
-        except Exception as _batch_err:
-            import sys as _sys
-            print(
-                f"[llm-router] stream_text batch fallback also failed"
-                f" session={req.session_id} err={_batch_err!r}",
-                file=_sys.stderr, flush=True,
-            )
-            brain = FALLBACK_BRAIN
+        print(
+            f"[llm-router] stream_text all streaming backends failed, emitting fallback"
+            f" session={req.session_id}",
+            file=_sys.stderr, flush=True,
+        )
+        brain = FALLBACK_BRAIN
 
         words = brain.reply.split(" ")
         for i, word in enumerate(words):
