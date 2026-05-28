@@ -289,10 +289,35 @@ def _format_kb(chunks) -> str:
     return "\n".join(f"- {c.text}" for c in chunks)
 
 
+_PREFERRED_ORDER = [
+    "groq_llama",
+    "groq_instant",
+    "cerebras_llama",
+    "openrouter",
+]
+
+
 def _build_chain(active: str, available: list[str]) -> list[str]:
-    """Active model first, then remaining in order."""
-    rest = [n for n in available if n != active]
-    return [active] + rest
+    """Active model first, then remaining in preferred fallback order.
+
+    Preferred order: groq_llama → groq_instant → cerebras_llama → openrouter.
+    Models not in the preferred list come last (in their registration order).
+
+    On Groq versatile 429, the chain advances to groq_instant (same key, different
+    model — usually not rate-limited simultaneously) BEFORE falling to cerebras batch,
+    avoiding the 7-8s cerebras first-token spike.
+    """
+    rest_ordered = []
+    # First pass: preferred order, excluding active
+    for name in _PREFERRED_ORDER:
+        if name != active and name in available:
+            rest_ordered.append(name)
+    # Second pass: anything not in preferred list, in registration order
+    preferred_set = set(_PREFERRED_ORDER)
+    for name in available:
+        if name != active and name not in preferred_set:
+            rest_ordered.append(name)
+    return [active] + rest_ordered
 
 
 def _extract_reply_progress(buf: str):
