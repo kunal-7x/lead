@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from llm_router.backends.groq import GroqLlamaBackend
+from llm_router.backends.cerebras import CerebrasBackend
 from llm_router.backends.sarvam import SarvamLLMBackend
 from llm_router.backends.vllm import VLLMBackend
 from llm_router.backends.openai_backend import (
@@ -28,6 +29,7 @@ def _build_router() -> LLMRouter:
     kb = HttpKbRetriever()
     backends = {
         "groq_llama": GroqLlamaBackend(),
+        "cerebras_llama": CerebrasBackend(),
         "sarvam_llm": SarvamLLMBackend(),
         "qwen3_32b": VLLMBackend("qwen3_32b"),
         "llama3_70b": VLLMBackend("llama3_70b"),
