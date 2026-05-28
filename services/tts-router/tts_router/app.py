@@ -12,7 +12,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response
 
 from tts_router.cache import RedisAudioCache
-from tts_router.engines.sarvam import SarvamBulbulEngine
+from tts_router.engines.sarvam import SarvamBulbulEngine, SarvamStreamingSession
 from tts_router.engines.kokoro import KokoroEngine, IndicParlerEngine, IndicF5Engine, ElevenLabsEngine
 from tts_router.models import HealthResponse, TTSRequest, WarmRequest
 from tts_router.router import TTSRouter
@@ -295,7 +295,7 @@ async def tts_sarvam_stream_ws(websocket: WebSocket) -> None:
 
     import numpy as np
 
-    from tts_router.engines.sarvam import SarvamBulbulEngine, _STREAM_SAMPLE_RATE
+    from tts_router.engines.sarvam import SarvamBulbulEngine, SarvamStreamingSession, _STREAM_SAMPLE_RATE
 
     def _resample_to_8k_pcm(pcm: bytes) -> bytes:
         """PCM16 LE @ _STREAM_SAMPLE_RATE → PCM16 LE 8kHz (numpy linear interp)."""
@@ -311,36 +311,50 @@ async def tts_sarvam_stream_ws(websocket: WebSocket) -> None:
         return np.clip(samples, -32768, 32767).astype("<i2").tobytes()
 
     engine = SarvamBulbulEngine()
+    # SarvamStreamingSession keeps the Sarvam WS alive across turns via periodic
+    # WS-level pings (every 20s), preventing the 408 idle-timeout that caused a
+    # per-turn reconnect penalty. On WS failure it reconnects once transparently.
     try:
-        # Per-session reuse: loop, synthesising one utterance per inbound text frame
-        # until the worker disconnects on hangup.
-        while True:
-            raw = await websocket.receive_text()
-            msg = json.loads(raw)
-            text = msg.get("text", "")
-            voice_id = msg.get("voice_id", "")
-            lang = msg.get("lang", "hi-en")
-            if not text:
-                await websocket.send_text(json.dumps(
-                    {"type": "done", "first_chunk_ms": 0, "total_chunks": 0, "engine": "silence"}))
-                continue
-            t0 = time.time()
-            first_chunk_ms = -1
-            total_chunks = 0
-            async for pcm_chunk in engine.synthesize_stream(text, voice_id, lang):
-                pcm8k = _resample_to_8k_pcm(pcm_chunk)
-                if not pcm8k:
+        async with SarvamStreamingSession(engine) as session:
+            # Per-session reuse: loop, synthesising one utterance per inbound text frame
+            # until the worker disconnects on hangup.
+            while True:
+                raw = await websocket.receive_text()
+                msg = json.loads(raw)
+                text = msg.get("text", "")
+                voice_id = msg.get("voice_id", "")
+                lang = msg.get("lang", "hi-en")
+                if not text:
+                    await websocket.send_text(json.dumps(
+                        {"type": "done", "first_chunk_ms": 0, "total_chunks": 0, "engine": "silence"}))
                     continue
-                if first_chunk_ms < 0:
-                    first_chunk_ms = int((time.time() - t0) * 1000)
-                total_chunks += 1
-                await websocket.send_bytes(pcm8k)
-            log.info("[diag] phase=tts_stream first_chunk_ms=%d total_chunks=%d",
-                     first_chunk_ms, total_chunks)
-            await websocket.send_text(
-                json.dumps({"type": "done", "first_chunk_ms": first_chunk_ms,
-                            "total_chunks": total_chunks, "engine": "sarvam_stream"})
-            )
+                t0 = time.time()
+                first_chunk_ms = -1
+                total_chunks = 0
+                try:
+                    async for pcm_chunk in session.synthesize(text, voice_id, lang):
+                        pcm8k = _resample_to_8k_pcm(pcm_chunk)
+                        if not pcm8k:
+                            continue
+                        if first_chunk_ms < 0:
+                            first_chunk_ms = int((time.time() - t0) * 1000)
+                        total_chunks += 1
+                        await websocket.send_bytes(pcm8k)
+                except Exception as synth_exc:
+                    # Session synthesis failed (both attempts exhausted) — fall back to
+                    # per-call batch REST synthesize so the caller still hears audio.
+                    log.warning("tts_sarvam_stream_ws session failed, falling back to REST: %s", synth_exc)
+                    pcm = await engine.synthesize(text, voice_id, lang)
+                    if pcm:
+                        await websocket.send_bytes(pcm)
+                        first_chunk_ms = int((time.time() - t0) * 1000)
+                        total_chunks = 1
+                log.info("[diag] phase=tts_stream first_chunk_ms=%d total_chunks=%d",
+                         first_chunk_ms, total_chunks)
+                await websocket.send_text(
+                    json.dumps({"type": "done", "first_chunk_ms": first_chunk_ms,
+                                "total_chunks": total_chunks, "engine": "sarvam_stream"})
+                )
     except WebSocketDisconnect:
         pass
     except Exception as exc:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -251,6 +252,183 @@ class SarvamBulbulEngine(TTSEngine):
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+# Sarvam WS 408 idle-timeout fires at ~30s. Send WS-level ping every 20s to keep alive.
+_KEEPALIVE_INTERVAL_S = float(os.getenv("SARVAM_WS_KEEPALIVE_INTERVAL", "20"))
+
+
+class SarvamStreamingSession:
+    """Persistent Sarvam WS session that survives across multiple utterances.
+
+    Maintains one WebSocket connection per caller session; sends periodic WS-level
+    pings so the Sarvam server does not close with 408 idle-timeout between turns.
+
+    Usage (from tts_sarvam_stream_ws app endpoint)::
+
+        async with SarvamStreamingSession(engine) as session:
+            while True:
+                text = await get_next_utterance()
+                async for pcm in session.synthesize(text, voice_id, lang):
+                    yield pcm
+
+    If the WS drops (408, network error) it reconnects transparently before the
+    next utterance — single reconnect per utterance, so first-chunk latency is the
+    same as a fresh connect but we avoid paying the reconnect cost every turn.
+    """
+
+    def __init__(self, engine: SarvamBulbulEngine) -> None:
+        self._engine = engine
+        self._ws = None  # active websockets connection (or None)
+        self._ws_cm = None  # the context manager; kept open while _ws is alive
+        self._ping_task: asyncio.Task | None = None
+        self._lang: str = "hi-en"
+        self._voice_id: str = ""
+
+    async def __aenter__(self) -> "SarvamStreamingSession":
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        await self._close()
+
+    async def _close(self) -> None:
+        if self._ping_task is not None:
+            self._ping_task.cancel()
+            try:
+                await self._ping_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._ping_task = None
+        if self._ws_cm is not None:
+            try:
+                await self._ws_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self._ws_cm = None
+        self._ws = None
+
+    async def _connect(self, voice_id: str, lang: str) -> None:
+        """Open a new Sarvam WS (via async CM), send config, start keepalive ping loop."""
+        try:
+            import websockets  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError("websockets not installed") from exc
+
+        _WS_VALID_SPEAKERS = {v.id for v in _VOICES_V2}
+        speaker = voice_id if voice_id in _WS_VALID_SPEAKERS else "anushka"
+        headers = {"API-Subscription-Key": self._engine._api_key}
+        config = {
+            "type": "config",
+            "data": {
+                "target_language_code": _lang_code(lang),
+                "speaker": speaker,
+                "pace": 1.0,
+                "temperature": 0.6,
+                "enable_preprocessing": True,
+                "output_audio_codec": "linear16",
+                "min_buffer_size": 50,
+                "max_chunk_length": 250,
+                "sample_rate": _STREAM_SAMPLE_RATE,
+            },
+        }
+        # websockets.connect() returns an async CM; enter it and hold it open so
+        # the connection persists across turns (not closed when we exit the CM block).
+        cm = websockets.connect(
+            _WS_URL, additional_headers=headers, open_timeout=3, close_timeout=2
+        )
+        ws = await cm.__aenter__()
+        await ws.send(json.dumps(config))
+        self._ws_cm = cm
+        self._ws = ws
+        self._lang = lang
+        self._voice_id = voice_id
+        # Start background ping task
+        if self._ping_task is not None:
+            self._ping_task.cancel()
+        self._ping_task = asyncio.ensure_future(self._keepalive_loop())
+        log.debug("sarvam_ws_session_connected speaker=%s lang=%s", speaker, lang)
+
+    async def _keepalive_loop(self) -> None:
+        """Send WS-level pings every _KEEPALIVE_INTERVAL_S to prevent 408."""
+        try:
+            while True:
+                await asyncio.sleep(_KEEPALIVE_INTERVAL_S)
+                if self._ws is None:
+                    return
+                try:
+                    await self._ws.ping()
+                    log.debug("sarvam_ws_keepalive_ping sent")
+                except Exception as exc:
+                    log.warning("sarvam_ws_keepalive_ping failed: %r", exc)
+                    self._ws = None   # mark as dead; _ensure_connected will reconnect
+                    self._ws_cm = None
+                    return
+        except asyncio.CancelledError:
+            pass
+
+    async def _ensure_connected(self, voice_id: str, lang: str) -> None:
+        """Reconnect if WS is dead or config changed."""
+        if self._ws is None or self._lang != lang or self._voice_id != voice_id:
+            await self._close()
+            await self._connect(voice_id, lang)
+
+    async def synthesize(
+        self, text: str, voice_id: str, lang: str
+    ) -> AsyncIterator[bytes]:
+        """Synthesize text on the persistent WS; reconnect once if WS is dead."""
+        for attempt in range(2):
+            try:
+                await self._ensure_connected(voice_id, lang)
+                ws = self._ws
+                await ws.send(json.dumps({"type": "text", "data": {"text": text,
+                                                                    "send_completion_event": True}}))
+                await ws.send(json.dumps({"type": "flush"}))
+                try:
+                    import websockets  # type: ignore
+                    async for raw in ws:
+                        if isinstance(raw, bytes):
+                            yield raw
+                            continue
+                        try:
+                            msg = json.loads(raw)
+                        except (ValueError, TypeError):
+                            continue
+                        mtype = msg.get("type", "")
+                        if mtype in ("audio", "audio_chunk"):
+                            data_field = msg.get("data", {})
+                            audio_b64 = (data_field.get("audio") or
+                                         data_field.get("audio_chunk") or "")
+                            if audio_b64:
+                                yield base64.b64decode(audio_b64)
+                        elif mtype in ("flush_done", "done", "complete", "completion"):
+                            break
+                        elif mtype == "error":
+                            err_data = msg.get("data") or msg.get("message") or msg
+                            err_code = (
+                                (msg.get("data") or {}).get("code")
+                                if isinstance(msg.get("data"), dict) else None
+                            )
+                            raise RuntimeError(f"sarvam_stream_error code={err_code}: {err_data}")
+                except websockets.exceptions.ConnectionClosed as exc:
+                    # Sarvam closed after audio (normal) or mid-stream (error).
+                    # Treat close as normal end; mark WS dead so next utterance reconnects.
+                    log.debug("sarvam_ws_session_closed_during_stream: %r", exc)
+                    self._ws = None
+                    self._ws_cm = None
+                    if self._ping_task:
+                        self._ping_task.cancel()
+                        self._ping_task = None
+                return  # success
+            except Exception as exc:
+                log.warning("sarvam_ws_session attempt=%d error=%r", attempt, exc)
+                # Mark dead and retry once
+                self._ws = None
+                self._ws_cm = None
+                if self._ping_task:
+                    self._ping_task.cancel()
+                    self._ping_task = None
+                if attempt == 1:
+                    raise  # both attempts failed — caller falls back to REST
 
 
 def _lang_code(lang: str) -> str:

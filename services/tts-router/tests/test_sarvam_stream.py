@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 import tts_router.app as app_module
 from tts_router.app import app
-from tts_router.engines.sarvam import SarvamBulbulEngine, _STREAM_SAMPLE_RATE
+from tts_router.engines.sarvam import SarvamBulbulEngine, SarvamStreamingSession, _STREAM_SAMPLE_RATE
 
 
 def _pcm24k(n_samples: int = 240) -> bytes:
@@ -112,6 +112,120 @@ class TestSarvamStreamEndpoint:
     )
     def test_flag_on_streams_pcm8k_then_done(self, monkeypatch):
         """Skipped — see skip reason above."""
+
+
+# ── SarvamStreamingSession tests ─────────────────────────────────────────────
+
+class _PersistentFakeWS:
+    """Fake WS that tracks how many times it was 'connected' and supports ping."""
+
+    def __init__(self, audio_msgs_per_call: list[list[bytes]]):
+        self._calls = audio_msgs_per_call
+        self._call_idx = -1
+        self.connect_count = 0
+        self.ping_count = 0
+        self.sent: list[str] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def send(self, data):
+        self.sent.append(data)
+
+    async def ping(self):
+        self.ping_count += 1
+
+    async def close(self):
+        pass
+
+    def __aiter__(self):
+        self._call_idx += 1
+        idx = self._call_idx
+        audio_msgs = self._calls[idx] if idx < len(self._calls) else []
+        async def _gen():
+            for pcm in audio_msgs:
+                yield json.dumps(
+                    {"type": "audio", "data": {"audio": base64.b64encode(pcm).decode()}}
+                )
+            yield json.dumps({"type": "done"})
+        return _gen()
+
+
+class TestSarvamStreamingSession:
+    async def test_two_utterances_single_connect(self, monkeypatch):
+        """Two synthesize() calls on the same session use a single WS connect."""
+        fake_ws = _PersistentFakeWS([[_pcm24k()], [_pcm24k()]])
+        import websockets
+
+        connect_count = [0]
+
+        def _connect(*a, **k):
+            connect_count[0] += 1
+            return fake_ws
+        monkeypatch.setattr(websockets, "connect", _connect)
+
+        engine = SarvamBulbulEngine(api_key="test-key")
+        async with SarvamStreamingSession(engine) as session:
+            chunks1 = [c async for c in session.synthesize("hello", "anushka", "hi-IN")]
+            chunks2 = [c async for c in session.synthesize("world", "anushka", "hi-IN")]
+
+        # Both utterances got audio
+        assert len(chunks1) == 1
+        assert len(chunks2) == 1
+        # Only one WS connection was opened (no per-turn reconnect)
+        assert connect_count[0] == 1
+
+    async def test_reconnects_on_dead_ws(self, monkeypatch):
+        """If WS dies, session reconnects on next utterance (transparent retry)."""
+        import websockets
+
+        call_log = []
+
+        class _DeadThenAliveWS:
+            def __init__(self, alive: bool):
+                self._alive = alive
+                self.sent: list[str] = []
+
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def send(self, d): self.sent.append(d)
+            async def ping(self):
+                if not self._alive:
+                    raise websockets.exceptions.ConnectionClosed(None, None)
+
+            async def close(self): pass
+
+            def __aiter__(self):
+                async def _gen():
+                    if self._alive:
+                        yield json.dumps({"type": "audio", "data":
+                                          {"audio": base64.b64encode(_pcm24k()).decode()}})
+                        yield json.dumps({"type": "done"})
+                    else:
+                        raise websockets.exceptions.ConnectionClosed(None, None)
+                return _gen()
+
+        wss = [_DeadThenAliveWS(True), _DeadThenAliveWS(True)]
+        idx = [0]
+
+        def _connect(*a, **k):
+            call_log.append("connect")
+            ws = wss[idx[0]]
+            idx[0] += 1
+            return ws
+        monkeypatch.setattr(websockets, "connect", _connect)
+
+        engine = SarvamBulbulEngine(api_key="test-key")
+        async with SarvamStreamingSession(engine) as session:
+            # Mark WS as dead between turns
+            session._ws = None  # simulate 408 drop
+            chunks = [c async for c in session.synthesize("reconnect me", "anushka", "hi-IN")]
+
+        assert len(chunks) == 1
+        assert "connect" in call_log
 
 
 # ── Resample sanity ───────────────────────────────────────────────────────────
