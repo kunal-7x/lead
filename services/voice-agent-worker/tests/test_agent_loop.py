@@ -146,6 +146,43 @@ async def test_collected_slots_accumulated_and_passed():
     )
 
 
+# ── Filler default-OFF test ──────────────────────────────────────────────────
+
+async def test_filler_off_by_default():
+    """With FILLER_ENABLED unset (default=false), no filler plays on a normal turn."""
+    import voice_agent.agent as agent_mod
+
+    # Confirm the module default is False (catches env leakage too)
+    assert not agent_mod._FILLER_ENABLED, (
+        "_FILLER_ENABLED default must be False — check os.getenv default in agent.py"
+    )
+
+    filler_played = []
+
+    # Capture [diag] calls: filler playing shows up as phase="filler" status="played"
+    filler_played_diags: list[dict] = []
+    original_diag = agent_mod._diag
+
+    def capturing_diag(session, turn, **kw):
+        if kw.get("phase") == "filler" and kw.get("status") == "played":
+            filler_played_diags.append(kw)
+        original_diag(session, turn, **kw)
+
+    stt = FakeSTT(transcript="yeh flat ka size kya hai", confidence=0.90)
+    llm = FakeLLM(reply="Is flat ka size 1200 square feet hai.", next_action="qualify")
+    tts = FakeTTS()
+
+    with patch.object(agent_mod, "_diag", capturing_diag):
+        ws = FakeFreeSwitchWS(n_speech_chunks=10, n_silence_chunks=40)
+        loop = make_loop(stt=stt, llm=llm, tts=tts)
+        await run_loop(loop, ws.all_chunks())
+
+    assert len(filler_played_diags) == 0, (
+        f"Filler audio played on a normal turn with FILLER_ENABLED=false — must not fire. "
+        f"diags={filler_played_diags}"
+    )
+
+
 # ── Workstream H: gap-triggered filler tests ─────────────────────────────────
 
 async def test_filler_played_when_tts_delayed():
