@@ -460,8 +460,11 @@ async def _llm_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncIt
         "",
         "अभी सिर्फ़ बोला जाने वाला जवाब दो — कोई JSON नहीं, कोई schema नहीं, "
         "कोई markdown या extra टिप्पणी नहीं। सिर्फ़ देवनागरी में, बोलचाल वाली "
-        "हिंदी में, MAXIMUM 1-2 छोटे वाक्य, 25 शब्दों से कम। "
-        "एक असली टेलीकॉलर की तरह — सीधा, संक्षिप्त, और असरदार।",
+        "हिंदी में। जवाब की लंबाई बातचीत की असली ज़रूरत के हिसाब से रखो — कोई "
+        "शब्द-सीमा नहीं। विचारों को 'मतलब/देखिए/तो/और' जैसे जोड़ने वाले शब्दों से "
+        "बहते हुए जोड़ो, ताकि लगे कि तुम बोलते-बोलते सोच रही हो। अकेला सूखा "
+        "'जी'/'ठीक है' मत बोलो — हमेशा बात आगे बढ़ाओ। एक असली इंसानी टेलीकॉलर "
+        "की तरह स्वाभाविक रूप से बोलो।",
     ]
     system = "\n".join(system_lines)
 
@@ -476,7 +479,7 @@ async def _llm_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncIt
         # NO response_format: json_object — plain text, real streaming from token 1
         "temperature": 0.3,
         "stream": True,
-        "max_tokens": 120,  # spoken reply is short; cap to avoid over-generation
+        "max_tokens": 400,  # allow genuine multi-sentence natural spoken replies
     }
     headers = {"Authorization": f"Bearer {api_key}"}
 
