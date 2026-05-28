@@ -27,6 +27,8 @@ class GroqLlamaBackend(LLMBackend):
         self._api_key = api_key or _GROQ_API_KEY
         self._timeout = timeout
         self._client = httpx.AsyncClient(timeout=timeout)
+        self._model = _MODEL
+        self._url = _GROQ_URL
 
     async def generate(self, req: LLMRequest, kb_context: str) -> tuple[BrainOutput, int, int]:
         messages = self._build_messages(req, kb_context)

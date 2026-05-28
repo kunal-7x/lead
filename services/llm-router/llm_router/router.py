@@ -137,11 +137,11 @@ class LLMRouter:
             active = DEFAULT_MODEL
         chain = _build_chain(active, list(self._backends.keys()))
 
-        # Try streaming-capable backend first (openrouter/groq_llama both support SSE streaming)
+        # Try streaming-capable backend first (groq_llama primary, cerebras_llama fallback, openrouter last)
         stream_backend = None
         for model_name in chain:
             backend = self._backends.get(model_name)
-            if backend is not None and backend.name in ("openrouter", "groq_llama"):
+            if backend is not None and backend.name in ("groq_llama", "cerebras_llama", "openrouter"):
                 stream_backend = (model_name, backend)
                 break
 
@@ -227,11 +227,11 @@ class LLMRouter:
             active = DEFAULT_MODEL
         chain = _build_chain(active, list(self._backends.keys()))
 
-        # Prefer streaming-capable backend for plain-text streaming
+        # Prefer streaming-capable backend for plain-text streaming (groq_llama primary, cerebras_llama fallback, openrouter last)
         stream_backend = None
         for model_name in chain:
             backend = self._backends.get(model_name)
-            if backend is not None and backend.name in ("openrouter", "groq_llama"):
+            if backend is not None and backend.name in ("groq_llama", "cerebras_llama", "openrouter"):
                 stream_backend = (model_name, backend)
                 break
 
@@ -360,9 +360,9 @@ async def _llm_stream(backend, req: LLMRequest, kb_context: str) -> AsyncIterato
     if not api_key:
         raise RuntimeError("No LLM API key configured (LLM_API_KEY / OPENROUTER_API_KEY / GROQ_API_KEY)")
 
-    # Resolve model: backend-specific override → env → default (OpenRouter gemini)
+    # Resolve model + URL: backend-specific → env → OpenRouter default
     model = getattr(backend, "_model", None) or _LLM_MODEL
-    base_url = _LLM_BASE_URL
+    base_url = getattr(backend, "_url", None) or _LLM_BASE_URL
 
     messages = backend._build_messages(req, kb_context)
     payload = {
@@ -444,9 +444,9 @@ async def _llm_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncIt
     if not hasattr(backend, "_build_messages"):
         raise RuntimeError("Backend does not support _build_messages")
 
-    # Resolve model + URL from env (allows runtime switch from OpenRouter → Groq etc.)
+    # Resolve model + URL: backend-specific → env → OpenRouter default
     model = getattr(backend, "_model", None) or _LLM_MODEL
-    base_url = _LLM_BASE_URL
+    base_url = getattr(backend, "_url", None) or _LLM_BASE_URL
 
     # Build a trimmed system prompt: same persona + KB, but instruct plain-text reply only.
     # Reuse the SHARED persona so the spoken path behaves identically to the batch path.

@@ -4,10 +4,10 @@ from typing import Any
 
 VALID_MODELS = {
     "qwen3_32b", "llama3_70b", "mistral_7b",
-    "groq_llama", "sarvam_105b", "openrouter",
+    "groq_llama", "cerebras_llama", "sarvam_105b", "openrouter",
     "openai_gpt4o", "anthropic_claude", "google_gemini",
 }
-DEFAULT_MODEL = "openrouter"
+DEFAULT_MODEL = "groq_llama"
 
 _GLOBAL_KEY = "llm:global_model"
 

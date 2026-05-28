@@ -38,7 +38,7 @@ def test_list_models(client):
     assert resp.status_code == 200
     body = resp.json()
     assert "groq_llama" in body["models"]
-    assert body["default"] == "openrouter"
+    assert body["default"] == "groq_llama"
 
 
 def test_generate(client):
