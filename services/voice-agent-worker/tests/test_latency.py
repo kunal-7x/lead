@@ -1,19 +1,27 @@
 from __future__ import annotations
 
 import time
+from unittest.mock import patch
 
 from tests.conftest import make_loop, run_loop
 from tests.fakes.fake_services import FakeFreeSwitchWS
 
 
 async def test_pipeline_overhead():
-    """With fake services returning instantly, pipeline overhead < 50ms per turn."""
+    """With fake services returning instantly, pipeline overhead < 500ms per turn.
+
+    Uses a tiny filler gap so the asyncio.wait_for timeout doesn't pad the
+    measurement — this test checks pipeline logic overhead, not filler timing.
+    """
+    import voice_agent.agent as agent_mod
+
     loop = make_loop()
     ws = FakeFreeSwitchWS()
 
-    t0 = time.perf_counter()
-    await run_loop(loop, ws.all_chunks())
-    elapsed_ms = (time.perf_counter() - t0) * 1000
+    with patch.object(agent_mod, "_FILLER_GAP_MS", 50.0):
+        t0 = time.perf_counter()
+        await run_loop(loop, ws.all_chunks())
+        elapsed_ms = (time.perf_counter() - t0) * 1000
 
     # Single turn through fake pipeline should be very fast
     assert elapsed_ms < 500, f"Pipeline took {elapsed_ms:.1f}ms (expected <500ms)"

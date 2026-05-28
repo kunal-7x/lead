@@ -101,10 +101,10 @@ _SENTENCE_END = re.compile(r'(?<=[.!?।])\s+')
 # This avoids the robotic "Hmm/Achha/Ek second" on every single turn.
 _FILLER_ENABLED = os.getenv("FILLER_ENABLED", "true").lower() == "true"
 # Only play a filler if first TTS audio hasn't started within this many ms after speech_end.
-# 400 ms: fast turns stay silent; only genuinely slow turns hear a filler.
-_FILLER_GAP_MS = float(os.getenv("FILLER_GAP_MS", "400"))
+# 1200 ms: Groq first-token ~400ms so filler fires only on genuinely slow turns.
+_FILLER_GAP_MS = float(os.getenv("FILLER_GAP_MS", "1200"))
 # Legacy alias — FILLER_DELAY_MS is still accepted but FILLER_GAP_MS takes priority if set.
-_FILLER_DELAY_MS = float(os.getenv("FILLER_GAP_MS", os.getenv("FILLER_DELAY_MS", "400")))
+_FILLER_DELAY_MS = float(os.getenv("FILLER_GAP_MS", os.getenv("FILLER_DELAY_MS", "1200")))
 
 # Short, natural Hindi fillers (<1 s audio each). Rotated round-robin.
 _FILLER_TEXTS = ["जी...", "हाँ जी", "एक सेकंड", "जी बिल्कुल"]
@@ -148,11 +148,20 @@ def _word_count(text: str) -> int:
     return len(text.split())
 
 
+_CHUNK_MIN_WORDS = 15   # below this, only flush on terminal punctuation
+_CHUNK_MAX_WORDS = 45   # force-flush regardless of punctuation
+
 def _should_flush(buffer: str) -> bool:
-    """Return True if buffer should be sent to TTS now."""
-    if _SENTENCE_END.search(buffer):
+    """Semantic chunking: flush on sentence-end punctuation or MAX word count.
+
+    - Force-flush at MAX words to avoid unbounded buffering.
+    - Flush on terminal punctuation ([.!?।]) — complete thought arrived.
+    - Never split on comma alone; short replies stay in ONE chunk.
+    """
+    wc = _word_count(buffer)
+    if wc >= _CHUNK_MAX_WORDS:
         return True
-    if _word_count(buffer) >= 12:
+    if _SENTENCE_END.search(buffer):
         return True
     return False
 
