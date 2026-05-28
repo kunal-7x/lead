@@ -99,17 +99,17 @@ _SENTENCE_END = re.compile(r'(?<=[.!?।])\s+')
 # Set FILLER_ENABLED=true AND FILLER_DELAY_MS to the threshold (ms) after which
 # a filler is played only if first audio hasn't started yet.
 # This avoids the robotic "Hmm/Achha/Ek second" on every single turn.
-_FILLER_ENABLED = os.getenv("FILLER_ENABLED", "true").lower() == "true"
+_FILLER_ENABLED = os.getenv("FILLER_ENABLED", "false").lower() == "true"
 # Sarvam streaming-TTS WS path (HIGH risk — touches real-time audio). DEFAULT OFF.
 # When true, _tts_worker consumes streaming PCM chunks and feeds send_audio as they
 # arrive (first-audio ~0.3s). When false, the batch synthesize() path is used UNCHANGED.
 # On any streaming error the worker transparently falls back to batch synthesize().
 _TTS_STREAMING_WS = os.getenv("TTS_STREAMING_WS", "false").lower() == "true"
 # Only play a filler if first TTS audio hasn't started within this many ms after speech_end.
-# 1200 ms: Groq first-token ~400ms so filler fires only on genuinely slow turns.
-_FILLER_GAP_MS = float(os.getenv("FILLER_GAP_MS", "1200"))
+# 2500 ms: conservative threshold — filler should only fire on genuinely very slow turns.
+_FILLER_GAP_MS = float(os.getenv("FILLER_GAP_MS", "2500"))
 # Legacy alias — FILLER_DELAY_MS is still accepted but FILLER_GAP_MS takes priority if set.
-_FILLER_DELAY_MS = float(os.getenv("FILLER_GAP_MS", os.getenv("FILLER_DELAY_MS", "1200")))
+_FILLER_DELAY_MS = float(os.getenv("FILLER_GAP_MS", os.getenv("FILLER_DELAY_MS", "2500")))
 
 # Short, natural Hindi fillers (<1 s audio each). Rotated round-robin.
 _FILLER_TEXTS = ["जी...", "हाँ जी", "एक सेकंड", "जी बिल्कुल"]
@@ -153,21 +153,30 @@ def _word_count(text: str) -> int:
     return len(text.split())
 
 
-_CHUNK_MIN_WORDS = 15   # below this, only flush on terminal punctuation
-_CHUNK_MAX_WORDS = 45   # force-flush regardless of punctuation
+_CHUNK_MIN_WORDS = 12   # below this, hold and join with next clause (avoid choppy packets)
+_CHUNK_MAX_WORDS = 35   # force-flush regardless of punctuation (human breath window)
+_CHUNK_FIRST_WORDS = 8  # flush first chunk earlier to keep first-audio latency low
 
-def _should_flush(buffer: str) -> bool:
-    """Semantic chunking: flush on sentence-end punctuation or MAX word count.
+def _should_flush(buffer: str, is_first_chunk: bool = False, llm_done: bool = False) -> bool:
+    """Breath-rhythm chunking: flush on sentence-end + minimum word threshold.
 
-    - Force-flush at MAX words to avoid unbounded buffering.
-    - Flush on terminal punctuation ([.!?।]) — complete thought arrived.
-    - Never split on comma alone; short replies stay in ONE chunk.
+    - Force-flush at MAX words (hard ceiling).
+    - First chunk: flush at first sentence-end with >=8 words for low first-audio latency.
+    - Subsequent chunks: flush on sentence-end only if >=12 words (thought-group buffering).
+      If buffer is under MIN and LLM stream is still active, HOLD — join with next clause.
+    - Always flush when LLM stream ends (llm_done=True) regardless of word count.
+    - Never split on comma alone; a lone comma-clause joins the next sentence.
+
+    [diag] phase=chunk info is logged by the caller with actual sizes.
     """
     wc = _word_count(buffer)
     if wc >= _CHUNK_MAX_WORDS:
         return True
+    if llm_done:
+        return bool(buffer.strip())
     if _SENTENCE_END.search(buffer):
-        return True
+        threshold = _CHUNK_FIRST_WORDS if is_first_chunk else _CHUNK_MIN_WORDS
+        return wc >= threshold
     return False
 
 
@@ -1055,6 +1064,7 @@ class AgentLoop:
         try:
             # ── Consume plain-text token stream ────────────────────────────────
             first_token_logged = False
+            _chunk_is_first = True  # breath-rhythm: first chunk uses lower threshold
             async for token, _ in self._llm.generate_stream_text(
                 self.ctx, stt_result.text, self._dialog_history,
                 collected_slots=_slots_snapshot,
@@ -1078,12 +1088,17 @@ class AgentLoop:
                     token_buffer += token
                     full_spoken += token
 
-                    if _should_flush(token_buffer):
+                    if _should_flush(token_buffer, is_first_chunk=_chunk_is_first):
                         sentence = token_buffer.strip()
                         token_buffer = ""
                         if sentence:
                             if _t_first_sentence_queued is None:
                                 _t_first_sentence_queued = time.time()
+                            _diag(self.ctx.session_id, self._turn_index,
+                                  phase="chunk",
+                                  words=_word_count(sentence),
+                                  first=_chunk_is_first)
+                            _chunk_is_first = False
                             await tts_queue.put((sentence, False))
 
                 # Barge-in during LLM streaming: record partial and abort
@@ -1091,11 +1106,17 @@ class AgentLoop:
                     self._interrupted_partial = full_spoken.strip() or None
                     break
 
-            # Flush any remaining buffer
+            # Flush any remaining buffer (llm_done=True → always flush)
             if not self._stop_playback.is_set() and token_buffer.strip():
+                sentence = token_buffer.strip()
                 if _t_first_sentence_queued is None:
                     _t_first_sentence_queued = time.time()
-                await tts_queue.put((token_buffer.strip(), False))
+                _diag(self.ctx.session_id, self._turn_index,
+                      phase="chunk",
+                      words=_word_count(sentence),
+                      first=_chunk_is_first,
+                      llm_done=True)
+                await tts_queue.put((sentence, False))
             await tts_queue.put(("", True))  # signal TTS worker done
 
             # Wait for TTS to finish playing
@@ -1248,6 +1269,7 @@ class AgentLoop:
                     )
 
         tts_task = asyncio.create_task(_tts_worker())
+        _chunk_is_first = True  # breath-rhythm: first chunk uses lower word threshold
 
         try:
             async for token, final_brain in self._llm.generate_stream(
@@ -1274,9 +1296,15 @@ class AgentLoop:
                         )
                         brain_out = final_brain
 
-                    # Flush any remaining buffer as last sentence
+                    # Flush any remaining buffer (llm_done=True)
                     if token_buffer.strip():
-                        await tts_queue.put((token_buffer.strip(), False))
+                        sentence = token_buffer.strip()
+                        _diag(self.ctx.session_id, self._turn_index,
+                              phase="chunk",
+                              words=_word_count(sentence),
+                              first=_chunk_is_first,
+                              llm_done=True)
+                        await tts_queue.put((sentence, False))
                     # Signal TTS worker to finish
                     await tts_queue.put(("", True))
                     break
@@ -1286,10 +1314,15 @@ class AgentLoop:
                     token_buffer += token
                     full_reply += token
 
-                    if _should_flush(token_buffer):
+                    if _should_flush(token_buffer, is_first_chunk=_chunk_is_first):
                         sentence = token_buffer.strip()
                         token_buffer = ""
                         if sentence:
+                            _diag(self.ctx.session_id, self._turn_index,
+                                  phase="chunk",
+                                  words=_word_count(sentence),
+                                  first=_chunk_is_first)
+                            _chunk_is_first = False
                             await tts_queue.put((sentence, False))
 
             # Wait for TTS worker to drain
