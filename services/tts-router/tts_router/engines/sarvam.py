@@ -142,15 +142,21 @@ class SarvamBulbulEngine(TTSEngine):
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("websockets package not installed; streaming TTS unavailable") from exc
 
-        speaker = voice_id if voice_id in _VALID_SPEAKERS else _DEFAULT_SPEAKER
-        # URL is plain (no query params) — model goes inside the config frame.
+        # Sarvam WS /ws endpoint defaults to bulbul:v2 regardless of model field
+        # in config (confirmed empirically: "model" field in config is silently ignored).
+        # WS streaming only supports v2 speakers; fall back to anushka for v3 voices.
+        _WS_VALID_SPEAKERS = {v.id for v in _VOICES_V2}
+        speaker = voice_id if voice_id in _WS_VALID_SPEAKERS else "anushka"
+
+        # URL is plain (no query params, no path model) — the WS endpoint controls model server-side.
         url = _WS_URL
         headers = {"API-Subscription-Key": self._api_key}
 
         config = {
             "type": "config",
             "data": {
-                "model": _TTS_MODEL,           # model in config frame, NOT in URL
+                # NOTE: do NOT include "model" — Sarvam WS ignores it and defaults to
+                # bulbul:v2. Using v2-compatible speaker (anushka) for WS path.
                 "target_language_code": _lang_code(lang),
                 "speaker": speaker,
                 "pace": 1.0,
@@ -162,8 +168,6 @@ class SarvamBulbulEngine(TTSEngine):
                 "sample_rate": _STREAM_SAMPLE_RATE,
             },
         }
-        # bulbul:v3 rejects pitch/loudness — intentionally omitted.
-        # bulbul:v3 accepts only pace (0.5-2.0) + temperature (0.01-1.0).
 
         try:
             ws_cm = websockets.connect(
@@ -176,33 +180,39 @@ class SarvamBulbulEngine(TTSEngine):
         try:
             async with ws_cm as ws:
                 await ws.send(json.dumps(config))
-                await ws.send(json.dumps({"type": "text", "data": {"text": text}}))
+                await ws.send(json.dumps({"type": "text", "data": {"text": text,
+                                                                    "send_completion_event": True}}))
                 await ws.send(json.dumps({"type": "flush"}))
 
-                async for raw in ws:
-                    if isinstance(raw, bytes):
-                        # Some deployments stream raw PCM frames directly.
-                        yield raw
-                        continue
-                    try:
-                        msg = json.loads(raw)
-                    except (ValueError, TypeError):
-                        continue
-                    mtype = msg.get("type", "")
-                    if mtype in ("audio", "audio_chunk"):
-                        data_field = msg.get("data", {})
-                        audio_b64 = data_field.get("audio") or data_field.get("audio_chunk") or ""
-                        if audio_b64:
-                            yield base64.b64decode(audio_b64)
-                    elif mtype in ("flush_done", "done", "complete", "completion"):
-                        break
-                    elif mtype == "error":
-                        err_data = msg.get("data") or msg.get("message") or msg
-                        err_code = (msg.get("data") or {}).get("code") if isinstance(msg.get("data"), dict) else None
-                        log.error(
-                            "sarvam_ws_error_frame type=error code=%s body=%r", err_code, err_data
-                        )
-                        raise RuntimeError(f"sarvam_stream_error code={err_code}: {err_data}")
+                try:
+                    async for raw in ws:
+                        if isinstance(raw, bytes):
+                            # Some deployments stream raw PCM frames directly.
+                            yield raw
+                            continue
+                        try:
+                            msg = json.loads(raw)
+                        except (ValueError, TypeError):
+                            continue
+                        mtype = msg.get("type", "")
+                        if mtype in ("audio", "audio_chunk"):
+                            data_field = msg.get("data", {})
+                            audio_b64 = data_field.get("audio") or data_field.get("audio_chunk") or ""
+                            if audio_b64:
+                                yield base64.b64decode(audio_b64)
+                        elif mtype in ("flush_done", "done", "complete", "completion"):
+                            break
+                        elif mtype == "error":
+                            err_data = msg.get("data") or msg.get("message") or msg
+                            err_code = (msg.get("data") or {}).get("code") if isinstance(msg.get("data"), dict) else None
+                            log.error(
+                                "sarvam_ws_error_frame type=error code=%s body=%r", err_code, err_data
+                            )
+                            raise RuntimeError(f"sarvam_stream_error code={err_code}: {err_data}")
+                except websockets.exceptions.ConnectionClosed:
+                    # Sarvam WS may close connection after streaming audio without
+                    # sending a done/completion frame — treat close as normal end.
+                    log.debug("sarvam_ws_connection_closed_normally")
         except websockets.exceptions.InvalidStatus as exc:
             # Capture the full HTTP response body from 403/4xx rejections.
             status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
