@@ -25,6 +25,10 @@ log = logging.getLogger(__name__)
 # TTS_ELEVENLABS_ENABLED=false (default) — ElevenLabs disabled (returns 402 on free tier)
 # SARVAM_TTS_MODEL — override Sarvam model slug (default bulbul:v2)
 _TTS_ELEVENLABS_ENABLED = os.getenv("TTS_ELEVENLABS_ENABLED", "false").lower() == "true"
+# Sarvam bulbul:v3 streaming-TTS WS path. DEFAULT OFF — flipping it on changes the
+# real-time audio path; a regression means SILENT calls. When false, the worker and
+# the batch endpoints use the safe REST synthesize() path UNCHANGED.
+_TTS_STREAMING_WS = os.getenv("TTS_STREAMING_WS", "false").lower() == "true"
 
 app = FastAPI(title="tts-router", version="0.1.0")
 _router: TTSRouter | None = None
@@ -256,3 +260,92 @@ async def _ws_batch_fallback(
     except Exception as exc:
         log.error("Batch fallback also failed: %s", exc)
         await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
+
+
+@app.websocket("/v1/tts/sarvam/stream")
+async def tts_sarvam_stream_ws(websocket: WebSocket) -> None:
+    """Sarvam Bulbul:v3 streaming-TTS WebSocket endpoint (flag-gated).
+
+    CONTRACT:
+      Client → Server (one text JSON frame per utterance):
+        {"text": "<full sentence>", "voice_id": "<id>", "lang": "hi-en"}
+
+      Server → Client (binary frames):
+        Raw L16 PCM16 LE 8kHz audio bytes. First chunk arrives ~0.3s after the
+        text frame (vs ~2.2s REST). PCM (not µ-law) because the worker's send_audio
+        µ-law-encodes itself — emitting µ-law here would double-encode.
+
+      Server → Client (text JSON on completion):
+        {"type": "done", "first_chunk_ms": <int>, "total_chunks": <int>, "engine": "sarvam_stream"}
+
+      Server → Client (text JSON on error):
+        {"type": "error", "message": "<str>"}
+
+    Feature-flag: TTS_STREAMING_WS=false (default) → returns an error frame so the
+    worker uses the safe batch REST path. Only when TTS_STREAMING_WS=true does this
+    stream Sarvam WS audio. The engine yields 24kHz L16 PCM; we resample to 8kHz here.
+    """
+    await websocket.accept()
+    if not _TTS_STREAMING_WS:
+        await websocket.send_text(
+            json.dumps({"type": "error", "message": "streaming_disabled"})
+        )
+        await websocket.close()
+        return
+
+    import numpy as np
+
+    from tts_router.engines.sarvam import SarvamBulbulEngine, _STREAM_SAMPLE_RATE
+
+    def _resample_to_8k_pcm(pcm: bytes) -> bytes:
+        """PCM16 LE @ _STREAM_SAMPLE_RATE → PCM16 LE 8kHz (numpy linear interp)."""
+        samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+        if len(samples) == 0:
+            return b""
+        if _STREAM_SAMPLE_RATE != 8000:
+            ratio = 8000.0 / _STREAM_SAMPLE_RATE
+            n_out = max(1, int(len(samples) * ratio))
+            x_in = np.arange(len(samples), dtype=np.float32)
+            x_out = np.linspace(0, len(samples) - 1, n_out)
+            samples = np.interp(x_out, x_in, samples)
+        return np.clip(samples, -32768, 32767).astype("<i2").tobytes()
+
+    engine = SarvamBulbulEngine()
+    try:
+        # Per-session reuse: loop, synthesising one utterance per inbound text frame
+        # until the worker disconnects on hangup.
+        while True:
+            raw = await websocket.receive_text()
+            msg = json.loads(raw)
+            text = msg.get("text", "")
+            voice_id = msg.get("voice_id", "")
+            lang = msg.get("lang", "hi-en")
+            if not text:
+                await websocket.send_text(json.dumps(
+                    {"type": "done", "first_chunk_ms": 0, "total_chunks": 0, "engine": "silence"}))
+                continue
+            t0 = time.time()
+            first_chunk_ms = -1
+            total_chunks = 0
+            async for pcm_chunk in engine.synthesize_stream(text, voice_id, lang):
+                pcm8k = _resample_to_8k_pcm(pcm_chunk)
+                if not pcm8k:
+                    continue
+                if first_chunk_ms < 0:
+                    first_chunk_ms = int((time.time() - t0) * 1000)
+                total_chunks += 1
+                await websocket.send_bytes(pcm8k)
+            log.info("[diag] phase=tts_stream first_chunk_ms=%d total_chunks=%d",
+                     first_chunk_ms, total_chunks)
+            await websocket.send_text(
+                json.dumps({"type": "done", "first_chunk_ms": first_chunk_ms,
+                            "total_chunks": total_chunks, "engine": "sarvam_stream"})
+            )
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        log.error("tts_sarvam_stream_ws error: %s", exc)
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
+        except Exception:
+            pass

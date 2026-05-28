@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import base64
+import json
+import logging
 import os
+from typing import AsyncIterator
 
 import httpx
 
@@ -9,9 +12,16 @@ from tts_router.audio import strip_wav_header
 from tts_router.engines.base import TTSEngine
 from tts_router.models import VoiceInfo
 
+log = logging.getLogger(__name__)
+
 _API_KEY = os.getenv("SARVAM_API_KEY", "").strip()  # strip \r\n from Windows .env files
 _URL = "https://api.sarvam.ai/text-to-speech"
+# Streaming WS endpoint (bulbul:v3). model is a query param per Sarvam contract.
+_WS_URL = "wss://api.sarvam.ai/text-to-speech/stream"
 _TIMEOUT = 10.0
+# Streaming sample rate: bulbul:v3 WS defaults to 24000 Hz PCM16. We request the
+# Sarvam default and resample to 8 kHz on the worker side (audio output is L16 PCM).
+_STREAM_SAMPLE_RATE = int(os.getenv("SARVAM_STREAM_SAMPLE_RATE", "24000"))
 # Override TTS model via env (default bulbul:v3)
 _TTS_MODEL = os.getenv("SARVAM_TTS_MODEL", "bulbul:v3")
 
@@ -92,6 +102,93 @@ class SarvamBulbulEngine(TTSEngine):
         wav_b64 = body["audios"][0]
         wav = base64.b64decode(wav_b64)
         return strip_wav_header(wav)
+
+    async def synthesize_stream(
+        self, text: str, voice_id: str, lang: str
+    ) -> AsyncIterator[bytes]:
+        """Stream TTS audio from Sarvam Bulbul:v3 over WebSocket.
+
+        LATENCY: first-audio ~0.3s vs ~2.2s for the blocking REST synthesize().
+        We open one WS per call here; the worker reuses a single WS per session
+        via its own client wrapper (see voice_agent.clients).
+
+        Protocol (bulbul:v3 streaming, per tts_sarvam_research.md):
+          1. open WS to wss://api.sarvam.ai/text-to-speech/stream
+             auth header: API-Subscription-Key: <SARVAM_API_KEY>
+          2. send {"type":"config","data":{...}} FIRST — model bulbul:v3,
+             language hi-IN, speaker priya, pace 1.0, temperature 0.6,
+             output_audio_codec linear16, sample_rate 24000.
+             bulbul:v3 REJECTS pitch/loudness — never send them.
+          3. send {"type":"text","data":{"text": <chunk>}}
+          4. send {"type":"flush"} to force synthesis of buffered text
+          5. receive {"type":"audio","data":{"audio": <base64 PCM16>}} chunks
+          6. completion event ends the stream
+
+        Yields:
+            bytes: raw L16 PCM16 little-endian at _STREAM_SAMPLE_RATE (default 24kHz).
+            The worker resamples 24k→8k before feeding send_audio (which µ-law-encodes).
+            Output format mirrors synthesize() (L16 PCM) — NOT µ-law, to avoid
+            double-encoding in send_audio.
+
+        Raises:
+            ValueError: if API key missing.
+            Exception: on WS failure — caller falls back to batch synthesize().
+        """
+        if not self._api_key:
+            raise ValueError("SARVAM_API_KEY not configured")
+        try:
+            import websockets  # type: ignore
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError("websockets package not installed; streaming TTS unavailable") from exc
+
+        speaker = voice_id if voice_id in _VALID_SPEAKERS else _DEFAULT_SPEAKER
+        url = f"{_WS_URL}?model={_TTS_MODEL}"
+        headers = {"API-Subscription-Key": self._api_key}
+
+        config = {
+            "type": "config",
+            "data": {
+                "target_language_code": _lang_code(lang),
+                "speaker": speaker,
+                "pace": 1.0,
+                "temperature": 0.6,
+                "enable_preprocessing": True,
+                "output_audio_codec": "linear16",
+                "min_buffer_size": 50,
+                "max_chunk_length": 250,
+            },
+        }
+        # Request 8kHz directly if Sarvam honours it; otherwise it emits 24kHz and
+        # the worker resamples. Both are L16 PCM.
+        config["data"]["sample_rate"] = _STREAM_SAMPLE_RATE
+        # bulbul:v3 rejects pitch/loudness — intentionally omitted.
+
+        async with websockets.connect(
+            url, additional_headers=headers, open_timeout=3, close_timeout=2
+        ) as ws:
+            await ws.send(json.dumps(config))
+            await ws.send(json.dumps({"type": "text", "data": {"text": text}}))
+            await ws.send(json.dumps({"type": "flush"}))
+
+            async for raw in ws:
+                if isinstance(raw, bytes):
+                    # Some deployments stream raw PCM frames directly.
+                    yield raw
+                    continue
+                try:
+                    msg = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+                mtype = msg.get("type", "")
+                if mtype in ("audio", "audio_chunk"):
+                    data = msg.get("data", {})
+                    audio_b64 = data.get("audio") or data.get("audio_chunk") or ""
+                    if audio_b64:
+                        yield base64.b64decode(audio_b64)
+                elif mtype in ("flush_done", "done", "complete", "completion"):
+                    break
+                elif mtype == "error":
+                    raise RuntimeError(f"sarvam_stream_error: {msg.get('data') or msg.get('message')}")
 
     async def health_check(self) -> bool:
         """Real ping: tiny TTS call. Cached at the router layer (5s TTL)."""
