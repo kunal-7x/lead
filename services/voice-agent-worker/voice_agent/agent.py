@@ -72,10 +72,13 @@ def _is_oov_english_noise(text_stripped: str, confidence: float) -> bool:
 
 # ── Barge-in debounce ─────────────────────────────────────────────────────────
 # Number of consecutive SileroVAD-positive 20ms chunks required to confirm a
-# real barge-in. At 20ms/chunk this is 150ms at 8 chunks and 250ms at 12.
-# A single cough / click (1-2 frames) must NOT trigger; 8 chunks ≈ 160ms is
-# a solid lower bound for intentional speech in human factors literature.
-_BARGEIN_MIN_SPEECH_CHUNKS: int = 8  # ≈ 160ms at 20ms/chunk
+# real barge-in. Raised to 22 (~440ms) to prevent acoustic echo / faint
+# backchannels from self-interrupting the AI mid-sentence.
+# Tunable via BARGEIN_MIN_SPEECH_CHUNKS env var.
+# At 20ms/chunk: 22 ≈ 440ms (deliberate caller interruption), 8 ≈ 160ms (old).
+_BARGEIN_MIN_SPEECH_CHUNKS: int = int(
+    os.getenv("BARGEIN_MIN_SPEECH_CHUNKS", "22")
+)  # ≈ 440ms at 20ms/chunk — requires sustained deliberate speech
 
 # Backchannel tokens: short acknowledgements that should NOT count as real
 # interrupts even after VAD confirms speech. Extends _NOISE_TOKENS with Hindi
@@ -234,6 +237,11 @@ class AgentLoop:
         self._turn_index = 0
         self._playing_tts = False
         self._stop_playback = asyncio.Event()
+        # Incremented each time TTS starts playing a new sentence/chunk.
+        # The barge-in loop resets _bargein_consec whenever this changes so
+        # that inter-chunk synthesis gaps don't let partial counts accumulate
+        # across breath-chunks and trigger a false barge-in.
+        self._tts_chunk_seq: int = 0
         self._filler_index = 0  # round-robin through fillers
         # Tracks the currently-running _process_utterance Task for barge-in cancel
         self._utterance_task: asyncio.Task | None = None
@@ -472,6 +480,9 @@ class AgentLoop:
 
         # Barge-in debounce counter: consecutive VAD-positive chunks during TTS
         _bargein_consec: int = 0
+        # Tracks _tts_chunk_seq at last reset; reset counter when seq changes
+        # (new breath-chunk started → fresh debounce window, no carry-over).
+        _bargein_seen_chunk_seq: int = 0
         # Speech chunk counter for diag (reset each utterance)
         _speech_chunk_count: int = 0
 
@@ -506,11 +517,29 @@ class AgentLoop:
             # ── Full-duplex barge-in path ─────────────────────────────────────
             # While TTS is playing we count consecutive speech frames. Only after
             # _BARGEIN_MIN_SPEECH_CHUNKS consecutive frames do we confirm a real
-            # barge-in (debounce: ignores coughs/clicks). A single non-speech
+            # barge-in (debounce: ignores coughs/clicks/echo). A single non-speech
             # frame resets the counter so the caller must sustain speech.
+            # Counter also resets on each new TTS breath-chunk (via _tts_chunk_seq)
+            # so partial counts from one chunk can't carry over into the next.
             if self._playing_tts:
+                # Reset debounce if a new breath-chunk started since last check
+                if self._tts_chunk_seq != _bargein_seen_chunk_seq:
+                    if _bargein_consec > 0:
+                        _diag(self.ctx.session_id, self._turn_index,
+                              phase="bargein_rejected",
+                              reason="inter_chunk_reset",
+                              consec_frames=_bargein_consec,
+                              chunk_seq=self._tts_chunk_seq)
+                    _bargein_consec = 0
+                    _bargein_seen_chunk_seq = self._tts_chunk_seq
                 if is_speech:
                     _bargein_consec += 1
+                    # Diagnostic: candidate (not yet confirmed)
+                    if _bargein_consec == 1:
+                        _diag(self.ctx.session_id, self._turn_index,
+                              phase="bargein_candidate",
+                              consec_frames=_bargein_consec,
+                              chunk_seq=self._tts_chunk_seq)
                     if _bargein_consec >= _BARGEIN_MIN_SPEECH_CHUNKS:
                         # Confirmed barge-in — interrupt AI reply
                         _milestone("bargein_confirmed",
@@ -569,6 +598,12 @@ class AgentLoop:
                                   consec_frames=_bargein_consec)
                 else:
                     # Non-speech during TTS — reset debounce counter
+                    if _bargein_consec > 0:
+                        _diag(self.ctx.session_id, self._turn_index,
+                              phase="bargein_rejected",
+                              reason="silence_reset",
+                              consec_frames=_bargein_consec,
+                              chunk_seq=self._tts_chunk_seq)
                     _bargein_consec = 0
                 continue  # keep consuming; utterance task runs concurrently
 
@@ -1005,6 +1040,10 @@ class AgentLoop:
                 if self._stop_playback.is_set():
                     break
                 try:
+                    # Increment chunk sequence so the audio loop resets
+                    # _bargein_consec — prevents inter-chunk count accumulation
+                    # from triggering false barge-in between breath chunks.
+                    self._tts_chunk_seq += 1
                     _t_synth_start = time.time()
                     # Flag-gated streaming path (first-audio ~0.3s). Streams chunks
                     # to send_audio as they arrive. Returns False → use batch below.
@@ -1227,6 +1266,9 @@ class AgentLoop:
                 if self._stop_playback.is_set():
                     break
                 try:
+                    # Increment chunk sequence so the audio loop resets
+                    # _bargein_consec — prevents inter-chunk count accumulation.
+                    self._tts_chunk_seq += 1
                     # Flag-gated streaming path (first-audio ~0.3s); False → batch.
                     streamed = await self._synth_and_play_stream(sentence, send_audio)
                     if not streamed and not self._stop_playback.is_set():

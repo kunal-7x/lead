@@ -8,6 +8,9 @@ from tests.conftest import make_loop, make_ctx, run_loop
 from tests.fakes.fake_services import FakeSTT, FakeLLM, FakeTTS
 import struct
 
+# Short blip threshold: must be strictly below the real barge-in threshold
+_SHORT_BLIP_FRAMES = max(1, _BARGEIN_MIN_SPEECH_CHUNKS // 4)  # ≤ 25% of threshold
+
 
 def _speech() -> bytes:
     return struct.pack("<160h", *([1000] * 160))
@@ -27,7 +30,7 @@ _N_SILENCE = SILENCE_THRESHOLD_MS // CHUNK_MS
 async def test_barge_in_stops_tts():
     """Confirmed barge-in (≥_BARGEIN_MIN_SPEECH_CHUNKS consecutive VAD frames while
     TTS playing) → stop_playback JSON sent."""
-    vad = FakeVAD(speech_chunks=10)
+    vad = FakeVAD(speech_chunks=_BARGEIN_MIN_SPEECH_CHUNKS + 5)
     stt = FakeSTT(confidence=0.90)
     llm = FakeLLM(reply="Reply here.", next_action="qualify")
     tts = FakeTTS()
@@ -37,8 +40,8 @@ async def test_barge_in_stops_tts():
     sent_json = []
 
     async def audio_source():
-        # First utterance: 10 speech + enough silence to trigger processing
-        for _ in range(10):
+        # First utterance: speech + enough silence to trigger processing
+        for _ in range(_BARGEIN_MIN_SPEECH_CHUNKS + 5):
             yield _speech()
         for _ in range(_N_SILENCE + 2):
             yield _silence()
@@ -117,7 +120,7 @@ async def test_debounce_single_frame_no_interrupt():
 
 async def test_debounce_threshold_exact():
     """Exactly _BARGEIN_MIN_SPEECH_CHUNKS frames must trigger barge-in."""
-    loop = make_loop(vad=FakeVAD(speech_chunks=20))
+    loop = make_loop(vad=FakeVAD(speech_chunks=_BARGEIN_MIN_SPEECH_CHUNKS + 5))
     sent_json = []
 
     async def source():
@@ -200,13 +203,14 @@ async def test_full_duplex_utterance_task_cancelled_on_bargein():
 
 
 async def test_bargein_min_speech_chunks_constant():
-    """_BARGEIN_MIN_SPEECH_CHUNKS must be in [6, 15] for production safety.
+    """_BARGEIN_MIN_SPEECH_CHUNKS must be in [6, 30] for production safety.
 
-    Too low (< 6) → false triggers from background noise.
-    Too high (> 15) → perceptible lag before barge-in is felt.
+    Too low (< 6) → false triggers from background noise / acoustic echo.
+    Too high (> 30) → perceptible lag before barge-in is felt (600ms+).
+    Default raised to 22 (~440ms) to avoid self-interrupt from echo.
     """
-    assert 6 <= _BARGEIN_MIN_SPEECH_CHUNKS <= 15, (
-        f"_BARGEIN_MIN_SPEECH_CHUNKS={_BARGEIN_MIN_SPEECH_CHUNKS} out of safe range [6,15]"
+    assert 6 <= _BARGEIN_MIN_SPEECH_CHUNKS <= 30, (
+        f"_BARGEIN_MIN_SPEECH_CHUNKS={_BARGEIN_MIN_SPEECH_CHUNKS} out of safe range [6,30]"
     )
 
 
@@ -271,4 +275,117 @@ async def test_playing_tts_true_during_send_audio_false_after():
     assert all(flag_during_send), (
         f"_playing_tts was False during some send_audio calls — "
         f"barge-in window was not fully covered. flags={flag_during_send}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# New tests: echo/short-blip guard + inter-chunk reset + sustained speech
+# ---------------------------------------------------------------------------
+
+async def test_short_blip_during_playback_does_not_trigger_bargein():
+    """A short echo/cough-like blip (_SHORT_BLIP_FRAMES consecutive VAD frames)
+    during TTS playback must NOT trigger barge-in.
+
+    This is the core regression guard for the bug where acoustic echo from
+    the AI's own TTS audio (bleeding into the inbound STT track) caused
+    bargein_confirmed to fire and cut the AI mid-sentence.
+    """
+    # _SHORT_BLIP_FRAMES is well below the new threshold (22 frames / 440ms)
+    assert _SHORT_BLIP_FRAMES < _BARGEIN_MIN_SPEECH_CHUNKS, (
+        f"Blip test misconfigured: blip={_SHORT_BLIP_FRAMES} >= threshold={_BARGEIN_MIN_SPEECH_CHUNKS}"
+    )
+
+    loop = make_loop(vad=FakeVAD(speech_chunks=_SHORT_BLIP_FRAMES + 2))
+    sent_json = []
+
+    async def source():
+        loop._playing_tts = True
+        # Inject a short blip (simulating echo or brief background noise)
+        for _ in range(_SHORT_BLIP_FRAMES):
+            yield _speech()
+        # Silence follows — debounce resets
+        for _ in range(10):
+            yield _silence()
+        loop._playing_tts = False
+        for _ in range(20):
+            yield _silence()
+
+    await loop.run(source(), lambda a: None, lambda m: sent_json.append(m))
+
+    types = [m.get("type") for m in sent_json]
+    assert "stop_playback" not in types, (
+        f"Short blip ({_SHORT_BLIP_FRAMES} frames) must NOT trigger barge-in, got: {types}"
+    )
+
+
+async def test_sustained_speech_during_playback_triggers_bargein():
+    """A sustained, deliberate caller interruption (_BARGEIN_MIN_SPEECH_CHUNKS
+    consecutive VAD frames) during TTS playback MUST trigger barge-in.
+
+    Verifies that raising the threshold did NOT disable real barge-in.
+    """
+    loop = make_loop(vad=FakeVAD(speech_chunks=_BARGEIN_MIN_SPEECH_CHUNKS + 5))
+    sent_json = []
+
+    async def source():
+        loop._playing_tts = True
+        # Sustained speech: exactly the threshold
+        for _ in range(_BARGEIN_MIN_SPEECH_CHUNKS):
+            yield _speech()
+        for _ in range(20):
+            yield _silence()
+
+    await loop.run(source(), lambda a: None, lambda m: sent_json.append(m))
+
+    types = [m.get("type") for m in sent_json]
+    assert "stop_playback" in types, (
+        f"Sustained speech ({_BARGEIN_MIN_SPEECH_CHUNKS} frames) MUST trigger barge-in, got: {types}"
+    )
+
+
+async def test_inter_chunk_counter_reset_prevents_accumulation():
+    """Partial speech counts from one breath-chunk must NOT carry over to the
+    next breath-chunk and trigger a false barge-in.
+
+    Bug: with old code, 7 frames during chunk 1 (below threshold of 8)
+    + 1 frame during chunk 2 synthesis gap = 8 total → false barge-in fired.
+    Fix: _tts_chunk_seq increment resets _bargein_consec between chunks.
+    """
+    # Use a threshold that allows testing: need blip < threshold but blip*2 >= threshold
+    # With threshold=22: half_blip=11 * 2 = 22 >= 22, each alone (11) < 22. Perfect.
+    half_blip = _BARGEIN_MIN_SPEECH_CHUNKS // 2
+    assert half_blip < _BARGEIN_MIN_SPEECH_CHUNKS, "threshold must be > 1 for this test"
+    assert half_blip * 2 >= _BARGEIN_MIN_SPEECH_CHUNKS, "half_blip*2 must hit threshold"
+
+    loop = make_loop(vad=FakeVAD(speech_chunks=half_blip + 5))
+    sent_json = []
+
+    async def source():
+        loop._playing_tts = True
+        # Chunk 1: inject half_blip speech frames (below threshold on its own)
+        for _ in range(half_blip):
+            yield _speech()
+        # Simulate inter-chunk gap: new TTS sentence starts
+        loop._tts_chunk_seq += 1  # triggers counter reset in audio loop
+        # Brief silence (synthesis latency)
+        for _ in range(3):
+            yield _silence()
+        # Chunk 2: inject half_blip speech frames again
+        # Without the fix, accumulated total = half_blip*2 → false barge-in
+        # With the fix, counter was reset → only half_blip consec → no trigger
+        for _ in range(half_blip):
+            yield _speech()
+        # Silence to end
+        for _ in range(5):
+            yield _silence()
+        loop._playing_tts = False
+        for _ in range(20):
+            yield _silence()
+
+    await loop.run(source(), lambda a: None, lambda m: sent_json.append(m))
+
+    types = [m.get("type") for m in sent_json]
+    assert "stop_playback" not in types, (
+        f"Inter-chunk counter accumulation must NOT trigger barge-in; "
+        f"half_blip={half_blip} < threshold={_BARGEIN_MIN_SPEECH_CHUNKS}. Got: {types}"
     )
