@@ -254,8 +254,11 @@ class SarvamBulbulEngine(TTSEngine):
         await self._client.aclose()
 
 
-# Sarvam WS 408 idle-timeout fires at ~30s. Send WS-level ping every 20s to keep alive.
-_KEEPALIVE_INTERVAL_S = float(os.getenv("SARVAM_WS_KEEPALIVE_INTERVAL", "20"))
+# Sarvam WS 408 idle-timeout fires at ~30s.
+# Per Sarvam protocol docs, the correct keepalive is an application-level
+# {"type":"ping"} JSON message (NOT just a WS-level ping frame, which Sarvam ignores).
+# Interval must be well under 30s — use 8s so we send 3–4 pings before the timeout.
+_KEEPALIVE_INTERVAL_S = float(os.getenv("SARVAM_WS_KEEPALIVE_INTERVAL", "8"))
 
 
 class SarvamStreamingSession:
@@ -349,17 +352,22 @@ class SarvamStreamingSession:
         log.debug("sarvam_ws_session_connected speaker=%s lang=%s", speaker, lang)
 
     async def _keepalive_loop(self) -> None:
-        """Send WS-level pings every _KEEPALIVE_INTERVAL_S to prevent 408."""
+        """Send application-level {"type":"ping"} every _KEEPALIVE_INTERVAL_S to prevent 408.
+
+        Sarvam ignores WS-level ping frames; the correct keepalive per their protocol
+        is a JSON {"type":"ping"} message sent over the data channel.
+        Interval is 8s (well below the 30s idle-timeout) so 3–4 pings fire before cutoff.
+        """
         try:
             while True:
                 await asyncio.sleep(_KEEPALIVE_INTERVAL_S)
                 if self._ws is None:
                     return
                 try:
-                    await self._ws.ping()
-                    log.debug("sarvam_ws_keepalive_ping sent")
+                    await self._ws.send(json.dumps({"type": "ping"}))
+                    log.debug("sarvam_ws_keepalive_app_ping sent")
                 except Exception as exc:
-                    log.warning("sarvam_ws_keepalive_ping failed: %r", exc)
+                    log.warning("sarvam_ws_keepalive_app_ping failed: %r", exc)
                     self._ws = None   # mark as dead; _ensure_connected will reconnect
                     self._ws_cm = None
                     return

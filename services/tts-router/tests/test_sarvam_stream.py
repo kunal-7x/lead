@@ -178,6 +178,45 @@ class TestSarvamStreamingSession:
         # Only one WS connection was opened (no per-turn reconnect)
         assert connect_count[0] == 1
 
+    async def test_keepalive_uses_app_level_ping_json(self, monkeypatch):
+        """Keepalive sends {"type":"ping"} JSON message, not a WS-level ping frame.
+
+        Verifies FIX B: Sarvam ignores WS ping frames; the correct keepalive is
+        an application-level {"type":"ping"} data message.
+        """
+        import asyncio
+        import tts_router.engines.sarvam as sarvam_module
+
+        fake_ws = _PersistentFakeWS([[_pcm24k()]])
+
+        def _connect(*a, **k):
+            return fake_ws
+        import websockets
+        monkeypatch.setattr(websockets, "connect", _connect)
+        # Speed up the keepalive interval for the test
+        monkeypatch.setattr(sarvam_module, "_KEEPALIVE_INTERVAL_S", 0.05)
+
+        engine = SarvamBulbulEngine(api_key="test-key")
+        async with SarvamStreamingSession(engine) as session:
+            # Do one synthesize to open the WS
+            _ = [c async for c in session.synthesize("test", "anushka", "hi-IN")]
+            # Wait long enough for at least one keepalive to fire
+            await asyncio.sleep(0.15)
+
+        # Check that an app-level {"type":"ping"} was sent (not just a WS ping frame)
+        ping_msgs = [m for m in fake_ws.sent if '"ping"' in m]
+        assert len(ping_msgs) >= 1, "Expected at least one app-level {type:ping} keepalive message"
+        # Confirm it is valid JSON with type=ping
+        assert json.loads(ping_msgs[0]) == {"type": "ping"}
+
+    async def test_keepalive_interval_is_8s_default(self):
+        """Default keepalive interval is 8s (well below 30s Sarvam idle timeout)."""
+        import tts_router.engines.sarvam as sarvam_module
+        assert sarvam_module._KEEPALIVE_INTERVAL_S <= 10, (
+            f"Keepalive interval {sarvam_module._KEEPALIVE_INTERVAL_S}s is too long; "
+            "must be <= 10s to prevent Sarvam 30s idle 408"
+        )
+
     async def test_reconnects_on_dead_ws(self, monkeypatch):
         """If WS dies, session reconnects on next utterance (transparent retry)."""
         import websockets
