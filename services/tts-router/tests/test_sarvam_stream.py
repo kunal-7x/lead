@@ -8,7 +8,6 @@ import base64
 import json
 import struct
 
-import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -85,9 +84,47 @@ class TestSynthesizeStream:
         assert "pitch" not in cfg["data"]
         assert "loudness" not in cfg["data"]
         assert cfg["data"]["temperature"] == 0.6
+        # bulbul:v3: model goes IN the config frame (NOT the URL — URL-model = 403).
+        assert cfg["data"]["model"] == "bulbul:v3"
+        # v3 µ-law-direct @ 8k (no 24k→8k resample downstream).
+        assert cfg["data"]["output_audio_codec"] == "mulaw"
+        assert cfg["data"]["speech_sample_rate"] == 8000
         # Second is text, third is flush.
         assert json.loads(fake.sent[1])["type"] == "text"
         assert json.loads(fake.sent[2])["type"] == "flush"
+
+    async def test_early_close_before_completion_raises_truncated(self, monkeypatch):
+        """THE BUG FIX: WS close BEFORE a completion event => _StreamTruncated, not
+        a silent normal end. The endpoint uses this to trigger REST recovery."""
+        import websockets
+        from tts_router.engines.sarvam import _StreamTruncated
+
+        class _EarlyCloseWS:
+            def __init__(self):
+                self.sent = []
+
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def send(self, d): self.sent.append(d)
+
+            def __aiter__(self):
+                async def _gen():
+                    # one partial audio chunk, then the socket closes WITHOUT a
+                    # done/flush_done frame (premature Sarvam close — the real bug).
+                    yield json.dumps({"type": "audio", "data":
+                                      {"audio": base64.b64encode(_pcm24k()).decode()}})
+                    raise websockets.exceptions.ConnectionClosed(None, None)
+                return _gen()
+
+        monkeypatch.setattr(websockets, "connect", lambda *a, **k: _EarlyCloseWS())
+        engine = SarvamBulbulEngine(api_key="test-key")
+        got = []
+        with pytest.raises(_StreamTruncated):
+            async for c in engine.synthesize_stream("lambi hindi vakya", "priya", "hi-IN"):
+                got.append(c)
+        # The partial chunk WAS yielded (we don't drop what arrived) but the stream
+        # is still flagged truncated so the remainder gets recovered.
+        assert len(got) == 1
 
 
 # ── Endpoint tests ────────────────────────────────────────────────────────────
@@ -267,21 +304,28 @@ class TestSarvamStreamingSession:
         assert "connect" in call_log
 
 
-# ── Resample sanity ───────────────────────────────────────────────────────────
+# ── µ-law-direct sanity ───────────────────────────────────────────────────────
 
-def test_stream_sample_rate_default_is_24k():
-    """bulbul:v3 streams 24kHz PCM by default; worker resamples to 8k."""
-    assert _STREAM_SAMPLE_RATE in (8000, 24000)
+def test_stream_sample_rate_is_8k():
+    """bulbul:v3 WS emits µ-law 8k directly — no 24k→8k resample anymore."""
+    assert _STREAM_SAMPLE_RATE == 8000
 
 
-def test_24k_to_8k_linear_decimation():
-    """Linear-interp downsample 24kHz→8kHz yields ~1/3 the samples (PCM16 valid)."""
-    samples = np.arange(240, dtype=np.int16)
-    pcm = samples.astype("<i2").tobytes()
-    n_in = len(samples)
-    n_out = max(1, int(n_in * 8000 / 24000))
-    x_in = np.arange(n_in, dtype=np.float32)
-    x_out = np.linspace(0, n_in - 1, n_out)
-    out = np.interp(x_out, x_in, samples.astype(np.float32)).astype("<i2").tobytes()
-    assert len(out) == n_out * 2
-    assert n_out == 80
+def test_ulaw_decode_is_g711():
+    """In-engine µ-law→PCM16 decode is correct G.711 (matches audioop.ulaw2lin).
+
+    audioop was removed in 3.13+, so we assert the standard G.711 reference values
+    directly: 0xFF = µ-law digital silence → 0; 0x00 = full-scale negative; 0x7F =
+    full-scale positive. Each input byte -> 2 output bytes (PCM16). Verified equal
+    to CPython audioop.ulaw2lin on 3.12 across all 256 values.
+    """
+    import struct
+    from tts_router.engines.sarvam import _ulaw_to_pcm16
+
+    out = _ulaw_to_pcm16(bytes(range(256)))
+    assert len(out) == 256 * 2
+    samples = struct.unpack("<256h", out)
+    assert samples[0xFF] == 0          # µ-law silence decodes to 0
+    assert samples[0x00] == -32124     # full-scale negative (G.711 reference)
+    assert samples[0x80] == 32124      # full-scale positive (G.711 reference)
+    assert min(samples) == -32124 and max(samples) == 32124

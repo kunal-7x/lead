@@ -283,7 +283,8 @@ async def tts_sarvam_stream_ws(websocket: WebSocket) -> None:
 
     Feature-flag: TTS_STREAMING_WS=false (default) → returns an error frame so the
     worker uses the safe batch REST path. Only when TTS_STREAMING_WS=true does this
-    stream Sarvam WS audio. The engine yields 24kHz L16 PCM; we resample to 8kHz here.
+    stream Sarvam WS audio. The engine yields PCM16 8kHz directly (Sarvam v3 µ-law 8k
+    decoded in-engine) — NO resample. On truncation it recovers the full text via REST.
     """
     await websocket.accept()
     if not _TTS_STREAMING_WS:
@@ -293,22 +294,9 @@ async def tts_sarvam_stream_ws(websocket: WebSocket) -> None:
         await websocket.close()
         return
 
-    import numpy as np
-
-    from tts_router.engines.sarvam import SarvamBulbulEngine, SarvamStreamingSession, _STREAM_SAMPLE_RATE
-
-    def _resample_to_8k_pcm(pcm: bytes) -> bytes:
-        """PCM16 LE @ _STREAM_SAMPLE_RATE → PCM16 LE 8kHz (numpy linear interp)."""
-        samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
-        if len(samples) == 0:
-            return b""
-        if _STREAM_SAMPLE_RATE != 8000:
-            ratio = 8000.0 / _STREAM_SAMPLE_RATE
-            n_out = max(1, int(len(samples) * ratio))
-            x_in = np.arange(len(samples), dtype=np.float32)
-            x_out = np.linspace(0, len(samples) - 1, n_out)
-            samples = np.interp(x_out, x_in, samples)
-        return np.clip(samples, -32768, 32767).astype("<i2").tobytes()
+    from tts_router.engines.sarvam import (
+        SarvamBulbulEngine, SarvamStreamingSession, _StreamTruncated,
+    )
 
     engine = SarvamBulbulEngine()
     # SarvamStreamingSession keeps the Sarvam WS alive across turns via periodic
@@ -331,15 +319,31 @@ async def tts_sarvam_stream_ws(websocket: WebSocket) -> None:
                 t0 = time.time()
                 first_chunk_ms = -1
                 total_chunks = 0
+                engine_label = "sarvam_stream"
                 try:
+                    # Engine yields PCM16 8k DIRECTLY (Sarvam µ-law 8k decoded in-engine);
+                    # NO resample needed — send straight to the worker.
                     async for pcm_chunk in session.synthesize(text, voice_id, lang):
-                        pcm8k = _resample_to_8k_pcm(pcm_chunk)
-                        if not pcm8k:
+                        if not pcm_chunk:
                             continue
                         if first_chunk_ms < 0:
                             first_chunk_ms = int((time.time() - t0) * 1000)
                         total_chunks += 1
-                        await websocket.send_bytes(pcm8k)
+                        await websocket.send_bytes(pcm_chunk)
+                except _StreamTruncated as trunc:
+                    # THE FIX: the WS cut the sentence short. Recover the FULL sentence
+                    # via REST so the caller never loses the tail (mid-word cutoff bug).
+                    log.warning(
+                        "tts_sarvam_stream_ws TRUNCATED (chunks=%s) — REST recovery: %s",
+                        getattr(trunc, "chunks_produced", "?"), trunc,
+                    )
+                    pcm = await engine.synthesize(text, voice_id, lang)
+                    if pcm:
+                        await websocket.send_bytes(pcm)
+                        if first_chunk_ms < 0:
+                            first_chunk_ms = int((time.time() - t0) * 1000)
+                        total_chunks += 1
+                    engine_label = "sarvam_stream_rest_recovered"
                 except Exception as synth_exc:
                     # Session synthesis failed (both attempts exhausted) — fall back to
                     # per-call batch REST synthesize so the caller still hears audio.
@@ -349,11 +353,12 @@ async def tts_sarvam_stream_ws(websocket: WebSocket) -> None:
                         await websocket.send_bytes(pcm)
                         first_chunk_ms = int((time.time() - t0) * 1000)
                         total_chunks = 1
-                log.info("[diag] phase=tts_stream first_chunk_ms=%d total_chunks=%d",
-                         first_chunk_ms, total_chunks)
+                    engine_label = "sarvam_rest_fallback"
+                log.info("[diag] phase=tts_stream first_chunk_ms=%d total_chunks=%d engine=%s",
+                         first_chunk_ms, total_chunks, engine_label)
                 await websocket.send_text(
                     json.dumps({"type": "done", "first_chunk_ms": first_chunk_ms,
-                                "total_chunks": total_chunks, "engine": "sarvam_stream"})
+                                "total_chunks": total_chunks, "engine": engine_label})
                 )
     except WebSocketDisconnect:
         pass
