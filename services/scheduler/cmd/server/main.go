@@ -64,7 +64,27 @@ func startDispatcher(ctx context.Context) {
 	sub = dispatcher.NewNATSSubscriber(js)
 
 	rw := dispatcher.NewRedisWriterTCP(redisURL)
-	q := dispatcher.NewFakeDialQueueStore() // Phase C will swap in a Postgres-backed store
+
+	// Dial-queue store: use pgkv when DATABASE_URL is set, otherwise fall back
+	// to the in-memory fake so tests/dev without Postgres still boot.
+	var q dispatcher.DialQueueStore
+	if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" {
+		pgStore, err := dispatcher.NewPgkvDialQueueStore(ctx, dbURL)
+		if err != nil {
+			log.Printf("scheduler: dial-queue pgkv connect error (%v); falling back to in-memory store", err)
+			q = dispatcher.NewFakeDialQueueStore()
+		} else {
+			log.Printf("scheduler: dial-queue store: postgres (pgkv)")
+			q = pgStore
+		}
+	} else {
+		log.Printf("scheduler: DATABASE_URL not set; dial-queue store is in-memory (non-durable)")
+		q = dispatcher.NewFakeDialQueueStore()
+	}
+
+	// Rate limiter: Redis-backed when REDIS_URL is set (already checked above).
+	rl := dispatcher.NewRedisRateLimiter(redisURL)
+
 	cfg := dispatcher.Config{
 		CampaignURL:          envOr("CAMPAIGN_URL", "http://localhost:8112"),
 		LeadImportURL:        envOr("LEAD_IMPORT_URL", "http://localhost:8110"),
@@ -73,10 +93,10 @@ func startDispatcher(ctx context.Context) {
 		PublicWebhookBaseURL: os.Getenv("PUBLIC_WEBHOOK_BASE_URL"),
 	}
 
-	d := dispatcher.New(sub, rw, http.DefaultClient, q, cfg)
+	d := dispatcher.New(sub, rw, http.DefaultClient, q, cfg, dispatcher.WithRateLimiter(rl))
 	go d.Subscribe(ctx)
 	go d.Run(ctx)
-	log.Printf("scheduler: dispatcher started (NATS=%s)", natsURL)
+	log.Printf("scheduler: dispatcher started (NATS=%s, durable-queue=%T, rate-limiter=%T)", natsURL, q, rl)
 }
 
 func newStore() (store.Store, error) {

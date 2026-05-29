@@ -89,11 +89,12 @@ type Subscriber interface {
 
 // Dispatcher drives the outbound dial loop for campaigns.
 type Dispatcher struct {
-	sub    Subscriber
-	redis  RedisWriter
-	client *http.Client
-	queue  DialQueueStore
-	cfg    Config
+	sub       Subscriber
+	redis     RedisWriter
+	client    *http.Client
+	queue     DialQueueStore
+	ratelimit RateLimiter
+	cfg       Config
 
 	mu     sync.Mutex
 	active map[string]bool // set of active campaign IDs
@@ -101,17 +102,35 @@ type Dispatcher struct {
 
 // New creates a Dispatcher. All dependencies are required; pass a NoopSubscriber
 // and NoopRedis when running without infra (dev/test boot).
-func New(sub Subscriber, rw RedisWriter, client *http.Client, q DialQueueStore, cfg Config) *Dispatcher {
+// rl may be nil — a NoopRateLimiter is used in that case.
+func New(sub Subscriber, rw RedisWriter, client *http.Client, q DialQueueStore, cfg Config, opts ...Option) *Dispatcher {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &Dispatcher{
-		sub:    sub,
-		redis:  rw,
-		client: client,
-		queue:  q,
-		cfg:    cfg,
-		active: make(map[string]bool),
+	d := &Dispatcher{
+		sub:       sub,
+		redis:     rw,
+		client:    client,
+		queue:     q,
+		ratelimit: &NoopRateLimiter{},
+		cfg:       cfg,
+		active:    make(map[string]bool),
+	}
+	for _, o := range opts {
+		o(d)
+	}
+	return d
+}
+
+// Option is a functional option for Dispatcher.
+type Option func(*Dispatcher)
+
+// WithRateLimiter sets the RateLimiter on the Dispatcher.
+func WithRateLimiter(rl RateLimiter) Option {
+	return func(d *Dispatcher) {
+		if rl != nil {
+			d.ratelimit = rl
+		}
 	}
 }
 
@@ -178,6 +197,10 @@ func (d *Dispatcher) onCampaignLaunched(ctx context.Context, campaignID string) 
 	}
 
 	campaignCtxMap := campaignContextToMap(campaign.Context)
+	// Store rate-limit caps in the context map so dispatchCampaign can read them.
+	campaignCtxMap["_hourly_call_cap"] = float64(limits.HourlyCallCap)
+	campaignCtxMap["_daily_call_cap"] = float64(limits.DailyCallCap)
+	campaignCtxMap["_cost_cap_inr"] = limits.CostCapINR
 
 	rows := make([]*DialRow, 0, len(leadIDs))
 	for _, lid := range leadIDs {
@@ -242,13 +265,42 @@ func (d *Dispatcher) dispatchCampaign(ctx context.Context, campaignID string) {
 		return
 	}
 	for _, row := range rows {
+		// Read rate-limit caps stored in the row's campaign context.
+		hourlyCap, dailyCap, costCapINR := extractRateLimitCaps(row.CampaignCtx)
+
+		ok, reason := d.ratelimit.Allowed(ctx, campaignID, hourlyCap, dailyCap, costCapINR)
+		if !ok {
+			log.Printf("dispatcher: campaign %s rate-limited (%s); skipping tick", campaignID, reason)
+			// Leave row pending; it will be retried in a later tick/window.
+			return
+		}
+
 		placed, done := d.placeCall(ctx, row)
 		if done {
 			// 503 = no free slot; stop trying for this campaign this tick.
 			return
 		}
-		_ = placed
+		if placed {
+			d.ratelimit.RecordCall(ctx, campaignID)
+		}
 	}
+}
+
+// extractRateLimitCaps reads hourly/daily/cost caps from the row's CampaignCtx.
+func extractRateLimitCaps(ctx map[string]any) (hourlyCap, dailyCap int, costCapINR float64) {
+	if ctx == nil {
+		return 0, 0, 0
+	}
+	if v, ok := ctx["_hourly_call_cap"].(float64); ok {
+		hourlyCap = int(v)
+	}
+	if v, ok := ctx["_daily_call_cap"].(float64); ok {
+		dailyCap = int(v)
+	}
+	if v, ok := ctx["_cost_cap_inr"].(float64); ok {
+		costCapINR = v
+	}
+	return
 }
 
 // placeCall attempts to place a telephony call for a dial row.
@@ -393,8 +445,11 @@ type campaignContext struct {
 }
 
 type campaignLimitsResponse struct {
-	MaxCallSeconds int `json:"max_call_seconds"`
-	ConcurrentCap  int `json:"concurrent_cap"`
+	MaxCallSeconds int     `json:"max_call_seconds"`
+	ConcurrentCap  int     `json:"concurrent_cap"`
+	HourlyCallCap  int     `json:"hourly_call_cap"`
+	DailyCallCap   int     `json:"daily_call_cap"`
+	CostCapINR     float64 `json:"cost_cap_inr"`
 }
 
 func (d *Dispatcher) fetchCampaign(ctx context.Context, campaignID string) (*campaignResponse, error) {
