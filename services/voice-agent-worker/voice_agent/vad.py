@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-SILENCE_THRESHOLD_MS = 500   # silence after this → end of utterance (lowered 700→500ms for latency)
+SILENCE_THRESHOLD_MS = 750   # silence after this → end of utterance.
+# Raised 500→750ms (T1.3): at 500ms the AI grabbed the turn on a mid-sentence
+# breath/pause. 750ms tolerates a natural pause while still ending the turn
+# promptly. Tunable via SILENCE_THRESHOLD_MS env (read by the caller, not here).
 CHUNK_MS = 20                # 20ms per audio chunk at 8kHz
 BYTES_PER_CHUNK = 8000 * CHUNK_MS // 1000 * 2  # 320 bytes
 
@@ -19,6 +22,20 @@ class VAD(ABC):
     def reset(self) -> None:
         """Reset internal state between utterances."""
         ...
+
+    def energy(self, pcm_chunk: bytes) -> float:
+        """RMS energy of a PCM16 8kHz chunk (0.0 if too short).
+
+        Used by the barge-in path to reject low-energy acoustic echo: real
+        caller speech is clearly louder than the residual echo of the bot's
+        own TTS bleeding back into the inbound track. Default impl works for
+        any concrete VAD; overridden only if a subclass needs custom behaviour.
+        """
+        import struct
+        if len(pcm_chunk) < 2:
+            return 0.0
+        samples = struct.unpack(f"<{len(pcm_chunk)//2}h", pcm_chunk)
+        return (sum(s * s for s in samples) / len(samples)) ** 0.5
 
 
 class FakeVAD(VAD):
