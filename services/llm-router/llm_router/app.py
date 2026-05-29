@@ -5,6 +5,7 @@ import os
 import redis.asyncio as aioredis
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel as _PydanticBase
 
 from llm_router.backends.groq import GroqLlamaBackend, GroqInstantBackend
 from llm_router.backends.cerebras import CerebrasBackend
@@ -14,6 +15,7 @@ from llm_router.backends.openai_backend import (
     OpenAIBackend, AnthropicBackend, OpenRouterBackend, GoogleGeminiBackend
 )
 from llm_router.claim_control import HttpClaimControl
+from llm_router.extractor import CampaignExtractor
 from llm_router.kb_client import HttpKbRetriever
 from llm_router.models import HealthResponse, LLMRequest
 from llm_router.router import LLMRouter
@@ -21,6 +23,7 @@ from llm_router.switcher import ModelSwitcher
 
 app = FastAPI(title="llm-router", version="0.1.0")
 _router: LLMRouter | None = None
+_extractor: CampaignExtractor | None = None
 
 
 def _build_router() -> LLMRouter:
@@ -47,8 +50,9 @@ def _build_router() -> LLMRouter:
 
 @app.on_event("startup")
 async def startup() -> None:
-    global _router
+    global _router, _extractor
     _router = _build_router()
+    _extractor = CampaignExtractor()
 
 
 @app.get("/healthz")
@@ -114,3 +118,27 @@ async def generate_stream_text(req: LLMRequest) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+class ExtractRequest(_PydanticBase):
+    text: str
+    schema_hint: str | None = None
+
+
+@app.post("/v1/llm/extract")
+async def extract_campaign(req: ExtractRequest) -> JSONResponse:
+    """Extract a structured CampaignContext from a raw text brief.
+
+    Returns JSON matching the CampaignContext schema:
+      product_description, offer, talking_points[], objection_handling[],
+      qualifying_questions[], persona, do_not_say[], goal, language, business_hours.
+    """
+    assert _extractor is not None
+    try:
+        result = await _extractor.extract(req.text, req.schema_hint)
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse(
+            {"error": f"extraction failed: {exc}"},
+            status_code=502,
+        )

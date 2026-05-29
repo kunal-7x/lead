@@ -105,6 +105,7 @@ func New(cfg Config, logger *slog.Logger) (http.Handler, error) {
 		r.Get("/v1/leads/{id}/status-history", handler.EmptyLeadStatusHistory)
 
 		// Campaign APIs
+		r.Post("/v1/campaigns/extract", productProxy.ProxyTo("campaign"))
 		r.Post("/v1/campaigns", productProxy.ProxyTo("campaign"))
 		r.Post("/v1/campaigns/", productProxy.ProxyTo("campaign"))
 		r.Get("/v1/campaigns", productProxy.ProxyTo("campaign"))
