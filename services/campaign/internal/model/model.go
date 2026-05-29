@@ -16,20 +16,39 @@ const (
 	ProjectTypeRealEstate = "real-estate"
 )
 
+type ObjectionResponse struct {
+	Objection string `json:"objection"`
+	Response  string `json:"response"`
+}
+
+type CampaignContext struct {
+	ProductDescription  string              `json:"product_description"`
+	Offer               string              `json:"offer"`
+	TalkingPoints       []string            `json:"talking_points"`
+	ObjectionHandling   []ObjectionResponse `json:"objection_handling"`
+	QualifyingQuestions []string            `json:"qualifying_questions"`
+	Persona             string              `json:"persona"`
+	DoNotSay            []string            `json:"do_not_say"`
+	Goal                string              `json:"goal"`
+	Language            string              `json:"language"`
+	BusinessHours       string              `json:"business_hours"`
+}
+
 type Campaign struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name"`
-	ProjectID       string    `json:"project_id"`
-	TenantID        string    `json:"tenant_id"`
-	KbVersionID     string    `json:"kb_version_id"`
-	ScriptVersionID string    `json:"script_version_id"`
-	PromptVersionID string    `json:"prompt_version_id"`
-	SourceFilter    string    `json:"source_filter"`
-	Schedule        string    `json:"schedule"`
-	Status          string    `json:"status"`
-	PauseReason     string    `json:"pause_reason,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID              string          `json:"id"`
+	Name            string          `json:"name"`
+	ProjectID       string          `json:"project_id"`
+	TenantID        string          `json:"tenant_id"`
+	KbVersionID     string          `json:"kb_version_id"`
+	ScriptVersionID string          `json:"script_version_id"`
+	PromptVersionID string          `json:"prompt_version_id"`
+	SourceFilter    string          `json:"source_filter"`
+	Schedule        string          `json:"schedule"`
+	Status          string          `json:"status"`
+	PauseReason     string          `json:"pause_reason,omitempty"`
+	Context         CampaignContext `json:"context"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
 }
 
 type CampaignSettings struct {
@@ -46,12 +65,16 @@ type CampaignLead struct {
 }
 
 type CampaignLimits struct {
-	CampaignID      string    `json:"campaign_id"`
-	DailyCallCap    int       `json:"daily_call_cap"`
-	RetryMax        int       `json:"retry_max"`
-	CostCapINR      float64   `json:"cost_cap_inr"`
-	MaxCallSeconds  int       `json:"max_call_seconds"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	CampaignID       string    `json:"campaign_id"`
+	DailyCallCap     int       `json:"daily_call_cap"`
+	ConcurrentCap    int       `json:"concurrent_cap"`
+	HourlyCallCap    int       `json:"hourly_call_cap"`
+	RetryMax         int       `json:"retry_max"`
+	RetryBusyMin     int       `json:"retry_busy_min"`
+	RetryNoAnswerMin int       `json:"retry_no_answer_min"`
+	CostCapINR       float64   `json:"cost_cap_inr"`
+	MaxCallSeconds   int       `json:"max_call_seconds"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type CampaignHealthSnapshot struct {

@@ -466,9 +466,10 @@ async def _llm_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncIt
 
     # Build a trimmed system prompt: same persona + KB, but instruct plain-text reply only.
     # Reuse the SHARED persona so the spoken path behaves identically to the batch path.
-    from llm_router.backends.base import PERSONA_PROMPT, _build_slots_block
+    from llm_router.backends.base import PERSONA_PROMPT, _build_slots_block, format_campaign_context
 
     slots_block = _build_slots_block(req.collected_slots)
+    campaign_block = format_campaign_context(req.campaign_context or {})
     system_lines = [
         PERSONA_PROMPT,
         slots_block,
@@ -482,6 +483,9 @@ async def _llm_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncIt
         "'जी'/'ठीक है' मत बोलो — हमेशा बात आगे बढ़ाओ। एक असली इंसानी टेलीकॉलर "
         "की तरह स्वाभाविक रूप से बोलो।",
     ]
+    # Inject campaign-specific context (product, offer, talking points, etc.) when present.
+    if campaign_block:
+        system_lines.append(f"\n{campaign_block}")
     # T2.1: Adaptive per-turn directive (CSO/RSP) — appended as suffix when present.
     if req.system_prompt_suffix:
         system_lines.append(f"\n{req.system_prompt_suffix}")
