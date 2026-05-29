@@ -20,6 +20,16 @@ import (
 	"github.com/google/uuid"
 )
 
+// ----- Suppression store interface ------------------------------------------
+
+// SuppressionStore checks and records DND/suppressed phone numbers.
+type SuppressionStore interface {
+	// IsSuppressed returns true if the phone is suppressed for this tenant.
+	IsSuppressed(ctx context.Context, tenantID, phone string) bool
+	// Suppress records a phone as suppressed with the given reason.
+	Suppress(ctx context.Context, tenantID, phone, reason string) error
+}
+
 // ----- Redis writer interface ------------------------------------------------
 
 // RedisWriter is a minimal interface for writing a Redis key with a TTL.
@@ -61,6 +71,15 @@ type DialQueueStore interface {
 	MarkFailed(ctx context.Context, rowID string) error
 	// ActiveCampaignIDs returns distinct campaign IDs that have pending or in_flight rows.
 	ActiveCampaignIDs(ctx context.Context) ([]string, error)
+	// FindByProviderCallID finds an in_flight row by its provider_call_id.
+	// Returns (nil, nil) if not found.
+	FindByProviderCallID(ctx context.Context, providerCallID string) (*DialRow, error)
+	// FindByLastOutcomeEventID returns any row that already has eventID stored
+	// as _last_outcome_event_id in CampaignCtx. Used for idempotency.
+	// Returns (nil, nil) if not found.
+	FindByLastOutcomeEventID(ctx context.Context, eventID string) (*DialRow, error)
+	// UpdateRow applies fn to the row with the given ID and persists it.
+	UpdateRow(ctx context.Context, rowID string, fn func(*DialRow)) error
 }
 
 // ----- Config ---------------------------------------------------------------
@@ -89,12 +108,13 @@ type Subscriber interface {
 
 // Dispatcher drives the outbound dial loop for campaigns.
 type Dispatcher struct {
-	sub       Subscriber
-	redis     RedisWriter
-	client    *http.Client
-	queue     DialQueueStore
-	ratelimit RateLimiter
-	cfg       Config
+	sub         Subscriber
+	redis       RedisWriter
+	client      *http.Client
+	queue       DialQueueStore
+	ratelimit   RateLimiter
+	suppression SuppressionStore
+	cfg         Config
 
 	mu     sync.Mutex
 	active map[string]bool // set of active campaign IDs
@@ -108,13 +128,14 @@ func New(sub Subscriber, rw RedisWriter, client *http.Client, q DialQueueStore, 
 		client = http.DefaultClient
 	}
 	d := &Dispatcher{
-		sub:       sub,
-		redis:     rw,
-		client:    client,
-		queue:     q,
-		ratelimit: &NoopRateLimiter{},
-		cfg:       cfg,
-		active:    make(map[string]bool),
+		sub:         sub,
+		redis:       rw,
+		client:      client,
+		queue:       q,
+		ratelimit:   &NoopRateLimiter{},
+		suppression: &NoopSuppressionStore{},
+		cfg:         cfg,
+		active:      make(map[string]bool),
 	}
 	for _, o := range opts {
 		o(d)
@@ -130,6 +151,15 @@ func WithRateLimiter(rl RateLimiter) Option {
 	return func(d *Dispatcher) {
 		if rl != nil {
 			d.ratelimit = rl
+		}
+	}
+}
+
+// WithSuppressionStore sets the SuppressionStore on the Dispatcher.
+func WithSuppressionStore(ss SuppressionStore) Option {
+	return func(d *Dispatcher) {
+		if ss != nil {
+			d.suppression = ss
 		}
 	}
 }
@@ -201,6 +231,14 @@ func (d *Dispatcher) onCampaignLaunched(ctx context.Context, campaignID string) 
 	campaignCtxMap["_hourly_call_cap"] = float64(limits.HourlyCallCap)
 	campaignCtxMap["_daily_call_cap"] = float64(limits.DailyCallCap)
 	campaignCtxMap["_cost_cap_inr"] = limits.CostCapINR
+	// Store retry policy.
+	campaignCtxMap["_retry_max"] = float64(limits.RetryMax)
+	campaignCtxMap["_retry_busy_min"] = float64(limits.RetryBusyMin)
+	campaignCtxMap["_retry_no_answer_min"] = float64(limits.RetryNoAnswerMin)
+	// Store calling-window compliance fields.
+	campaignCtxMap["_call_window_start_hour"] = float64(limits.CallWindowStartHour)
+	campaignCtxMap["_call_window_end_hour"] = float64(limits.CallWindowEndHour)
+	campaignCtxMap["_timezone"] = limits.Timezone
 
 	rows := make([]*DialRow, 0, len(leadIDs))
 	for _, lid := range leadIDs {
@@ -240,11 +278,30 @@ func (d *Dispatcher) onCampaignLaunched(ctx context.Context, campaignID string) 
 	return nil
 }
 
-// RunOneTick runs a single dispatch tick. Exported for testing.
-func (d *Dispatcher) RunOneTick(ctx context.Context) { d.tick(ctx) }
+// RunOneTick runs a single dispatch tick at time.Now(). Exported for testing.
+func (d *Dispatcher) RunOneTick(ctx context.Context) { d.tickAt(ctx, time.Now()) }
+
+// RunOneTickAt runs a single dispatch tick using the supplied time as "now".
+// Exported for deterministic time-based testing.
+func (d *Dispatcher) RunOneTickAt(ctx context.Context, now time.Time) { d.tickAt(ctx, now) }
+
+// ActivateCampaign marks a campaign active without seeding rows.
+// Used in tests to avoid going through the HTTP campaign-seed path.
+func (d *Dispatcher) ActivateCampaign(campaignID string) {
+	d.mu.Lock()
+	d.active[campaignID] = true
+	d.mu.Unlock()
+}
+
+// HandleOutcome processes a call outcome event. Exported for testing.
+func (d *Dispatcher) HandleOutcome(ctx context.Context, eventID, providerCallID, status string) error {
+	return d.onCallOutcome(ctx, eventID, providerCallID, status)
+}
 
 // tick processes one round of pending rows across all active campaigns.
-func (d *Dispatcher) tick(ctx context.Context) {
+func (d *Dispatcher) tick(ctx context.Context) { d.tickAt(ctx, time.Now()) }
+
+func (d *Dispatcher) tickAt(ctx context.Context, now time.Time) {
 	d.mu.Lock()
 	ids := make([]string, 0, len(d.active))
 	for id := range d.active {
@@ -253,18 +310,40 @@ func (d *Dispatcher) tick(ctx context.Context) {
 	d.mu.Unlock()
 
 	for _, campaignID := range ids {
-		d.dispatchCampaign(ctx, campaignID)
+		d.dispatchCampaignAt(ctx, campaignID, now)
 	}
 }
 
-// dispatchCampaign places calls for all pending rows for one campaign.
-func (d *Dispatcher) dispatchCampaign(ctx context.Context, campaignID string) {
-	rows, err := d.queue.PendingRows(ctx, campaignID, time.Now())
+// dispatchCampaignAt places calls for all pending rows for one campaign at the given now.
+func (d *Dispatcher) dispatchCampaignAt(ctx context.Context, campaignID string, now time.Time) {
+	rows, err := d.queue.PendingRows(ctx, campaignID, now)
 	if err != nil {
 		log.Printf("dispatcher: pending rows for %s: %v", campaignID, err)
 		return
 	}
 	for _, row := range rows {
+		// --- Compliance gate 1: DND / suppression scrub ---
+		// Automated-call disclosure is satisfied by the system-prompt persona (Phase A).
+		if d.suppression.IsSuppressed(ctx, row.TenantID, row.Phone) {
+			log.Printf("dispatcher: lead %s phone %s suppressed (DND); skipping", row.LeadID, row.Phone)
+			_ = d.queue.UpdateRow(ctx, row.ID, func(r *DialRow) {
+				r.Status = "suppressed"
+				r.Disposition = "dnd"
+			})
+			continue
+		}
+
+		// --- Compliance gate 2: TRAI calling-window check ---
+		startH, endH, loc := extractWindowParams(row.CampaignCtx)
+		if !inCallingWindow(now, startH, endH, loc) {
+			next := nextWindowOpen(now, startH, endH, loc)
+			log.Printf("dispatcher: lead %s outside calling window; deferring to %v", row.LeadID, next)
+			_ = d.queue.UpdateRow(ctx, row.ID, func(r *DialRow) {
+				r.NextAttemptAt = next
+			})
+			continue
+		}
+
 		// Read rate-limit caps stored in the row's campaign context.
 		hourlyCap, dailyCap, costCapINR := extractRateLimitCaps(row.CampaignCtx)
 
@@ -445,11 +524,17 @@ type campaignContext struct {
 }
 
 type campaignLimitsResponse struct {
-	MaxCallSeconds int     `json:"max_call_seconds"`
-	ConcurrentCap  int     `json:"concurrent_cap"`
-	HourlyCallCap  int     `json:"hourly_call_cap"`
-	DailyCallCap   int     `json:"daily_call_cap"`
-	CostCapINR     float64 `json:"cost_cap_inr"`
+	MaxCallSeconds      int     `json:"max_call_seconds"`
+	ConcurrentCap       int     `json:"concurrent_cap"`
+	HourlyCallCap       int     `json:"hourly_call_cap"`
+	DailyCallCap        int     `json:"daily_call_cap"`
+	CostCapINR          float64 `json:"cost_cap_inr"`
+	RetryMax            int     `json:"retry_max"`
+	RetryBusyMin        int     `json:"retry_busy_min"`
+	RetryNoAnswerMin    int     `json:"retry_no_answer_min"`
+	CallWindowStartHour int     `json:"call_window_start_hour"`
+	CallWindowEndHour   int     `json:"call_window_end_hour"`
+	Timezone            string  `json:"timezone"`
 }
 
 func (d *Dispatcher) fetchCampaign(ctx context.Context, campaignID string) (*campaignResponse, error) {
@@ -731,6 +816,48 @@ func (f *FakeDialQueueStore) ActiveCampaignIDs(_ context.Context) ([]string, err
 	return ids, nil
 }
 
+// FindByProviderCallID finds an in_flight row by provider_call_id.
+func (f *FakeDialQueueStore) FindByProviderCallID(_ context.Context, providerCallID string) (*DialRow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.rows {
+		if r.ProviderCallID == providerCallID {
+			cp := *r
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
+
+// FindByLastOutcomeEventID returns any row whose CampaignCtx["_last_outcome_event_id"] == eventID.
+func (f *FakeDialQueueStore) FindByLastOutcomeEventID(_ context.Context, eventID string) (*DialRow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.rows {
+		if r.CampaignCtx != nil {
+			if v, ok := r.CampaignCtx["_last_outcome_event_id"].(string); ok && v == eventID {
+				cp := *r
+				return &cp, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
+// UpdateRow applies fn to the row with the given ID and persists it.
+func (f *FakeDialQueueStore) UpdateRow(_ context.Context, rowID string, fn func(*DialRow)) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for key, r := range f.rows {
+		if r.ID == rowID {
+			fn(r)
+			f.rows[key] = r
+			return nil
+		}
+	}
+	return fmt.Errorf("row %s not found", rowID)
+}
+
 // RowByLeadID returns the row for a given lead (for test assertions).
 func (f *FakeDialQueueStore) RowByLeadID(campaignID, leadID string) *DialRow {
 	f.mu.Lock()
@@ -748,4 +875,38 @@ func (f *FakeDialQueueStore) AllRows() []*DialRow {
 		out = append(out, &cp)
 	}
 	return out
+}
+
+// ----- No-op SuppressionStore -----------------------------------------------
+
+// NoopSuppressionStore never suppresses any phone. Used in dev/test without infra.
+type NoopSuppressionStore struct{}
+
+func (n *NoopSuppressionStore) IsSuppressed(_ context.Context, _, _ string) bool { return false }
+func (n *NoopSuppressionStore) Suppress(_ context.Context, _, _, _ string) error { return nil }
+
+// ----- In-memory FakeSuppressionStore for tests -----------------------------
+
+// FakeSuppressionStore is a thread-safe in-memory SuppressionStore for tests.
+type FakeSuppressionStore struct {
+	mu      sync.Mutex
+	entries map[string]string // key: tenantID+":"+phone, value: reason
+}
+
+func NewFakeSuppressionStore() *FakeSuppressionStore {
+	return &FakeSuppressionStore{entries: make(map[string]string)}
+}
+
+func (f *FakeSuppressionStore) IsSuppressed(_ context.Context, tenantID, phone string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.entries[tenantID+":"+phone]
+	return ok
+}
+
+func (f *FakeSuppressionStore) Suppress(_ context.Context, tenantID, phone, reason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.entries[tenantID+":"+phone] = reason
+	return nil
 }

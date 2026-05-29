@@ -315,12 +315,16 @@ func TestDispatcher_RateLimitEnforced(t *testing.T) {
 		t.Errorf("expected rate limiter hour count=2, got %d", got)
 	}
 
-	// lead-00003 must still be pending.
-	row := q.RowByLeadID(campaignID, "lead-00003")
-	if row == nil {
-		t.Fatal("lead-00003 row not found")
+	// Exactly 1 lead must still be pending (the one that was not dialed due to rate-limit).
+	// We do not assert on a specific lead ID because map iteration order is non-deterministic.
+	allRows := q.AllRows()
+	pendingCount := 0
+	for _, r := range allRows {
+		if r.Status == "pending" {
+			pendingCount++
+		}
 	}
-	if row.Status != "pending" {
-		t.Errorf("lead-00003 should still be pending after rate limit, got status=%s", row.Status)
+	if pendingCount != 1 {
+		t.Errorf("expected exactly 1 pending row after rate-limit, got %d", pendingCount)
 	}
 }

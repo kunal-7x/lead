@@ -3,6 +3,9 @@ package dispatcher
 // PgkvDialQueueStore implements DialQueueStore backed by pgkv.
 // Collection/kind: "dial_queue". Key: row.ID.
 // Idempotent seed: key = "{campaign_id}:{lead_id}" — first write wins.
+//
+// PgkvSuppressionStore implements SuppressionStore backed by pgkv.
+// kind: "suppression", key: "{tenant_id}:{phone_e164}"
 
 import (
 	"context"
@@ -91,6 +94,45 @@ func (s *PgkvDialQueueStore) MarkFailed(ctx context.Context, rowID string) error
 	})
 }
 
+// FindByProviderCallID scans in-flight rows and returns the matching row, or nil.
+func (s *PgkvDialQueueStore) FindByProviderCallID(ctx context.Context, providerCallID string) (*DialRow, error) {
+	all, err := pgkv.List[DialRow](ctx, s.kv, dialQueueKind)
+	if err != nil {
+		return nil, fmt.Errorf("FindByProviderCallID list: %w", err)
+	}
+	for i := range all {
+		r := &all[i]
+		if r.ProviderCallID == providerCallID {
+			cp := *r
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
+
+// FindByLastOutcomeEventID scans all rows for _last_outcome_event_id == eventID.
+func (s *PgkvDialQueueStore) FindByLastOutcomeEventID(ctx context.Context, eventID string) (*DialRow, error) {
+	all, err := pgkv.List[DialRow](ctx, s.kv, dialQueueKind)
+	if err != nil {
+		return nil, fmt.Errorf("FindByLastOutcomeEventID list: %w", err)
+	}
+	for i := range all {
+		r := &all[i]
+		if r.CampaignCtx != nil {
+			if v, ok := r.CampaignCtx["_last_outcome_event_id"].(string); ok && v == eventID {
+				cp := *r
+				return &cp, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
+// UpdateRow fetches, applies fn, and persists the row identified by rowID.
+func (s *PgkvDialQueueStore) UpdateRow(ctx context.Context, rowID string, fn func(*DialRow)) error {
+	return s.updateRow(ctx, rowID, fn)
+}
+
 // ActiveCampaignIDs returns distinct campaign IDs with pending or in_flight rows.
 func (s *PgkvDialQueueStore) ActiveCampaignIDs(ctx context.Context) ([]string, error) {
 	all, err := pgkv.List[DialRow](ctx, s.kv, dialQueueKind)
@@ -123,6 +165,54 @@ func (s *PgkvDialQueueStore) updateRow(ctx context.Context, rowID string, fn fun
 	fn(&r)
 	if err := s.kv.Put(ctx, dialQueueKind, rowID, r); err != nil {
 		return fmt.Errorf("updateRow put %s: %w", rowID, err)
+	}
+	return nil
+}
+
+// ----- PgkvSuppressionStore -------------------------------------------------
+
+const suppressionKind = "suppression"
+
+// suppressionEntry is the value stored for a suppressed phone.
+type suppressionEntry struct {
+	Reason    string    `json:"reason"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// PgkvSuppressionStore implements SuppressionStore backed by pgkv.
+type PgkvSuppressionStore struct {
+	kv *pgkv.Store
+}
+
+// NewPgkvSuppressionStore creates a suppression store using the same DSN.
+func NewPgkvSuppressionStore(ctx context.Context, dsn string) (*PgkvSuppressionStore, error) {
+	kv, err := pgkv.New(ctx, dsn, "svc_scheduler_suppression")
+	if err != nil {
+		return nil, fmt.Errorf("suppression store: %w", err)
+	}
+	return &PgkvSuppressionStore{kv: kv}, nil
+}
+
+// Close shuts down the underlying pool.
+func (s *PgkvSuppressionStore) Close() { s.kv.Close() }
+
+// IsSuppressed returns true when the key tenant:phone exists in the store.
+func (s *PgkvSuppressionStore) IsSuppressed(ctx context.Context, tenantID, phone string) bool {
+	key := tenantID + ":" + phone
+	_, exists, err := pgkv.Get[suppressionEntry](ctx, s.kv, suppressionKind, key)
+	if err != nil {
+		log.Printf("suppression store: IsSuppressed get %s: %v", key, err)
+		return false // fail-open: don't block calls on DB errors
+	}
+	return exists
+}
+
+// Suppress records a phone as suppressed with the given reason.
+func (s *PgkvSuppressionStore) Suppress(ctx context.Context, tenantID, phone, reason string) error {
+	key := tenantID + ":" + phone
+	entry := suppressionEntry{Reason: reason, CreatedAt: time.Now()}
+	if err := s.kv.Put(ctx, suppressionKind, key, entry); err != nil {
+		return fmt.Errorf("suppression store: Suppress put %s: %w", key, err)
 	}
 	return nil
 }

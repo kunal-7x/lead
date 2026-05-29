@@ -74,7 +74,11 @@ type CampaignLimits struct {
 	RetryNoAnswerMin int       `json:"retry_no_answer_min"`
 	CostCapINR       float64   `json:"cost_cap_inr"`
 	MaxCallSeconds   int       `json:"max_call_seconds"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	// Calling-window compliance (TRAI). Defaults: 10–19 IST.
+	CallWindowStartHour int    `json:"call_window_start_hour"`
+	CallWindowEndHour   int    `json:"call_window_end_hour"`
+	Timezone            string `json:"timezone"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 type CampaignHealthSnapshot struct {

@@ -68,6 +68,7 @@ func startDispatcher(ctx context.Context) {
 	// Dial-queue store: use pgkv when DATABASE_URL is set, otherwise fall back
 	// to the in-memory fake so tests/dev without Postgres still boot.
 	var q dispatcher.DialQueueStore
+	var ss dispatcher.SuppressionStore = &dispatcher.NoopSuppressionStore{}
 	if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" {
 		pgStore, err := dispatcher.NewPgkvDialQueueStore(ctx, dbURL)
 		if err != nil {
@@ -77,8 +78,15 @@ func startDispatcher(ctx context.Context) {
 			log.Printf("scheduler: dial-queue store: postgres (pgkv)")
 			q = pgStore
 		}
+		pgSup, err := dispatcher.NewPgkvSuppressionStore(ctx, dbURL)
+		if err != nil {
+			log.Printf("scheduler: suppression pgkv connect error (%v); using noop", err)
+		} else {
+			log.Printf("scheduler: suppression store: postgres (pgkv)")
+			ss = pgSup
+		}
 	} else {
-		log.Printf("scheduler: DATABASE_URL not set; dial-queue store is in-memory (non-durable)")
+		log.Printf("scheduler: DATABASE_URL not set; dial-queue + suppression stores are in-memory (non-durable)")
 		q = dispatcher.NewFakeDialQueueStore()
 	}
 
@@ -93,10 +101,18 @@ func startDispatcher(ctx context.Context) {
 		PublicWebhookBaseURL: os.Getenv("PUBLIC_WEBHOOK_BASE_URL"),
 	}
 
-	d := dispatcher.New(sub, rw, http.DefaultClient, q, cfg, dispatcher.WithRateLimiter(rl))
+	d := dispatcher.New(sub, rw, http.DefaultClient, q, cfg,
+		dispatcher.WithRateLimiter(rl),
+		dispatcher.WithSuppressionStore(ss),
+	)
 	go d.Subscribe(ctx)
 	go d.Run(ctx)
-	log.Printf("scheduler: dispatcher started (NATS=%s, durable-queue=%T, rate-limiter=%T)", natsURL, q, rl)
+
+	// Wire call-outcome consumer (retry + disposition state machine).
+	outcomeSub := dispatcher.NewNATSCallOutcomeSubscriber(js)
+	go d.SubscribeOutcomes(ctx, outcomeSub)
+
+	log.Printf("scheduler: dispatcher started (NATS=%s, durable-queue=%T, rate-limiter=%T, suppression=%T)", natsURL, q, rl, ss)
 }
 
 func newStore() (store.Store, error) {
