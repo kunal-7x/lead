@@ -80,6 +80,10 @@ type DialQueueStore interface {
 	FindByLastOutcomeEventID(ctx context.Context, eventID string) (*DialRow, error)
 	// UpdateRow applies fn to the row with the given ID and persists it.
 	UpdateRow(ctx context.Context, rowID string, fn func(*DialRow)) error
+	// CountsByStatus returns a map of status→count for rows belonging to campaignID.
+	CountsByStatus(ctx context.Context, campaignID string) (map[string]int, error)
+	// CountsByDisposition returns a map of disposition→count for rows belonging to campaignID.
+	CountsByDisposition(ctx context.Context, campaignID string) (map[string]int, error)
 }
 
 // ----- Config ---------------------------------------------------------------
@@ -856,6 +860,45 @@ func (f *FakeDialQueueStore) UpdateRow(_ context.Context, rowID string, fn func(
 		}
 	}
 	return fmt.Errorf("row %s not found", rowID)
+}
+
+// CountsByStatus returns status→count for the given campaign.
+func (f *FakeDialQueueStore) CountsByStatus(_ context.Context, campaignID string) (map[string]int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	counts := make(map[string]int)
+	for _, r := range f.rows {
+		if r.CampaignID == campaignID {
+			counts[r.Status]++
+		}
+	}
+	return counts, nil
+}
+
+// CountsByDisposition returns disposition→count for the given campaign.
+func (f *FakeDialQueueStore) CountsByDisposition(_ context.Context, campaignID string) (map[string]int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	counts := make(map[string]int)
+	for _, r := range f.rows {
+		if r.CampaignID == campaignID {
+			counts[r.Disposition]++
+		}
+	}
+	return counts, nil
+}
+
+// CountPendingWithAttempts counts pending rows with attempts > 0 for a campaign.
+func (f *FakeDialQueueStore) CountPendingWithAttempts(_ context.Context, campaignID string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, r := range f.rows {
+		if r.CampaignID == campaignID && r.Status == "pending" && r.Attempts > 0 {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // RowByLeadID returns the row for a given lead (for test assertions).

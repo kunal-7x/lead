@@ -152,6 +152,51 @@ func (s *PgkvDialQueueStore) ActiveCampaignIDs(ctx context.Context) ([]string, e
 	return ids, nil
 }
 
+// CountsByStatus returns status→count for all rows of a campaign.
+func (s *PgkvDialQueueStore) CountsByStatus(ctx context.Context, campaignID string) (map[string]int, error) {
+	all, err := pgkv.List[DialRow](ctx, s.kv, dialQueueKind)
+	if err != nil {
+		return nil, fmt.Errorf("CountsByStatus list: %w", err)
+	}
+	counts := make(map[string]int)
+	for _, r := range all {
+		if r.CampaignID == campaignID {
+			counts[r.Status]++
+		}
+	}
+	return counts, nil
+}
+
+// CountsByDisposition returns disposition→count for all rows of a campaign.
+func (s *PgkvDialQueueStore) CountsByDisposition(ctx context.Context, campaignID string) (map[string]int, error) {
+	all, err := pgkv.List[DialRow](ctx, s.kv, dialQueueKind)
+	if err != nil {
+		return nil, fmt.Errorf("CountsByDisposition list: %w", err)
+	}
+	counts := make(map[string]int)
+	for _, r := range all {
+		if r.CampaignID == campaignID {
+			counts[r.Disposition]++
+		}
+	}
+	return counts, nil
+}
+
+// CountPendingWithAttempts returns the number of pending rows with attempts > 0 for a campaign.
+func (s *PgkvDialQueueStore) CountPendingWithAttempts(ctx context.Context, campaignID string) (int, error) {
+	all, err := pgkv.List[DialRow](ctx, s.kv, dialQueueKind)
+	if err != nil {
+		return 0, fmt.Errorf("CountPendingWithAttempts list: %w", err)
+	}
+	n := 0
+	for _, r := range all {
+		if r.CampaignID == campaignID && r.Status == "pending" && r.Attempts > 0 {
+			n++
+		}
+	}
+	return n, nil
+}
+
 // updateRow fetches, mutates, and re-stores a row by rowID.
 func (s *PgkvDialQueueStore) updateRow(ctx context.Context, rowID string, fn func(*DialRow)) error {
 	r, exists, err := pgkv.Get[DialRow](ctx, s.kv, dialQueueKind, rowID)

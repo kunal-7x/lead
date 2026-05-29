@@ -35,7 +35,9 @@ func main() {
 	defer cancel()
 
 	// Wire the campaign dispatcher if NATS + Redis are configured.
-	startDispatcher(ctx)
+	if q := startDispatcher(ctx); q != nil {
+		h = h.WithDialQueue(q)
+	}
 
 	log.Printf("scheduler listening on %s", addr)
 	if err := http.ListenAndServe(addr, h.Routes()); err != nil {
@@ -46,20 +48,21 @@ func main() {
 // startDispatcher wires the Dispatcher when required infra env vars are set.
 // If NATS_URL or REDIS_URL is unset, it logs a warning and skips — existing
 // tests and dev envs without infra still boot normally.
-func startDispatcher(ctx context.Context) {
+// Returns the DialQueueStore so it can be wired into the HTTP handler.
+func startDispatcher(ctx context.Context) dispatcher.DialQueueStore {
 	natsURL := os.Getenv("NATS_URL")
 	redisURL := os.Getenv("REDIS_URL")
 
 	if natsURL == "" || redisURL == "" {
 		log.Printf("scheduler: NATS_URL or REDIS_URL not set; dispatcher disabled")
-		return
+		return nil
 	}
 
 	var sub dispatcher.Subscriber
 	js, err := events.New(natsURL)
 	if err != nil {
 		log.Printf("scheduler: NATS connect error (%v); dispatcher disabled", err)
-		return
+		return nil
 	}
 	sub = dispatcher.NewNATSSubscriber(js)
 
@@ -113,6 +116,7 @@ func startDispatcher(ctx context.Context) {
 	go d.SubscribeOutcomes(ctx, outcomeSub)
 
 	log.Printf("scheduler: dispatcher started (NATS=%s, durable-queue=%T, rate-limiter=%T, suppression=%T)", natsURL, q, rl, ss)
+	return q
 }
 
 func newStore() (store.Store, error) {

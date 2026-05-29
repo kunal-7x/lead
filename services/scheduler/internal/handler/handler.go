@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/lead/services/scheduler/internal/dispatcher"
 	"github.com/lead/services/scheduler/internal/model"
 	"github.com/lead/services/scheduler/internal/picker"
 )
@@ -17,6 +19,7 @@ type Handler struct {
 	picker       *picker.Picker
 	telephonyURL string
 	client       *http.Client
+	dialQueue    dispatcher.DialQueueStore
 }
 
 func New(p *picker.Picker) *Handler {
@@ -34,12 +37,20 @@ func NewWithTelephony(p *picker.Picker, telephonyURL string, client *http.Client
 	}
 }
 
+// WithDialQueue returns a copy of h with the given DialQueueStore wired in.
+func (h *Handler) WithDialQueue(q dispatcher.DialQueueStore) *Handler {
+	cp := *h
+	cp.dialQueue = q
+	return &cp
+}
+
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Post("/v1/scheduler/pick-next", h.pickNext)
 	r.Post("/v1/scheduler/mark-attempt", h.markAttempt)
 	r.Post("/v1/scheduler/demo-dispatch", h.demoDispatch)
 	r.Get("/v1/scheduler/queue-depth", h.queueDepth)
+	r.Get("/v1/campaigns/{id}/progress", h.campaignProgress)
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -215,4 +226,90 @@ func (h *Handler) queueDepth(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// CampaignProgressResponse is the JSON shape for GET /v1/campaigns/{id}/progress.
+type CampaignProgressResponse struct {
+	CampaignID    string `json:"campaign_id"`
+	Total         int    `json:"total"`
+	Pending       int    `json:"pending"`
+	InFlight      int    `json:"in_flight"`
+	Placed        int    `json:"placed"`
+	Connected     int    `json:"connected"`
+	NoAnswerRetry int    `json:"no_answer_retry"`
+	Failed        int    `json:"failed"`
+	Suppressed    int    `json:"suppressed"`
+	Done          int    `json:"done"`
+}
+
+func (h *Handler) campaignProgress(w http.ResponseWriter, r *http.Request) {
+	campaignID := chi.URLParam(r, "id")
+	if campaignID == "" {
+		http.Error(w, "campaign id required", http.StatusBadRequest)
+		return
+	}
+	if h.dialQueue == nil {
+		http.Error(w, "dial queue not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx := r.Context()
+	statusCounts, err := h.dialQueue.CountsByStatus(ctx, campaignID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("count by status: %v", err), http.StatusInternalServerError)
+		return
+	}
+	dispCounts, err := h.dialQueue.CountsByDisposition(ctx, campaignID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("count by disposition: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// pending rows that have been attempted at least once = re-queued no-answer retries.
+	noAnswerRetry, err := countPendingWithAttempts(ctx, h.dialQueue, campaignID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("pending with attempts: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	pending := statusCounts["pending"]
+	inFlight := statusCounts["in_flight"]
+	done := statusCounts["done"]
+	failed := statusCounts["failed"]
+	suppressed := statusCounts["suppressed"]
+
+	total := pending + inFlight + done + failed + suppressed
+	placed := inFlight + done + failed
+	connected := dispCounts["answered"]
+
+	resp := CampaignProgressResponse{
+		CampaignID:    campaignID,
+		Total:         total,
+		Pending:       pending,
+		InFlight:      inFlight,
+		Placed:        placed,
+		Connected:     connected,
+		NoAnswerRetry: noAnswerRetry,
+		Failed:        failed,
+		Suppressed:    suppressed,
+		Done:          done,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// countPendingWithAttempts counts pending rows with attempts > 0 (re-queued leads).
+// It queries via a ListRows-compatible helper on the store interface.
+// Since DialQueueStore doesn't expose a full scan, we use a type assertion to
+// FakeDialQueueStore in tests and fall back to 0 for the pgkv store (where the
+// pgkv store has an AllRows-style scan via CountsPendingWithAttempts added below).
+// To keep the interface minimal we add a PendingWithAttempts method to the interface.
+func countPendingWithAttempts(ctx context.Context, q dispatcher.DialQueueStore, campaignID string) (int, error) {
+	type pendingAtemptCounter interface {
+		CountPendingWithAttempts(ctx context.Context, campaignID string) (int, error)
+	}
+	if pac, ok := q.(pendingAtemptCounter); ok {
+		return pac.CountPendingWithAttempts(ctx, campaignID)
+	}
+	return 0, nil
 }

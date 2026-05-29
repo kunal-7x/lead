@@ -21,6 +21,7 @@ func main() {
 		LeadImportURL: envOr("LEAD_IMPORT_URL", "http://localhost:8106"),
 		CampaignURL:   envOr("CAMPAIGN_URL", "http://localhost:8112"),
 		WhatsAppURL:   envOr("WHATSAPP_URL", "http://localhost:8119"),
+		SchedulerURL:  envOr("SCHEDULER_URL", "http://localhost:8107"),
 		RedisAddr:     envOr("REDIS_ADDR", "localhost:6379"),
 		JWTSecret:     envOr("JWT_SECRET", "dev-secret"),
 		AllowedOrigins: []string{
