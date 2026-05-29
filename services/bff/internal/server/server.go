@@ -19,6 +19,7 @@ type Config struct {
 	LeadImportURL  string
 	CampaignURL    string
 	WhatsAppURL    string
+	SchedulerURL   string
 	RedisAddr      string
 	JWTSecret      string
 	AllowedOrigins []string
@@ -33,10 +34,15 @@ func New(cfg Config, logger *slog.Logger) (http.Handler, error) {
 	}
 
 	authClient := handler.NewTenantAuthClient(cfg.TenantAuthURL)
+	schedulerURL := cfg.SchedulerURL
+	if schedulerURL == "" {
+		schedulerURL = "http://localhost:8107"
+	}
 	productProxy, err := handler.NewProductProxy(map[string]string{
 		"lead_import": cfg.LeadImportURL,
 		"campaign":    cfg.CampaignURL,
 		"whatsapp":    cfg.WhatsAppURL,
+		"scheduler":   schedulerURL,
 	})
 	if err != nil {
 		return nil, err
@@ -105,6 +111,7 @@ func New(cfg Config, logger *slog.Logger) (http.Handler, error) {
 		r.Get("/v1/leads/{id}/status-history", handler.EmptyLeadStatusHistory)
 
 		// Campaign APIs
+		r.Post("/v1/campaigns/extract", productProxy.ProxyTo("campaign"))
 		r.Post("/v1/campaigns", productProxy.ProxyTo("campaign"))
 		r.Post("/v1/campaigns/", productProxy.ProxyTo("campaign"))
 		r.Get("/v1/campaigns", productProxy.ProxyTo("campaign"))
@@ -115,6 +122,7 @@ func New(cfg Config, logger *slog.Logger) (http.Handler, error) {
 		r.Post("/v1/campaigns/{id}/pause", productProxy.ProxyTo("campaign"))
 		r.Post("/v1/campaigns/{id}/resume", productProxy.ProxyTo("campaign"))
 		r.Get("/v1/campaigns/{id}/health", productProxy.ProxyTo("campaign"))
+			r.Get("/v1/campaigns/{id}/progress", productProxy.ProxyTo("scheduler"))
 
 		// WhatsApp inbox APIs
 		r.Get("/v1/whatsapp/threads", productProxy.ProxyTo("whatsapp"))

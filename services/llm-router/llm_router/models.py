@@ -80,6 +80,10 @@ class LLMRequest(BaseModel):
     # SUFFIX to the system prompt for THIS turn only so tone/length adapt without
     # hard-coding a mode.  Empty string / None → no suffix (neutral turn).
     system_prompt_suffix: str | None = None
+    # Rich AI-context fields from the campaign (product, offer, talking points, etc.).
+    # When present, a formatted block is appended to the system prompt so the LLM
+    # is grounded in campaign-specific context every turn.
+    campaign_context: dict | None = None
 
 
 class LLMResponse(BaseModel):

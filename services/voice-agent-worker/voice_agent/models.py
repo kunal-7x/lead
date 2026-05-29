@@ -18,6 +18,7 @@ class SessionContext:
     call_session_id: str = ""
     project_id: str = ""
     tts_premium: bool = False
+    campaign_context: dict = field(default_factory=dict)
 
 
 @dataclass

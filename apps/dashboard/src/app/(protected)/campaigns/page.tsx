@@ -2,11 +2,51 @@
 
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Pause, Play, Plus, RefreshCw, Send } from 'lucide-react';
+import { Pause, Play, Plus, RefreshCw, Send, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
 
 type CampaignStatus = 'draft' | 'active' | 'paused' | 'archived' | 'preflight_failed';
+
+interface CampaignContext {
+  product_description: string;
+  offer: string;
+  talking_points: string[];
+  objection_handling: { objection: string; response: string }[];
+  qualifying_questions: string[];
+  persona: string;
+  do_not_say: string[];
+  goal: string;
+  language: string;
+  business_hours: string;
+}
+
+interface CampaignLimits {
+  daily_call_cap: number;
+  hourly_call_cap: number;
+  concurrent_cap: number;
+  retry_max: number;
+  retry_busy_min: number;
+  retry_no_answer_min: number;
+  cost_cap_inr: number;
+  max_call_seconds: number;
+  call_window_start_hour: number;
+  call_window_end_hour: number;
+  timezone: string;
+}
+
+interface CampaignProgress {
+  campaign_id: string;
+  total: number;
+  pending: number;
+  in_flight: number;
+  placed: number;
+  connected: number;
+  no_answer_retry: number;
+  failed: number;
+  suppressed: number;
+  done: number;
+}
 
 interface Campaign {
   id: string;
@@ -34,6 +74,33 @@ interface CampaignHealth {
 
 const DEMO_TENANT_ID = 'tenant-demo';
 
+const emptyContext: CampaignContext = {
+  product_description: '',
+  offer: '',
+  talking_points: [],
+  objection_handling: [],
+  qualifying_questions: [],
+  persona: '',
+  do_not_say: [],
+  goal: '',
+  language: 'English',
+  business_hours: '',
+};
+
+const emptyLimits: CampaignLimits = {
+  daily_call_cap: 500,
+  hourly_call_cap: 50,
+  concurrent_cap: 3,
+  retry_max: 3,
+  retry_busy_min: 10,
+  retry_no_answer_min: 30,
+  cost_cap_inr: 0,
+  max_call_seconds: 300,
+  call_window_start_hour: 10,
+  call_window_end_hour: 19,
+  timezone: 'Asia/Kolkata',
+};
+
 const emptyCampaign = {
   name: 'Demo 10-lead campaign',
   project_id: 'project-skyline',
@@ -43,6 +110,33 @@ const emptyCampaign = {
   source_filter: 'demo-upload',
   schedule: '09:00-21:00 Asia/Kolkata',
 };
+
+// Helpers for array fields (split by comma or newline)
+function splitLines(text: string): string[] {
+  return text
+    .split(/\r?\n|,/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function joinLines(arr: string[]): string {
+  return arr.join('\n');
+}
+
+// objection_handling: each line is "objection :: response"
+function parseObjections(text: string): { objection: string; response: string }[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => {
+      const [objection, ...rest] = line.split('::');
+      return { objection: (objection ?? '').trim(), response: rest.join('::').trim() };
+    })
+    .filter((item) => item.objection);
+}
+
+function joinObjections(arr: { objection: string; response: string }[]): string {
+  return arr.map((item) => `${item.objection} :: ${item.response}`).join('\n');
+}
 
 async function fetchCampaigns() {
   const { data } = await api.get(`/v1/campaigns?tenant_id=${DEMO_TENANT_ID}`);
@@ -54,12 +148,26 @@ async function fetchHealth(campaignID: string) {
   return data as CampaignHealth;
 }
 
+async function fetchProgress(campaignID: string) {
+  const { data } = await api.get(`/v1/campaigns/${campaignID}/progress`);
+  return data as CampaignProgress;
+}
+
 export default function CampaignsPage() {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState(emptyCampaign);
+  const [context, setContext] = useState<CampaignContext>(emptyContext);
+  const [limits, setLimits] = useState<CampaignLimits>(emptyLimits);
+  const [briefText, setBriefText] = useState('');
   const [leadIDs, setLeadIDs] = useState('lead-demo-001\nlead-demo-002\nlead-demo-003');
   const [selectedCampaignID, setSelectedCampaignID] = useState('');
   const [healthCampaignID, setHealthCampaignID] = useState('');
+
+  // Context textarea state (string form for UI, parsed on submit)
+  const [talkingPointsText, setTalkingPointsText] = useState('');
+  const [objectionText, setObjectionText] = useState('');
+  const [qualifyingText, setQualifyingText] = useState('');
+  const [doNotSayText, setDoNotSayText] = useState('');
 
   const { data: campaigns = [], isLoading } = useQuery({
     queryKey: ['campaigns'],
@@ -71,10 +179,44 @@ export default function CampaignsPage() {
     [campaigns, selectedCampaignID],
   );
 
+  const isActive = selectedCampaign?.status === 'active';
+
   const healthQuery = useQuery({
     queryKey: ['campaign-health', healthCampaignID],
     queryFn: () => fetchHealth(healthCampaignID),
     enabled: Boolean(healthCampaignID),
+  });
+
+  const progressQuery = useQuery({
+    queryKey: ['campaign-progress', selectedCampaign?.id],
+    queryFn: () => fetchProgress(selectedCampaign!.id),
+    refetchInterval: 2000,
+    enabled: isActive && Boolean(selectedCampaign?.id),
+  });
+
+  // AI extract + prefill
+  const extractMutation = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.post('/v1/campaigns/extract', { text: briefText });
+      return data as CampaignContext;
+    },
+    onSuccess: (extracted) => {
+      setContext((prev) => ({ ...prev, ...extracted }));
+      setTalkingPointsText(joinLines(extracted.talking_points ?? []));
+      setObjectionText(joinObjections(extracted.objection_handling ?? []));
+      setQualifyingText(joinLines(extracted.qualifying_questions ?? []));
+      setDoNotSayText(joinLines(extracted.do_not_say ?? []));
+      toast.success('Context extracted and prefilled');
+    },
+    onError: () => toast.error('AI extract failed'),
+  });
+
+  const buildContextFromForm = (): CampaignContext => ({
+    ...context,
+    talking_points: splitLines(talkingPointsText),
+    objection_handling: parseObjections(objectionText),
+    qualifying_questions: splitLines(qualifyingText),
+    do_not_say: splitLines(doNotSayText),
   });
 
   const createMutation = useMutation({
@@ -83,15 +225,32 @@ export default function CampaignsPage() {
         ...draft,
         tenant_id: DEMO_TENANT_ID,
         status: 'draft',
+        context: buildContextFromForm(),
       });
       return data as Campaign;
     },
-    onSuccess: (campaign) => {
+    onSuccess: async (campaign) => {
       toast.success('Campaign created');
       setSelectedCampaignID(campaign.id);
+      // Save limits immediately after creation
+      try {
+        await api.put(`/v1/campaigns/${campaign.id}/limits`, limits);
+        toast.success('Limits saved');
+      } catch {
+        toast.error('Limits save failed — use Save Limits button');
+      }
       queryClient.invalidateQueries({ queryKey: ['campaigns'] });
     },
     onError: () => toast.error('Campaign create failed'),
+  });
+
+  const limitsMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedCampaign) throw new Error('select campaign');
+      await api.put(`/v1/campaigns/${selectedCampaign.id}/limits`, limits);
+    },
+    onSuccess: () => toast.success('Limits saved'),
+    onError: () => toast.error('Save limits failed'),
   });
 
   const attachMutation = useMutation({
@@ -143,8 +302,37 @@ export default function CampaignsPage() {
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[380px_1fr]">
+        {/* ── Create Campaign ── */}
         <section className="space-y-4 rounded-lg border bg-card p-4">
           <h2 className="text-base font-semibold">Create Campaign</h2>
+
+          {/* AI Brief */}
+          <div className="rounded-md border bg-muted/30 p-3 space-y-2">
+            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+              AI Assist — paste a brief
+            </p>
+            <label className="grid gap-1 text-sm font-medium">
+              Raw brief
+              <textarea
+                value={briefText}
+                onChange={(e) => setBriefText(e.target.value)}
+                rows={4}
+                placeholder="Paste your product brief, script notes, or any text describing the campaign…"
+                className="min-h-24 rounded-md border bg-background px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-ring"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => extractMutation.mutate()}
+              disabled={extractMutation.isPending || !briefText.trim()}
+              className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium hover:bg-muted disabled:opacity-50"
+            >
+              <Sparkles className="h-4 w-4" />
+              {extractMutation.isPending ? 'Extracting…' : 'Extract & Prefill'}
+            </button>
+          </div>
+
+          {/* Basic fields */}
           <div className="grid gap-3">
             <Field
               label="Name"
@@ -181,6 +369,140 @@ export default function CampaignsPage() {
               onChange={(value) => setDraft((current) => ({ ...current, schedule: value }))}
             />
           </div>
+
+          {/* AI Context fields */}
+          <details className="group">
+            <summary className="cursor-pointer select-none text-sm font-semibold text-muted-foreground hover:text-foreground">
+              AI Context fields {extractMutation.isSuccess ? '(prefilled)' : ''}
+            </summary>
+            <div className="mt-3 grid gap-3">
+              <TextAreaField
+                label="Product description"
+                value={context.product_description}
+                onChange={(v) => setContext((c) => ({ ...c, product_description: v }))}
+                placeholder="What is the product or service?"
+              />
+              <TextAreaField
+                label="Offer"
+                value={context.offer}
+                onChange={(v) => setContext((c) => ({ ...c, offer: v }))}
+                placeholder="What is the specific offer being made?"
+              />
+              <TextAreaField
+                label="Goal"
+                value={context.goal}
+                onChange={(v) => setContext((c) => ({ ...c, goal: v }))}
+                placeholder="What should the agent achieve in this call?"
+              />
+              <Field
+                label="Persona"
+                value={context.persona}
+                onChange={(v) => setContext((c) => ({ ...c, persona: v }))}
+              />
+              <Field
+                label="Language"
+                value={context.language}
+                onChange={(v) => setContext((c) => ({ ...c, language: v }))}
+              />
+              <Field
+                label="Business hours"
+                value={context.business_hours}
+                onChange={(v) => setContext((c) => ({ ...c, business_hours: v }))}
+              />
+              <TextAreaField
+                label="Talking points (one per line or comma-separated)"
+                value={talkingPointsText}
+                onChange={setTalkingPointsText}
+                placeholder="Free trial available&#10;No setup fees&#10;24/7 support"
+              />
+              <TextAreaField
+                label="Qualifying questions (one per line or comma-separated)"
+                value={qualifyingText}
+                onChange={setQualifyingText}
+                placeholder="Are you the decision maker?&#10;Current monthly spend?"
+              />
+              <TextAreaField
+                label="Do not say (one per line or comma-separated)"
+                value={doNotSayText}
+                onChange={setDoNotSayText}
+                placeholder="competitor name&#10;guaranteed"
+              />
+              <TextAreaField
+                label='Objections ("objection :: response" — one per line)'
+                value={objectionText}
+                onChange={setObjectionText}
+                placeholder="Too expensive :: We offer flexible pricing plans&#10;Not interested :: May I ask what your current solution is?"
+                rows={4}
+              />
+            </div>
+          </details>
+
+          {/* Pacing & Limits */}
+          <details className="group">
+            <summary className="cursor-pointer select-none text-sm font-semibold text-muted-foreground hover:text-foreground">
+              Pacing &amp; Limits
+            </summary>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <NumField
+                label="Concurrent cap"
+                value={limits.concurrent_cap}
+                onChange={(v) => setLimits((l) => ({ ...l, concurrent_cap: v }))}
+              />
+              <NumField
+                label="Hourly cap"
+                value={limits.hourly_call_cap}
+                onChange={(v) => setLimits((l) => ({ ...l, hourly_call_cap: v }))}
+              />
+              <NumField
+                label="Daily cap"
+                value={limits.daily_call_cap}
+                onChange={(v) => setLimits((l) => ({ ...l, daily_call_cap: v }))}
+              />
+              <NumField
+                label="Retry max"
+                value={limits.retry_max}
+                onChange={(v) => setLimits((l) => ({ ...l, retry_max: v }))}
+              />
+              <NumField
+                label="Retry busy (min)"
+                value={limits.retry_busy_min}
+                onChange={(v) => setLimits((l) => ({ ...l, retry_busy_min: v }))}
+              />
+              <NumField
+                label="Retry no-ans (min)"
+                value={limits.retry_no_answer_min}
+                onChange={(v) => setLimits((l) => ({ ...l, retry_no_answer_min: v }))}
+              />
+              <NumField
+                label="Cost cap (₹)"
+                value={limits.cost_cap_inr}
+                onChange={(v) => setLimits((l) => ({ ...l, cost_cap_inr: v }))}
+              />
+              <NumField
+                label="Max call (sec)"
+                value={limits.max_call_seconds}
+                onChange={(v) => setLimits((l) => ({ ...l, max_call_seconds: v }))}
+              />
+              <NumField
+                label="Window start hr"
+                value={limits.call_window_start_hour}
+                onChange={(v) => setLimits((l) => ({ ...l, call_window_start_hour: v }))}
+              />
+              <NumField
+                label="Window end hr"
+                value={limits.call_window_end_hour}
+                onChange={(v) => setLimits((l) => ({ ...l, call_window_end_hour: v }))}
+              />
+              <div className="sm:col-span-2">
+                <Field
+                  label="Timezone"
+                  value={limits.timezone}
+                  onChange={(v) => setLimits((l) => ({ ...l, timezone: v }))}
+                />
+              </div>
+            </div>
+          </details>
+
           <button
             type="button"
             onClick={() => createMutation.mutate()}
@@ -275,7 +597,7 @@ export default function CampaignsPage() {
               className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             >
               <Play className="h-4 w-4" />
-              Launch
+              Run Campaign
             </button>
             <button
               type="button"
@@ -310,6 +632,14 @@ export default function CampaignsPage() {
               <RefreshCw className="h-4 w-4" />
               Health
             </button>
+            <button
+              type="button"
+              onClick={() => limitsMutation.mutate()}
+              disabled={!selectedCampaign || limitsMutation.isPending}
+              className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium hover:bg-muted disabled:opacity-50"
+            >
+              {limitsMutation.isPending ? 'Saving…' : 'Save Limits'}
+            </button>
           </div>
         </section>
 
@@ -338,6 +668,45 @@ export default function CampaignsPage() {
           )}
         </section>
       </div>
+
+      {/* ── Live Progress Panel (only shown when active campaign selected) ── */}
+      {isActive && (
+        <section className="rounded-lg border bg-card p-4">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-base font-semibold">Live Progress</h2>
+            <span className="text-xs text-muted-foreground">
+              {selectedCampaign.name} — auto-refreshes every 2 s
+            </span>
+          </div>
+          {progressQuery.isFetching && !progressQuery.data ? (
+            <p className="text-sm text-muted-foreground">Loading…</p>
+          ) : progressQuery.data ? (
+            <dl className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+              <Metric label="Placed" value={String(progressQuery.data.placed)} />
+              <Metric label="Connected" value={String(progressQuery.data.connected)} />
+              <Metric label="In-flight" value={String(progressQuery.data.in_flight)} />
+              <Metric label="No-ans retry" value={String(progressQuery.data.no_answer_retry)} />
+              <Metric label="Failed" value={String(progressQuery.data.failed)} />
+              <Metric label="Suppressed" value={String(progressQuery.data.suppressed)} />
+              <Metric
+                label="Remaining"
+                value={String(
+                  Math.max(
+                    0,
+                    progressQuery.data.total -
+                      progressQuery.data.done -
+                      progressQuery.data.failed -
+                      progressQuery.data.suppressed,
+                  ),
+                )}
+              />
+              <Metric label="Total" value={String(progressQuery.data.total)} />
+            </dl>
+          ) : (
+            <p className="text-sm text-muted-foreground">No progress data yet.</p>
+          )}
+        </section>
+      )}
     </div>
   );
 }
@@ -357,6 +726,55 @@ function Field({
       <input
         value={value}
         onChange={(event) => onChange(event.target.value)}
+        className="h-9 rounded-md border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+      />
+    </label>
+  );
+}
+
+function TextAreaField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  rows = 3,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  rows?: number;
+}) {
+  return (
+    <label className="grid gap-1 text-sm font-medium">
+      {label}
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        rows={rows}
+        className="rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+      />
+    </label>
+  );
+}
+
+function NumField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="grid gap-1 text-sm font-medium">
+      {label}
+      <input
+        type="number"
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
         className="h-9 rounded-md border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
       />
     </label>

@@ -205,6 +205,9 @@ class HttpLLMClient:
         # T2.1: per-turn adaptive directive from CSO/RSP — inject when present.
         if system_prompt_suffix:
             payload["system_prompt_suffix"] = system_prompt_suffix
+        # Campaign-specific AI context — pass through when populated.
+        if ctx.campaign_context:
+            payload["campaign_context"] = ctx.campaign_context
         return payload
 
     async def generate(self, ctx: SessionContext, user_turn: str,

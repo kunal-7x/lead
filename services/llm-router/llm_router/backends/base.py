@@ -127,6 +127,47 @@ The "reply" value MUST be natural spoken Hindi in Devanagari (see persona rules 
 """
 
 
+def format_campaign_context(ctx: dict) -> str:
+    """Render a labeled campaign-context block for injection into the system prompt.
+
+    Only non-empty fields are included.  Returns an empty string if ctx is empty.
+    """
+    if not ctx:
+        return ""
+    lines: list[str] = ["--- Campaign Context ---"]
+    if ctx.get("product_description"):
+        lines.append(f"Product: {ctx['product_description']}")
+    if ctx.get("offer"):
+        lines.append(f"Offer: {ctx['offer']}")
+    if ctx.get("talking_points"):
+        lines.append("Talking points:")
+        for tp in ctx["talking_points"]:
+            lines.append(f"  • {tp}")
+    if ctx.get("objection_handling"):
+        lines.append("Objection handling:")
+        for oh in ctx["objection_handling"]:
+            if isinstance(oh, dict):
+                lines.append(f"  [{oh.get('objection', '')}] → {oh.get('response', '')}")
+    if ctx.get("qualifying_questions"):
+        lines.append("Qualifying questions:")
+        for q in ctx["qualifying_questions"]:
+            lines.append(f"  • {q}")
+    if ctx.get("persona"):
+        lines.append(f"Persona/tone: {ctx['persona']}")
+    if ctx.get("do_not_say"):
+        lines.append("DO NOT SAY:")
+        for d in ctx["do_not_say"]:
+            lines.append(f"  • {d}")
+    if ctx.get("goal"):
+        lines.append(f"Goal/CTA: {ctx['goal']}")
+    if ctx.get("language"):
+        lines.append(f"Language: {ctx['language']}")
+    if ctx.get("business_hours"):
+        lines.append(f"Business hours: {ctx['business_hours']}")
+    lines.append("--- End Campaign Context ---")
+    return "\n".join(lines)
+
+
 class LLMBackend(ABC):
     name: str
 
@@ -145,12 +186,16 @@ class LLMBackend(ABC):
 
     def _build_messages(self, req: LLMRequest, kb_context: str) -> list[dict]:
         slots_block = _build_slots_block(req.collected_slots)
+        campaign_block = format_campaign_context(req.campaign_context or {})
         system = (
             f"{PERSONA_PROMPT}\n"
             f"{slots_block}"
             f"KB Context (अगर ज़रूरी हो तो इसी से जानकारी दो):\n{kb_context}\n\n"
             f"{BRAIN_SCHEMA_PROMPT}"
         )
+        # Inject campaign-specific context (product, offer, talking points, etc.) when present.
+        if campaign_block:
+            system = system + f"\n\n{campaign_block}"
         # T2.1: Adaptive per-turn directive (CSO/RSP) — appended as suffix when present.
         if req.system_prompt_suffix:
             system = system + f"\n\n{req.system_prompt_suffix}"

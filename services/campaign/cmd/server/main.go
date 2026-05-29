@@ -41,7 +41,11 @@ func main() {
 		log.Printf("campaign: loaded publisher from JetStream %s", os.Getenv("NATS_URL"))
 	}
 
-	h := handler.New(s)
+	llmRouterURL := os.Getenv("LLM_ROUTER_URL")
+	if llmRouterURL == "" {
+		llmRouterURL = "http://llm-router:8111"
+	}
+	h := handler.NewWithLLMRouter(s, llmRouterURL)
 
 	// Wrap the campaign handler to emit campaign.launched events after launch.
 	mux := http.NewServeMux()

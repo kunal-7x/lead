@@ -1,7 +1,10 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -11,14 +14,24 @@ import (
 )
 
 type Handler struct {
-	store store.Store
-	svc   *campaign.Service
+	store        store.Store
+	svc          *campaign.Service
+	llmRouterURL string
 }
 
 func New(s store.Store) *Handler {
 	return &Handler{
 		store: s,
 		svc:   campaign.New(s),
+	}
+}
+
+// NewWithLLMRouter creates a Handler with a custom llm-router base URL.
+func NewWithLLMRouter(s store.Store, llmRouterURL string) *Handler {
+	return &Handler{
+		store:        s,
+		svc:          campaign.New(s),
+		llmRouterURL: llmRouterURL,
 	}
 }
 
@@ -30,10 +43,12 @@ func (h *Handler) Router() http.Handler {
 	})
 
 	r.Route("/v1/campaigns", func(r chi.Router) {
+		r.Post("/extract", h.extractCampaignContext)
 		r.Post("/", h.createCampaign)
 		r.Get("/", h.listCampaigns)
 		r.Get("/{id}", h.getCampaign)
 		r.Post("/{id}/leads", h.attachLeads)
+		r.Get("/{id}/leads", h.listLeads)
 		r.Post("/{id}/launch", h.launchCampaign)
 		r.Post("/{id}/pause", h.pauseCampaign)
 		r.Post("/{id}/resume", h.resumeCampaign)
@@ -113,6 +128,24 @@ func (h *Handler) attachLeads(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]int{"attached": len(body.LeadIDs)})
 }
 
+type listLeadsResponse struct {
+	CampaignID string                  `json:"campaign_id"`
+	Leads      []*model.CampaignLead   `json:"leads"`
+}
+
+func (h *Handler) listLeads(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	leads, err := h.svc.ListLeads(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if leads == nil {
+		leads = []*model.CampaignLead{}
+	}
+	writeJSON(w, http.StatusOK, listLeadsResponse{CampaignID: id, Leads: leads})
+}
+
 func (h *Handler) launchCampaign(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	result, err := h.svc.LaunchCampaign(r.Context(), id)
@@ -179,4 +212,58 @@ func (h *Handler) setCampaignLimits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, limits)
+}
+
+type extractRequest struct {
+	Text string `json:"text"`
+}
+
+func (h *Handler) extractCampaignContext(w http.ResponseWriter, r *http.Request) {
+	var req extractRequest
+	if err := decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Text == "" {
+		writeError(w, http.StatusBadRequest, "text is required")
+		return
+	}
+
+	llmURL := h.llmRouterURL
+	if llmURL == "" {
+		llmURL = "http://llm-router:8111"
+	}
+	upstreamURL := fmt.Sprintf("%s/v1/llm/extract", llmURL)
+
+	body, _ := json.Marshal(map[string]string{"text": req.Text})
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to build upstream request: "+err.Error())
+		return
+	}
+	upstreamReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(upstreamReq)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "llm-router unreachable: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to read llm-router response: "+err.Error())
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("llm-router returned %d: %s", resp.StatusCode, string(respBody)))
+		return
+	}
+
+	var ctx model.CampaignContext
+	if err := json.Unmarshal(respBody, &ctx); err != nil {
+		writeError(w, http.StatusBadGateway, "invalid response from llm-router: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, ctx)
 }

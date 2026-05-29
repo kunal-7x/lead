@@ -46,6 +46,11 @@ func (s *Service) AttachLeads(ctx context.Context, campaignID string, leadIDs []
 	return s.store.AttachLeads(ctx, campaignID, leadIDs)
 }
 
+// ListLeads returns all leads attached to the given campaign.
+func (s *Service) ListLeads(ctx context.Context, campaignID string) ([]*model.CampaignLead, error) {
+	return s.store.ListCampaignLeads(ctx, campaignID)
+}
+
 // LaunchCampaign runs the preflight checklist; errors on any failure.
 func (s *Service) LaunchCampaign(ctx context.Context, campaignID string) (*model.PreflightResult, error) {
 	campaign, err := s.store.GetCampaign(ctx, campaignID)
