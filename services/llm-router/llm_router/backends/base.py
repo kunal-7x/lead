@@ -151,6 +151,9 @@ class LLMBackend(ABC):
             f"KB Context (अगर ज़रूरी हो तो इसी से जानकारी दो):\n{kb_context}\n\n"
             f"{BRAIN_SCHEMA_PROMPT}"
         )
+        # T2.1: Adaptive per-turn directive (CSO/RSP) — appended as suffix when present.
+        if req.system_prompt_suffix:
+            system = system + f"\n\n{req.system_prompt_suffix}"
         messages = [{"role": "system", "content": system}]
         for turn in req.dialog_history[-6:]:  # last 6 turns
             messages.append(turn)

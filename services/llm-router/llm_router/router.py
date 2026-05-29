@@ -482,6 +482,9 @@ async def _llm_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncIt
         "'जी'/'ठीक है' मत बोलो — हमेशा बात आगे बढ़ाओ। एक असली इंसानी टेलीकॉलर "
         "की तरह स्वाभाविक रूप से बोलो।",
     ]
+    # T2.1: Adaptive per-turn directive (CSO/RSP) — appended as suffix when present.
+    if req.system_prompt_suffix:
+        system_lines.append(f"\n{req.system_prompt_suffix}")
     system = "\n".join(system_lines)
 
     messages: list[dict] = [{"role": "system", "content": system}]

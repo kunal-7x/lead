@@ -76,6 +76,10 @@ class LLMRequest(BaseModel):
     # Keys: budget_text, budget_value, location_pref, property_type, timeline_days, purpose.
     # Only non-null fields are included. None / omitted → no slots block in prompt.
     collected_slots: dict[str, Any] | None = None
+    # Per-turn adaptive directive from the CSO/RSP layer (T2.1).  Appended as a
+    # SUFFIX to the system prompt for THIS turn only so tone/length adapt without
+    # hard-coding a mode.  Empty string / None → no suffix (neutral turn).
+    system_prompt_suffix: str | None = None
 
 
 class LLMResponse(BaseModel):
