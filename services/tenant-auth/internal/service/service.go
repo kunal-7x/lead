@@ -90,11 +90,15 @@ func (svc *Service) issueJWT(ctx context.Context, tenantID, userID string, roles
 		return "", fmt.Errorf("get signing key: %w", err)
 	}
 	claims := jwt.MapClaims{
-		"tid":   tenantID,
-		"uid":   userID,
-		"roles": roles,
-		"exp":   time.Now().Add(ttl).Unix(),
-		"iat":   time.Now().Unix(),
+		"tid": tenantID,
+		"uid": userID,
+		// Also emit the standard claim names the BFF/gateway expects so a single
+		// token works across services (BFF reads tenant_id + sub).
+		"tenant_id": tenantID,
+		"sub":       userID,
+		"roles":     roles,
+		"exp":       time.Now().Add(ttl).Unix(),
+		"iat":       time.Now().Unix(),
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return tok.SignedString(key)

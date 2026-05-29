@@ -81,6 +81,11 @@ func (h *Handler) createCampaign(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Trust the authenticated tenant from the gateway (X-Tenant-ID) over the
+	// request body, so a campaign is always scoped to the caller's tenant.
+	if tid := r.Header.Get("X-Tenant-ID"); tid != "" {
+		c.TenantID = tid
+	}
 	if err := h.svc.CreateCampaign(r.Context(), &c); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -90,6 +95,9 @@ func (h *Handler) createCampaign(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) listCampaigns(w http.ResponseWriter, r *http.Request) {
 	tenantID := r.URL.Query().Get("tenant_id")
+	if tenantID == "" {
+		tenantID = r.Header.Get("X-Tenant-ID")
+	}
 	campaigns, err := h.store.ListCampaigns(r.Context(), tenantID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

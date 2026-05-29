@@ -3,6 +3,7 @@ package campaign
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/lead/services/campaign/internal/autopause"
 	"github.com/lead/services/campaign/internal/model"
@@ -61,6 +62,13 @@ func (s *Service) LaunchCampaign(ctx context.Context, campaignID string) (*model
 	result, err := s.preflight.Run(ctx, campaign)
 	if err != nil {
 		return nil, fmt.Errorf("preflight run: %w", err)
+	}
+	// Dev/local affordance: when CAMPAIGN_PREFLIGHT_DISABLED=1, treat preflight as
+	// passed so a campaign launches without the full real-estate artefact set
+	// (KB approval, RERA, pinned script/prompt). NEVER enable in production.
+	if os.Getenv("CAMPAIGN_PREFLIGHT_DISABLED") == "1" && result != nil {
+		result.Passed = true
+		result.Errors = nil
 	}
 	if !result.Passed {
 		if err := s.store.UpdateCampaignStatus(ctx, campaignID, model.StatusPreflightFailed, "preflight failed"); err != nil {

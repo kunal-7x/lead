@@ -78,14 +78,16 @@ func New(cfg Config, logger *slog.Logger) (http.Handler, error) {
 	// WebSocket stream stub
 	r.Get("/v1/stream", handler.Stream(logger))
 
+	// Public auth routes (must NOT require a token — this is how you GET one).
+	r.Post("/v1/auth/login", handler.Login(authClient))
+	r.Post("/v1/auth/refresh", handler.RefreshToken(authClient))
+
 	// Protected API routes
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireAuth)
 		r.Use(middleware.RateLimit)
 
-		// Auth pass-through
-		r.Post("/v1/auth/login", handler.Login(authClient))
-		r.Post("/v1/auth/refresh", handler.RefreshToken(authClient))
+		// Auth pass-through (require a valid session)
 		r.Post("/v1/auth/logout", handler.Logout(authClient))
 		r.Post("/v1/auth/2fa/enroll", handler.Enroll2FA(authClient))
 		r.Post("/v1/auth/2fa/verify", handler.Verify2FA(authClient))
