@@ -6,6 +6,8 @@ import os
 import time
 from typing import AsyncIterator
 
+import httpx
+
 from llm_router.backends.base import LLMBackend
 from llm_router.claim_control import ClaimControl
 from llm_router.kb_client import KbRetriever
@@ -22,6 +24,35 @@ except Exception:  # evs_common optional outside repo
         yield {"output": None}
 
 _TIMEOUT_S = 20.0
+
+# Concurrency guard: max simultaneous provider calls across all in-flight requests.
+_MAX_CONCURRENT = int(os.getenv("LLM_MAX_CONCURRENT", "8"))
+_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _semaphore
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
+    return _semaphore
+
+
+# Backoff schedule for 429 / 5xx responses from provider.
+_BACKOFF_SCHEDULE = (0.25, 0.5, 1.0)
+
+# Module-level singleton httpx client for streaming LLM calls.
+# Created lazily so it lives inside the event loop (no creation at import time).
+_http_client: httpx.AsyncClient | None = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            timeout=30.0,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
+    return _http_client
 
 # OpenRouter / LLM provider configuration
 # Override via env vars to switch providers without code changes:
@@ -84,8 +115,8 @@ class LLMRouter:
                     input={"user_turn": req.user_turn, "lang": req.lang},
                     metadata={"tenant_id": req.tenant_id, "session_id": req.session_id},
                 ) as span:
-                    brain, pt, ct = await asyncio.wait_for(
-                        backend.generate(req, kb_context), timeout=_TIMEOUT_S
+                    brain, pt, ct = await self._call_with_backoff(
+                        backend, req, kb_context
                     )
                     span["output"] = {"reply": brain.reply, "lead_score": brain.lead_score,
                                       "next_action": brain.next_action}
@@ -107,6 +138,42 @@ class LLMRouter:
             model_used="fallback",
             latency_ms=int((time.time() - t0) * 1000),
         )
+
+    async def _call_with_backoff(
+        self,
+        backend: LLMBackend,
+        req: LLMRequest,
+        kb_context: str,
+    ):
+        """Acquire the concurrency semaphore then call backend.generate().
+
+        Retries with exponential backoff on HTTP 429 / 5xx errors.
+        """
+        sem = _get_semaphore()
+        last_exc: Exception | None = None
+        async with sem:
+            for attempt, backoff in enumerate(_BACKOFF_SCHEDULE + (None,)):  # type: ignore[operator]
+                try:
+                    return await asyncio.wait_for(
+                        backend.generate(req, kb_context), timeout=_TIMEOUT_S
+                    )
+                except asyncio.TimeoutError:
+                    raise
+                except Exception as exc:
+                    msg = str(exc).lower()
+                    retriable = (
+                        "429" in msg
+                        or "rate limit" in msg
+                        or "503" in msg
+                        or "502" in msg
+                        or "500" in msg
+                    )
+                    if retriable and backoff is not None:
+                        await asyncio.sleep(backoff)
+                        last_exc = exc
+                        continue
+                    raise
+        raise last_exc  # type: ignore[misc]
 
     async def generate_stream(
         self, req: LLMRequest, trace_id: str | None = None
@@ -370,8 +437,6 @@ async def _llm_stream(backend, req: LLMRequest, kb_context: str) -> AsyncIterato
     Provider is selected via module-level _LLM_BASE_URL / _LLM_MODEL / _LLM_API_KEY,
     defaulting to OpenRouter with google/gemini-2.0-flash-001.
     """
-    import httpx
-
     api_key = getattr(backend, "_api_key", None) or _LLM_API_KEY
     if not api_key:
         raise RuntimeError("No LLM API key configured (LLM_API_KEY / OPENROUTER_API_KEY / GROQ_API_KEY)")
@@ -393,40 +458,40 @@ async def _llm_stream(backend, req: LLMRequest, kb_context: str) -> AsyncIterato
     full_content = ""
     emitted_len = 0       # chars of the decoded reply value already streamed
     reply_done = False    # closing quote of the reply value seen
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        async with client.stream(
-            "POST",
-            base_url,
-            json=payload,
-            headers=headers,
-        ) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line or not line.startswith("data:"):
-                    continue
-                raw = line[len("data:"):].strip()
-                if raw == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(raw)
-                except Exception:
-                    continue
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                token = delta.get("content", "")
-                if not token:
-                    continue
-                full_content += token
-                # The model emits a JSON object; stream ONLY the natural-language
-                # "reply" string value (decoded), so the worker speaks words, not JSON.
-                if not reply_done:
-                    decoded, complete = _extract_reply_progress(full_content)
-                    if decoded is not None and len(decoded) > emitted_len:
-                        piece = decoded[emitted_len:]
-                        emitted_len = len(decoded)
-                        yield f"data: {json.dumps({'token': piece, 'done': False})}\n\n"
-                    if complete:
-                        reply_done = True
-                        # rest of the JSON (metadata) is accumulated silently
+    client = _get_http_client()
+    async with client.stream(
+        "POST",
+        base_url,
+        json=payload,
+        headers=headers,
+    ) as resp:
+        resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            if not line or not line.startswith("data:"):
+                continue
+            raw = line[len("data:"):].strip()
+            if raw == "[DONE]":
+                break
+            try:
+                chunk = json.loads(raw)
+            except Exception:
+                continue
+            delta = chunk.get("choices", [{}])[0].get("delta", {})
+            token = delta.get("content", "")
+            if not token:
+                continue
+            full_content += token
+            # The model emits a JSON object; stream ONLY the natural-language
+            # "reply" string value (decoded), so the worker speaks words, not JSON.
+            if not reply_done:
+                decoded, complete = _extract_reply_progress(full_content)
+                if decoded is not None and len(decoded) > emitted_len:
+                    piece = decoded[emitted_len:]
+                    emitted_len = len(decoded)
+                    yield f"data: {json.dumps({'token': piece, 'done': False})}\n\n"
+                if complete:
+                    reply_done = True
+                    # rest of the JSON (metadata) is accumulated silently
 
     # Validate the accumulated JSON and emit final event
     try:
@@ -450,7 +515,6 @@ async def _llm_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncIt
     This is the SPEECH path. Metadata (next_action, summary) comes from the
     parallel structured batch call in the worker.
     """
-    import httpx
     import sys
 
     api_key = getattr(backend, "_api_key", None) or _LLM_API_KEY
@@ -514,35 +578,35 @@ async def _llm_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncIt
     t0 = time.time()
     first_token_emitted = False
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        async with client.stream(
-            "POST",
-            base_url,
-            json=payload,
-            headers=headers,
-        ) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line or not line.startswith("data:"):
-                    continue
-                raw = line[len("data:"):].strip()
-                if raw == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(raw)
-                except Exception:
-                    continue
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                token = delta.get("content", "")
-                if not token:
-                    continue
-                if not first_token_emitted:
-                    first_token_emitted = True
-                    ms = (time.time() - t0) * 1000
-                    print(
-                        f"[llm-router] stream_text first_token ms={ms:.0f}",
-                        file=sys.stderr, flush=True,
-                    )
-                yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+    _client = _get_http_client()
+    async with _client.stream(
+        "POST",
+        base_url,
+        json=payload,
+        headers=headers,
+    ) as resp:
+        resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            if not line or not line.startswith("data:"):
+                continue
+            raw = line[len("data:"):].strip()
+            if raw == "[DONE]":
+                break
+            try:
+                chunk = json.loads(raw)
+            except Exception:
+                continue
+            delta = chunk.get("choices", [{}])[0].get("delta", {})
+            token = delta.get("content", "")
+            if not token:
+                continue
+            if not first_token_emitted:
+                first_token_emitted = True
+                ms = (time.time() - t0) * 1000
+                print(
+                    f"[llm-router] stream_text first_token ms={ms:.0f}",
+                    file=sys.stderr, flush=True,
+                )
+            yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
 
     yield f"data: {json.dumps({'token': '', 'done': True})}\n\n"

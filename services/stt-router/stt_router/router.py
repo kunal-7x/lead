@@ -24,6 +24,28 @@ except Exception:
 # to be fast get a tighter timeout via _ENGINE_TIMEOUT_S below.
 _TIMEOUT_S = float(os.getenv("STT_ENGINE_TIMEOUT_S", "8.0"))
 
+# Concurrency guard: max simultaneous provider calls across all in-flight requests.
+# Prevents serialization/queue build-up under concurrent calls. Env-configurable.
+_MAX_CONCURRENT = int(os.getenv("STT_MAX_CONCURRENT", "8"))
+_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    """Return (lazily creating) the module-level semaphore.
+
+    Lazy creation is required because asyncio.Semaphore must be created inside
+    an active event loop. Under uvicorn this is always the case; tests that
+    call transcribe() also have a running loop via pytest-asyncio.
+    """
+    global _semaphore
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
+    return _semaphore
+
+
+# Backoff schedule (seconds) for 429 / 5xx provider responses.
+_BACKOFF_SCHEDULE = (0.25, 0.5, 1.0)
+
 # Per-engine timeout overrides. Self-hosted/GPU engines respond fast, so they
 # keep a tight budget; cloud engines fall back to the (larger) default.
 # Sarvam gets 20s to allow the engine's HTTP/2 retry path to complete:
@@ -116,9 +138,8 @@ class STTRouter:
                     input={"audio_bytes": len(audio), "lang": lang},
                     metadata={"tenant_id": tenant_id, "session_id": session_id},
                 ) as span:
-                    result = await asyncio.wait_for(
-                        engine.transcribe(audio, lang, session_id),
-                        timeout=_engine_timeout(name),
+                    result = await self._call_with_backoff(
+                        engine, audio, lang, session_id, name
                     )
                     span["output"] = {"text": result.text, "confidence": result.confidence}
             except asyncio.TimeoutError:
@@ -142,6 +163,49 @@ class STTRouter:
             return last_result
 
         raise RuntimeError("All STT engines failed or unavailable")
+
+    async def _call_with_backoff(
+        self,
+        engine: STTEngine,
+        audio: bytes,
+        lang: str,
+        session_id: str,
+        name: str,
+    ) -> STTResult:
+        """Acquire the concurrency semaphore then call the engine.
+
+        On HTTP 429 or 5xx, retries with exponential backoff up to 3 attempts
+        before re-raising (which causes the router to try the next engine).
+        TimeoutError from asyncio.wait_for is re-raised immediately — it is
+        handled by the caller.
+        """
+        sem = _get_semaphore()
+        last_exc: Exception | None = None
+        async with sem:
+            for attempt, backoff in enumerate(_BACKOFF_SCHEDULE + (None,)):  # type: ignore[operator]
+                try:
+                    return await asyncio.wait_for(
+                        engine.transcribe(audio, lang, session_id),
+                        timeout=_engine_timeout(name),
+                    )
+                except asyncio.TimeoutError:
+                    raise  # timeout → mark unhealthy; no retry
+                except Exception as exc:
+                    # Retry on rate-limit / server errors; give up on others.
+                    msg = str(exc).lower()
+                    retriable = (
+                        "429" in msg
+                        or "rate limit" in msg
+                        or "503" in msg
+                        or "502" in msg
+                        or "500" in msg
+                    )
+                    if retriable and backoff is not None:
+                        await asyncio.sleep(backoff)
+                        last_exc = exc
+                        continue
+                    raise
+        raise last_exc  # type: ignore[misc]  # unreachable but satisfies type checker
 
     async def engine_health(self) -> list[EngineHealth]:
         now = time.time()

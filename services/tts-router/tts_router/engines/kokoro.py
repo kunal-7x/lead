@@ -30,7 +30,10 @@ class KokoroEngine(TTSEngine):
 
     def __init__(self, base_url: str = "", timeout: float = _TIMEOUT) -> None:
         self._base_url = base_url or _KOKORO_URL
-        self._client = httpx.AsyncClient(timeout=timeout)
+        self._client = httpx.AsyncClient(
+            timeout=timeout,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
 
     async def synthesize(self, text: str, voice_id: str, lang: str) -> bytes:
         payload = {"model": "kokoro", "input": text, "voice": voice_id,
@@ -63,7 +66,10 @@ class IndicParlerEngine(TTSEngine):
 
     def __init__(self, base_url: str = "") -> None:
         self._base_url = base_url or os.getenv("INDIC_PARLER_URL", "http://indic-parler:8083")
-        self._client = httpx.AsyncClient(timeout=15.0)
+        self._client = httpx.AsyncClient(
+            timeout=15.0,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
 
     async def synthesize(self, text: str, voice_id: str, lang: str) -> bytes:
         resp = await self._client.post(f"{self._base_url}/synthesize",
@@ -91,7 +97,10 @@ class IndicF5Engine(TTSEngine):
 
     def __init__(self, base_url: str = "") -> None:
         self._base_url = base_url or os.getenv("INDICF5_URL", "http://indicf5:8084")
-        self._client = httpx.AsyncClient(timeout=15.0)
+        self._client = httpx.AsyncClient(
+            timeout=15.0,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
 
     async def synthesize(self, text: str, voice_id: str, lang: str) -> bytes:
         resp = await self._client.post(f"{self._base_url}/synthesize",
@@ -144,6 +153,7 @@ class ElevenLabsEngine(TTSEngine):
         self._client = httpx.AsyncClient(
             timeout=15.0,
             headers={"xi-api-key": self._api_key} if self._api_key else {},
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         )
 
     # ── Batch HTTP path (fallback) ────────────────────────────────────────────

@@ -37,7 +37,10 @@ class ClaimControl(Protocol):
 class HttpClaimControl:
     def __init__(self, base_url: str | None = None) -> None:
         self._base_url = (base_url or os.getenv("KNOWLEDGE_SERVICE_URL", "http://knowledge:8110")).rstrip("/")
-        self._client = httpx.AsyncClient(timeout=4.0)
+        self._client = httpx.AsyncClient(
+            timeout=4.0,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
 
     async def check(
         self,

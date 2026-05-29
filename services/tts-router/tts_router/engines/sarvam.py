@@ -233,7 +233,10 @@ class SarvamBulbulEngine(TTSEngine):
     def __init__(self, api_key: str = "", timeout: float = _TIMEOUT) -> None:
         self._api_key = (api_key or _API_KEY).strip()  # strip \r\n from Windows .env
         self._timeout = timeout
-        self._client = httpx.AsyncClient(timeout=timeout)
+        self._client = httpx.AsyncClient(
+            timeout=timeout,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
 
     async def synthesize(
         self,

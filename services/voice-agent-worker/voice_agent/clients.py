@@ -17,6 +17,12 @@ _TTS_URL = os.getenv("TTS_ROUTER_URL", "http://tts-router:8113")
 
 logger = logging.getLogger(__name__)
 
+# Shared connection-pool limits for every router httpx.AsyncClient. Under
+# concurrent calls the clients are reused process-wide (see app.py lifespan),
+# so the pool must be large enough to serve N simultaneous calls without
+# serialising on a tiny default keepalive pool.
+_POOL_LIMITS = httpx.Limits(max_connections=200, max_keepalive_connections=50)
+
 
 class STTClient(Protocol):
     async def transcribe(self, audio: bytes, lang: str, session_id: str) -> STTResult: ...
@@ -48,7 +54,7 @@ class TTSClient(Protocol):
 class HttpSTTClient:
     def __init__(self, base_url: str = "") -> None:
         self._base_url = base_url or _STT_URL
-        self._client = httpx.AsyncClient(timeout=10.0)
+        self._client = httpx.AsyncClient(timeout=10.0, limits=_POOL_LIMITS)
         # WS base: convert http(s) to ws(s)
         self._ws_base = self._base_url.replace("https://", "wss://").replace("http://", "ws://")
 
@@ -185,7 +191,7 @@ class HttpSTTClient:
 class HttpLLMClient:
     def __init__(self, base_url: str = "") -> None:
         self._base_url = base_url or _LLM_URL
-        self._client = httpx.AsyncClient(timeout=20.0)
+        self._client = httpx.AsyncClient(timeout=20.0, limits=_POOL_LIMITS)
 
     def _build_payload(self, ctx: SessionContext, user_turn: str,
                        dialog_history: list[dict],
@@ -344,7 +350,7 @@ class HttpLLMClient:
 class HttpGuardrailClient:
     def __init__(self, base_url: str = "") -> None:
         self._base_url = base_url or _GUARDRAIL_URL
-        self._client = httpx.AsyncClient(timeout=5.0)
+        self._client = httpx.AsyncClient(timeout=5.0, limits=_POOL_LIMITS)
 
     async def check(self, brain: BrainOutput, kb_chunks: list[str],
                     user_turn: str) -> BrainOutput:
@@ -363,9 +369,20 @@ class HttpGuardrailClient:
 
 
 class HttpTTSClient:
-    def __init__(self, base_url: str = "") -> None:
+    def __init__(self, base_url: str = "",
+                 shared_http_client: "httpx.AsyncClient | None" = None) -> None:
         self._base_url = base_url or _TTS_URL
-        self._client = httpx.AsyncClient(timeout=10.0)
+        # The Sarvam streaming WS is per-session, so this client cannot be shared
+        # as a singleton across calls. We DO, however, share the underlying httpx
+        # connection pool: a process-wide AsyncClient is injected (shared_http_client)
+        # so batch synthesize() calls across all concurrent calls reuse one TCP pool.
+        # When shared, this instance does NOT own the client and must not close it.
+        if shared_http_client is not None:
+            self._client = shared_http_client
+            self._owns_client = False
+        else:
+            self._client = httpx.AsyncClient(timeout=10.0, limits=_POOL_LIMITS)
+            self._owns_client = True
         self._ws_base = self._base_url.replace("https://", "wss://").replace("http://", "ws://")
         # Per-session Sarvam streaming WS (reused across turns; closed on hangup).
         self._stream_ws = None  # type: ignore[assignment]
@@ -472,5 +489,8 @@ class HttpTTSClient:
                 pass
 
     async def aclose(self) -> None:
+        # Always close the per-session streaming WS. Only close the httpx pool if
+        # we own it — a shared (process-wide) pool outlives the call.
         await self._close_stream_ws()
-        await self._client.aclose()
+        if self._owns_client:
+            await self._client.aclose()

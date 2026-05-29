@@ -25,7 +25,10 @@ class FasterWhisperEngine(STTEngine):
     def __init__(self, base_url: str = "", timeout: float = _TIMEOUT_S) -> None:
         self._base_url = base_url or _FASTER_WHISPER_URL
         self._timeout = timeout
-        self._client = httpx.AsyncClient(timeout=timeout)
+        self._client = httpx.AsyncClient(
+            timeout=timeout,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
 
     async def transcribe(self, audio: bytes, lang: str, session_id: str) -> STTResult:
         t0 = time.time()

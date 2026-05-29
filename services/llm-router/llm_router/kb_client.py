@@ -24,7 +24,10 @@ class HttpKbRetriever:
 
     def __init__(self, base_url: str = "") -> None:
         self._base_url = base_url or _KB_URL
-        self._client = httpx.AsyncClient(timeout=5.0)
+        self._client = httpx.AsyncClient(
+            timeout=5.0,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
 
     async def retrieve(self, project_id: str, query: str, lang: str, top_k: int = _TOP_K) -> list[KbChunk]:
         if not project_id:

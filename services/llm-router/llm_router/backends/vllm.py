@@ -30,7 +30,10 @@ class VLLMBackend(LLMBackend):
         self._model = _MODEL_MAP.get(model_key, model_key)
         self._base_url = base_url or _VLLM_URL
         self._timeout = timeout
-        self._client = httpx.AsyncClient(timeout=timeout)
+        self._client = httpx.AsyncClient(
+            timeout=timeout,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
 
     async def generate(self, req: LLMRequest, kb_context: str) -> tuple[BrainOutput, int, int]:
         messages = self._build_messages(req, kb_context)

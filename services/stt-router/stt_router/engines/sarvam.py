@@ -53,7 +53,11 @@ class SarvamEngine(STTEngine):
         self._timeout = timeout
         # Single persistent client with HTTP/2 for connection reuse across calls.
         # http2=True requires 'h2' package; falls back to HTTP/1.1 if unavailable.
-        self._client = httpx.AsyncClient(timeout=timeout, http2=_HTTP2)
+        self._client = httpx.AsyncClient(
+            timeout=timeout,
+            http2=_HTTP2,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
 
     async def transcribe(self, audio: bytes, lang: str, session_id: str) -> STTResult:
         t0 = time.time()
@@ -77,7 +81,11 @@ class SarvamEngine(STTEngine):
                         await self._client.aclose()
                     except Exception:
                         pass
-                    self._client = httpx.AsyncClient(timeout=self._timeout, http2=_HTTP2)
+                    self._client = httpx.AsyncClient(
+                        timeout=self._timeout,
+                        http2=_HTTP2,
+                        limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+                    )
                 else:
                     raise  # propagate on second failure
 

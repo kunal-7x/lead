@@ -26,7 +26,10 @@ class CerebrasBackend(LLMBackend):
     def __init__(self, api_key: str = "", timeout: float = _TIMEOUT) -> None:
         self._api_key = api_key or _CEREBRAS_API_KEY
         self._timeout = timeout
-        self._client = httpx.AsyncClient(timeout=timeout)
+        self._client = httpx.AsyncClient(
+            timeout=timeout,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
         self._model = _MODEL
         self._url = _CEREBRAS_URL
         # Extra params merged into the streaming (_llm_stream_text) payload.

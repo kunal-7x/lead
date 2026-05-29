@@ -724,6 +724,11 @@ class AgentLoop:
 
         # Word count of the best probe partial seen this candidate window.
         _bargein_partial_words: int = 0
+        # Set by the probe-STT partial callback once a real partial with
+        # >= _BARGEIN_MIN_PARTIAL_WORDS words arrives. Lets the confirm loop wait
+        # on an event instead of busy-polling at 100Hz (which starves the event
+        # loop under concurrent calls). Reset per barge-in attempt.
+        _bargein_partial_event = asyncio.Event()
 
         def _on_bargein_partial(text: str) -> None:
             """Called by probe STT stream when a real interim transcript arrives.
@@ -741,6 +746,9 @@ class AgentLoop:
                 _bargein_has_real_partial = True
                 if nwords > _bargein_partial_words:
                     _bargein_partial_words = nwords
+                # Wake the confirm loop the moment the word gate is satisfied.
+                if _bargein_partial_words >= _BARGEIN_MIN_PARTIAL_WORDS:
+                    _bargein_partial_event.set()
 
         async def _start_probe_stream() -> None:
             """Start a lightweight STT probe stream for barge-in real-text detection."""
@@ -752,6 +760,7 @@ class AgentLoop:
                 return  # already running
             _bargein_has_real_partial = False
             _bargein_partial_words = 0
+            _bargein_partial_event.clear()
             q: asyncio.Queue = asyncio.Queue()
             _probe_queue = q
 
@@ -969,12 +978,17 @@ class AgentLoop:
                         # window (~450ms) to emit a partial with >=2 real words.
                         # Echo/bot-audio produces energy spikes but no coherent
                         # multi-word text, so it cannot pass this gate.
-                        _deadline = time.time() + _BARGEIN_PARTIAL_WAIT_S
-                        while time.time() < _deadline:
-                            if (_bargein_has_real_partial and
-                                    _bargein_partial_words >= _BARGEIN_MIN_PARTIAL_WORDS):
-                                break
-                            await asyncio.sleep(0.01)
+                        # Wait (event-driven, not busy-poll) for the probe STT to
+                        # emit a >= _BARGEIN_MIN_PARTIAL_WORDS partial. The callback
+                        # sets _bargein_partial_event the instant the gate is met;
+                        # on timeout we fall through and evaluate the same condition.
+                        try:
+                            await asyncio.wait_for(
+                                _bargein_partial_event.wait(),
+                                timeout=_BARGEIN_PARTIAL_WAIT_S,
+                            )
+                        except asyncio.TimeoutError:
+                            pass
                         _confirmed = (
                             _bargein_has_real_partial and
                             _bargein_partial_words >= _BARGEIN_MIN_PARTIAL_WORDS

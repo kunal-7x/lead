@@ -81,7 +81,10 @@ class CampaignExtractor:
         )
         self._model = os.getenv("LLM_MODEL", self._DEFAULT_MODEL)
         self._base_url = os.getenv("LLM_BASE_URL", self._DEFAULT_BASE_URL)
-        self._client = httpx.AsyncClient(timeout=30.0)
+        self._client = httpx.AsyncClient(
+            timeout=30.0,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
 
     async def extract(self, text: str, schema_hint: str | None = None) -> dict[str, Any]:
         """Return a CampaignContext dict extracted from `text`."""

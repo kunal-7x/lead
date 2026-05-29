@@ -17,7 +17,10 @@ class OpenAIBackend(LLMBackend):
 
     def __init__(self, api_key: str = "") -> None:
         self._api_key = api_key or _OPENAI_KEY
-        self._client = httpx.AsyncClient(timeout=30.0)
+        self._client = httpx.AsyncClient(
+            timeout=30.0,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
 
     async def generate(self, req: LLMRequest, kb_context: str) -> tuple[BrainOutput, int, int]:
         messages = self._build_messages(req, kb_context)
@@ -52,7 +55,10 @@ class AnthropicBackend(LLMBackend):
 
     def __init__(self, api_key: str = "") -> None:
         self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
-        self._client = httpx.AsyncClient(timeout=30.0)
+        self._client = httpx.AsyncClient(
+            timeout=30.0,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
 
     async def generate(self, req: LLMRequest, kb_context: str) -> tuple[BrainOutput, int, int]:
         messages = self._build_messages(req, kb_context)
@@ -107,7 +113,10 @@ class OpenRouterBackend(LLMBackend):
         )
         self._model = model or os.getenv("LLM_MODEL", self._DEFAULT_MODEL)
         self._base_url = os.getenv("LLM_BASE_URL", self._DEFAULT_BASE_URL)
-        self._client = httpx.AsyncClient(timeout=30.0)
+        self._client = httpx.AsyncClient(
+            timeout=30.0,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
 
     async def generate(self, req: LLMRequest, kb_context: str) -> tuple[BrainOutput, int, int]:
         messages = self._build_messages(req, kb_context)
@@ -144,7 +153,10 @@ class GoogleGeminiBackend(LLMBackend):
 
     def __init__(self, api_key: str = "") -> None:
         self._api_key = api_key or os.getenv("GOOGLE_API_KEY", "")
-        self._client = httpx.AsyncClient(timeout=30.0)
+        self._client = httpx.AsyncClient(
+            timeout=30.0,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
 
     async def generate(self, req: LLMRequest, kb_context: str) -> tuple[BrainOutput, int, int]:
         messages = self._build_messages(req, kb_context)

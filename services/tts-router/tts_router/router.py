@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 
 from tts_router.audio import ensure_8khz_l16
@@ -11,6 +12,21 @@ from tts_router.pronunciation import normalize
 from tts_router.switcher import EngineSwitcher
 
 _TIMEOUT_S = 8.0
+
+# Concurrency guard: max simultaneous provider calls across all in-flight requests.
+_MAX_CONCURRENT = int(os.getenv("TTS_MAX_CONCURRENT", "8"))
+_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _semaphore
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
+    return _semaphore
+
+
+# Backoff schedule for 429 / 5xx responses from provider.
+_BACKOFF_SCHEDULE = (0.25, 0.5, 1.0)
 
 
 class TTSRouter:
@@ -64,10 +80,7 @@ class TTSRouter:
             if engine.premium_only and not req.tts_premium:
                 continue
             try:
-                raw = await asyncio.wait_for(
-                    engine.synthesize(text, req.voice_id, req.lang),
-                    timeout=_TIMEOUT_S,
-                )
+                raw = await self._call_with_backoff(engine, text, req.voice_id, req.lang)
                 audio = ensure_8khz_l16(raw)
                 await self._cache.put(key, audio)
                 return TTSResult(
@@ -86,6 +99,45 @@ class TTSRouter:
             tier_used="silence",
             latency_ms=int((time.time() - t0) * 1000),
         )
+
+    async def _call_with_backoff(
+        self,
+        engine: TTSEngine,
+        text: str,
+        voice_id: str,
+        lang: str,
+    ) -> bytes:
+        """Acquire the concurrency semaphore then call engine.synthesize().
+
+        Retries with exponential backoff on HTTP 429 / 5xx errors.
+        TimeoutError from asyncio.wait_for is re-raised immediately.
+        """
+        sem = _get_semaphore()
+        last_exc: Exception | None = None
+        async with sem:
+            for attempt, backoff in enumerate(_BACKOFF_SCHEDULE + (None,)):  # type: ignore[operator]
+                try:
+                    return await asyncio.wait_for(
+                        engine.synthesize(text, voice_id, lang),
+                        timeout=_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    raise
+                except Exception as exc:
+                    msg = str(exc).lower()
+                    retriable = (
+                        "429" in msg
+                        or "rate limit" in msg
+                        or "503" in msg
+                        or "502" in msg
+                        or "500" in msg
+                    )
+                    if retriable and backoff is not None:
+                        await asyncio.sleep(backoff)
+                        last_exc = exc
+                        continue
+                    raise
+        raise last_exc  # type: ignore[misc]
 
     async def warm(self, phrases: list[str], lang: str, voice_id: str, tenant_id: str) -> int:
         """Pre-synthesize phrases and store in cache. Returns number of entries warmed."""

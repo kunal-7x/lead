@@ -41,7 +41,10 @@ class SarvamLLMBackend(LLMBackend):
     def __init__(self, api_key: str = "", timeout: float = _TIMEOUT) -> None:
         self._api_key = api_key or _SARVAM_API_KEY
         self._timeout = timeout
-        self._client = httpx.AsyncClient(timeout=timeout)
+        self._client = httpx.AsyncClient(
+            timeout=timeout,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
 
     async def generate(self, req: LLMRequest, kb_context: str) -> tuple[BrainOutput, int, int]:
         messages = self._build_messages(req, kb_context)

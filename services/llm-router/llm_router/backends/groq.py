@@ -43,7 +43,10 @@ class GroqLlamaBackend(LLMBackend):
         self._key_index = 0
         self._api_key = self._keys[0]  # kept for health_check / legacy attr reads
         self._timeout = timeout
-        self._client = httpx.AsyncClient(timeout=timeout)
+        self._client = httpx.AsyncClient(
+            timeout=timeout,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
         self._model = _SCOUT_MODEL
         self._url = _GROQ_URL
 
