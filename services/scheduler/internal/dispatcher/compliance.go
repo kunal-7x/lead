@@ -19,11 +19,16 @@ func extractWindowParams(ctx map[string]any) (startH, endH int, loc *time.Locati
 	tz := defaultTimezone
 
 	if ctx != nil {
-		if v, ok := ctx["_call_window_start_hour"].(float64); ok && int(v) > 0 {
-			startH = int(v)
-		}
-		if v, ok := ctx["_call_window_end_hour"].(float64); ok && int(v) > 0 {
-			endH = int(v)
+		// A window is explicitly configured when end_hour > 0 (end=0 is never a
+		// valid window). Then honor start_hour as-is, including 0 (midnight is a
+		// valid hour; 0..24 means always open). When end is unset, keep the safe
+		// TRAI defaults.
+		if ev, ok := ctx["_call_window_end_hour"].(float64); ok && int(ev) > 0 {
+			endH = int(ev)
+			startH = 0
+			if sv, ok := ctx["_call_window_start_hour"].(float64); ok && int(sv) >= 0 {
+				startH = int(sv)
+			}
 		}
 		if v, ok := ctx["_timezone"].(string); ok && v != "" {
 			tz = v
