@@ -14,6 +14,7 @@ type Store interface {
 
 	// Contacts (with dedup on tenant+phone)
 	UpsertContact(ctx context.Context, c *model.Contact) (*model.Contact, error)
+	GetContact(ctx context.Context, tenantID, contactID string) (*model.Contact, error)
 
 	// Leads
 	CreateLead(ctx context.Context, lead *model.Lead) error

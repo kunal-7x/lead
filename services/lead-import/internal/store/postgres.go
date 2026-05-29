@@ -77,6 +77,17 @@ func (p *PostgresStore) UpsertContact(ctx context.Context, c *model.Contact) (*m
 	return c, nil
 }
 
+func (p *PostgresStore) GetContact(ctx context.Context, tenantID, contactID string) (*model.Contact, error) {
+	c, ok, err := pgkv.Get[model.Contact](ctx, p.kv, "contacts", contactID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || c.TenantID != tenantID {
+		return nil, fmt.Errorf("contact not found")
+	}
+	return &c, nil
+}
+
 func (p *PostgresStore) CreateLead(ctx context.Context, lead *model.Lead) error {
 	now := time.Now().UTC()
 	if lead.ID == "" {

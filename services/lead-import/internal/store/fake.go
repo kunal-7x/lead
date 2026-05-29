@@ -80,6 +80,17 @@ func (f *Fake) UpsertContact(ctx context.Context, c *model.Contact) (*model.Cont
 	return &cp, nil
 }
 
+func (f *Fake) GetContact(ctx context.Context, tenantID, contactID string) (*model.Contact, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.contactsID[contactID]
+	if !ok || c.TenantID != tenantID {
+		return nil, fmt.Errorf("contact not found")
+	}
+	cp := *c
+	return &cp, nil
+}
+
 func (f *Fake) CreateLead(ctx context.Context, lead *model.Lead) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

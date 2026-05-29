@@ -217,6 +217,13 @@ func (p *PostgresStore) SetIdempotencyKey(ctx context.Context, key string, resul
 	return err
 }
 
+func (p *PostgresStore) UpsertRoutingRule(ctx context.Context, rule *model.ProviderRoutingRule) error {
+	if rule.ID == "" {
+		rule.ID = "rule-" + rule.ProviderID
+	}
+	return p.kv.Put(ctx, "routing_rules", rule.ID, *rule)
+}
+
 func (p *PostgresStore) seedDefaults(ctx context.Context) error {
 	providers := []model.Provider{
 		{ID: "plivo", Name: "plivo", Enabled: true, Priority: 1},

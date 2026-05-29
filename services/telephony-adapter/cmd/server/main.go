@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -86,8 +87,11 @@ func main() {
 	// uses a type assertion to call AddRoutingRule on the Fake store (dev/test).
 	// In production the rule should be inserted into the database directly.
 	if cp := os.Getenv("CALLING_PROVIDER"); cp == "vobiz" {
-		injectVobizRoutingRule(s)
-		log.Println("telephony-adapter: CALLING_PROVIDER=vobiz; injected priority-0 routing rule")
+		if err := injectVobizRoutingRule(s); err != nil {
+			log.Printf("telephony-adapter: WARN failed to inject Vobiz routing rule: %v", err)
+		} else {
+			log.Println("telephony-adapter: CALLING_PROVIDER=vobiz; injected priority-0 routing rule")
+		}
 	}
 
 	h := handler.New(wh, r)
@@ -102,18 +106,13 @@ func main() {
 // preferred when CALLING_PROVIDER=vobiz. This is only meaningful for the
 // in-memory Fake store used in dev/test. Production should manage routing
 // rules in the database.
-func injectVobizRoutingRule(s store.Store) {
-	type ruleAdder interface {
-		AddRoutingRule(r model.ProviderRoutingRule)
-	}
-	if ra, ok := s.(ruleAdder); ok {
-		ra.AddRoutingRule(model.ProviderRoutingRule{
-			ID:          "rule-vobiz-env",
-			ProviderID:  "vobiz",
-			Priority:    0,
-			MaxFailRate: 1.0,
-		})
-	}
+func injectVobizRoutingRule(s store.Store) error {
+	return s.UpsertRoutingRule(context.Background(), &model.ProviderRoutingRule{
+		ID:          "rule-vobiz-env",
+		ProviderID:  "vobiz",
+		Priority:    0,
+		MaxFailRate: 1.0,
+	})
 }
 
 func newStore() (store.Store, error) {

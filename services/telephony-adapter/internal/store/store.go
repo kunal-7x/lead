@@ -36,6 +36,7 @@ type Store interface {
 
 	// Routing rules
 	ListRoutingRules(ctx context.Context) ([]*model.ProviderRoutingRule, error)
+	UpsertRoutingRule(ctx context.Context, rule *model.ProviderRoutingRule) error
 
 	// Webhook dedup
 	StoreWebhookEvent(ctx context.Context, e *model.WebhookEvent) error

@@ -251,6 +251,22 @@ func (f *Fake) AddRoutingRule(r model.ProviderRoutingRule) {
 	f.routingRules = append(f.routingRules, &cp)
 }
 
+// UpsertRoutingRule inserts or replaces a routing rule by ID.
+func (f *Fake) UpsertRoutingRule(_ context.Context, rule *model.ProviderRoutingRule) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, r := range f.routingRules {
+		if r.ID == rule.ID {
+			cp := *rule
+			f.routingRules[i] = &cp
+			return nil
+		}
+	}
+	cp := *rule
+	f.routingRules = append(f.routingRules, &cp)
+	return nil
+}
+
 // ResetRoutingRules clears all routing rules.
 func (f *Fake) ResetRoutingRules() {
 	f.mu.Lock()

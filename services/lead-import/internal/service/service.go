@@ -298,7 +298,12 @@ func (svc *Service) handleGetLead(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "lead not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"lead": lead})
+	resp := map[string]any{"lead": lead}
+	// Include the contact so callers (e.g. the dispatcher) can resolve phone_e164.
+	if contact, cerr := svc.store.GetContact(r.Context(), tenantID, lead.ContactID); cerr == nil {
+		resp["contact"] = contact
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleFBWebhook receives Facebook Lead Ads webhook events.

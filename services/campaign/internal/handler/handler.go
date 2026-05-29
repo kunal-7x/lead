@@ -55,6 +55,7 @@ func (h *Handler) Router() http.Handler {
 		r.Post("/{id}/archive", h.archiveCampaign)
 		r.Get("/{id}/health", h.getCampaignHealth)
 		r.Put("/{id}/limits", h.setCampaignLimits)
+		r.Get("/{id}/limits", h.getCampaignLimits)
 	})
 
 	return r
@@ -209,6 +210,16 @@ func (h *Handler) setCampaignLimits(w http.ResponseWriter, r *http.Request) {
 	limits.CampaignID = id
 	if err := h.svc.SetCampaignLimits(r.Context(), &limits); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, limits)
+}
+
+func (h *Handler) getCampaignLimits(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	limits, err := h.store.GetLimits(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, limits)

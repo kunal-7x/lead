@@ -37,14 +37,26 @@ func New(max int) Limiter {
 		return &noopLimiter{}
 	}
 	return &redisLimiter{
-		addr: parseRedisAddr(redisURL),
-		max:  max,
+		addr:       parseRedisAddr(redisURL),
+		max:        max,
+		ttlSeconds: slotTTLSeconds(),
 	}
 }
 
 // NewWithAddr creates a Redis-backed limiter with an explicit address (for tests).
 func NewWithAddr(addr string, max int) Limiter {
-	return &redisLimiter{addr: addr, max: max}
+	return &redisLimiter{addr: addr, max: max, ttlSeconds: slotTTLSeconds()}
+}
+
+// slotTTLSeconds is the idle TTL for the concurrency counter (default 300s).
+// Override with VOBIZ_SLOT_TTL_SECONDS. Set to 0 to disable the safety net.
+func slotTTLSeconds() int {
+	if v := os.Getenv("VOBIZ_SLOT_TTL_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return 300
 }
 
 // NewNoop returns a no-op limiter (always allows, for tests without Redis).
@@ -111,6 +123,10 @@ func (f *FakeLimiter) Count(tenantID string) int {
 type redisLimiter struct {
 	addr string
 	max  int
+	// ttlSeconds is a self-healing safety net: each INCR (re)sets this TTL on the
+	// counter key, so a leaked slot from a missed hangup/decrement webhook clears
+	// after a bounded idle period instead of capping the tenant forever.
+	ttlSeconds int
 }
 
 func (r *redisLimiter) key(tenantID string) string {
@@ -156,7 +172,20 @@ func (r *redisLimiter) incrKey(ctx context.Context, key string) (int, error) {
 	if _, err := conn.Write([]byte(cmd)); err != nil {
 		return 0, err
 	}
-	return readRedisInt(conn)
+	val, err := readRedisInt(conn)
+	if err != nil {
+		return 0, err
+	}
+	// Sliding safety-net TTL: refresh expiry on every INCR so a counter left
+	// elevated by missed decrements self-heals after ttlSeconds of inactivity.
+	if r.ttlSeconds > 0 {
+		ttl := strconv.Itoa(r.ttlSeconds)
+		exp := fmt.Sprintf("*3\r\n$6\r\nEXPIRE\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n", len(key), key, len(ttl), ttl)
+		if _, werr := conn.Write([]byte(exp)); werr == nil {
+			_, _ = readRedisInt(conn)
+		}
+	}
+	return val, nil
 }
 
 func (r *redisLimiter) decrKey(ctx context.Context, key string) error {
