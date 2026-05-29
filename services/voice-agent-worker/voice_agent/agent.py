@@ -13,6 +13,7 @@ from typing import AsyncIterator
 from voice_agent.actions import Publisher, handle_actions
 from voice_agent.clients import STTClient, LLMClient, GuardrailClient, TTSClient
 from voice_agent.models import SessionContext, STTResult, BrainOutput
+from voice_agent.prosody import SemanticChunkPlanner, ProsodyShaper
 from voice_agent.recorder import TurnStore, record_turn
 from voice_agent.vad import VAD, SILENCE_THRESHOLD_MS, CHUNK_MS
 
@@ -303,6 +304,124 @@ class AgentLoop:
                 exc, self.ctx.session_id,
             )
             return False
+
+    async def _synth_chunk_frames(self, sentence: str) -> tuple[list[bytes], bool]:
+        """Synthesize ONE chunk into a list of PCM16 8k frames (no playback).
+
+        Streaming-WS first (frames arrive incrementally; collected here), batch
+        REST fallback on disable/error/zero-audio. Returns (frames, streamed).
+        Used by the synth-ahead pipeline so chunk N+1 can be synthesized while
+        chunk N is still playing — eliminating the inter-chunk silence gap.
+        """
+        frames: list[bytes] = []
+        streamed = False
+        if _TTS_STREAMING_WS and hasattr(self._tts, "synthesize_stream"):
+            try:
+                async for pcm_chunk in self._tts.synthesize_stream(
+                    sentence, self.ctx.lang, self.ctx.voice_profile_id,
+                ):
+                    if self._stop_playback.is_set():
+                        break
+                    if pcm_chunk:
+                        frames.append(pcm_chunk)
+                if frames:
+                    return frames, True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "TTS streaming failed (%r) — batch fallback session=%s",
+                    exc, self.ctx.session_id,
+                )
+                frames = []
+        # Batch REST fallback (also covers streaming returning zero audio).
+        if not self._stop_playback.is_set():
+            tts_result = await self._tts.synthesize(
+                sentence, self.ctx.lang, self.ctx.voice_profile_id,
+                self.ctx.tenant_id, self.ctx.session_id, self.ctx.tts_premium,
+            )
+            if hasattr(self, "_tts_diag"):
+                self._tts_diag[0] += len(sentence)
+                self._tts_diag[1] += len(tts_result.audio)
+                self._tts_diag[2] += 1
+            if tts_result.audio:
+                frames = [tts_result.audio]
+        return frames, streamed
+
+    async def _run_synth_ahead_pipeline(
+        self,
+        tts_queue: "asyncio.Queue[tuple[str, bool]]",
+        send_audio: callable,
+        on_first_audio,
+        t_stt: float | None = None,
+    ) -> None:
+        """Continuous-playback TTS pipeline (T1.1 — kills inter-chunk silence).
+
+        Two coroutines bridged by a small bounded buffer:
+          * PRODUCER pulls chunks off ``tts_queue`` and synthesizes each into PCM
+            frames (``_synth_chunk_frames``), pushing the ready frame-list onto an
+            internal ``audio_buf`` (maxsize=2). So while chunk N plays, chunk N+1
+            (and N+2) are already being synthesized.
+          * PLAYER pops ready frame-lists and sends them back-to-back via
+            ``send_audio`` with NO gap between chunks — the next chunk's audio is
+            already buffered before the current chunk finishes playing.
+
+        Barge-in: both loops short-circuit on ``_stop_playback`` and send_audio
+        still aborts mid-frame, so barge-in latency is unchanged.
+        """
+        # maxsize=2 = one playing + ~one prefetched ahead. Keeps memory bounded
+        # while guaranteeing the player never waits on synth between chunks.
+        audio_buf: asyncio.Queue = asyncio.Queue(maxsize=2)
+
+        async def _producer() -> None:
+            while True:
+                sentence, is_done = await tts_queue.get()
+                if is_done and not sentence:
+                    await audio_buf.put((None, True))  # signal player: end
+                    return
+                if not sentence or self._stop_playback.is_set():
+                    if self._stop_playback.is_set():
+                        await audio_buf.put((None, True))
+                        return
+                    continue
+                # Bump chunk seq so the barge-in loop resets its per-chunk count.
+                self._tts_chunk_seq += 1
+                try:
+                    frames, _streamed = await self._synth_chunk_frames(sentence)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "TTS synth failed sentence=%r session=%s",
+                        sentence[:40], self.ctx.session_id,
+                    )
+                    frames = []
+                if frames and not self._stop_playback.is_set():
+                    await audio_buf.put((frames, False))
+
+        async def _player() -> None:
+            first_done = False
+            while True:
+                frames, is_done = await audio_buf.get()
+                if is_done:
+                    return
+                if self._stop_playback.is_set():
+                    return
+                for frame in frames:
+                    if self._stop_playback.is_set():
+                        return
+                    if frame:
+                        await _call(send_audio, frame)
+                if not first_done:
+                    first_done = True
+                    if on_first_audio is not None:
+                        await _call(on_first_audio)
+
+        producer = asyncio.create_task(_producer())
+        try:
+            await _player()
+        finally:
+            producer.cancel()
+            try:
+                await producer
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def _warm_fillers(self) -> None:
         """Pre-synthesize filler phrases into the module-level cache.
@@ -1144,79 +1263,47 @@ class AgentLoop:
                                collected_slots=_slots_snapshot)
         )
 
-        # ── TTS worker (same sentence-queue pattern as _stream_path) ──────────
+        # ── TTS synth-ahead pipeline (continuous playback — see T1.1) ──────────
+        # Chunk N+1 is synthesized while chunk N plays, so the audio queue never
+        # empties mid-reply → NO inter-chunk silence gap.
         tts_queue: asyncio.Queue[tuple[str, bool]] = asyncio.Queue()
 
-        async def _tts_worker():
-            nonlocal first_audio_sent, _t_first_sentence_queued
-            while True:
-                sentence, is_done = await tts_queue.get()
-                if is_done and not sentence:
-                    break
-                if not sentence:
-                    continue
-                if self._stop_playback.is_set():
-                    break
-                try:
-                    # Increment chunk sequence so the audio loop resets
-                    # _bargein_consec — prevents inter-chunk count accumulation
-                    # from triggering false barge-in between breath chunks.
-                    self._tts_chunk_seq += 1
-                    _t_synth_start = time.time()
-                    # Flag-gated streaming path (first-audio ~0.3s). Streams chunks
-                    # to send_audio as they arrive. Returns False → use batch below.
-                    streamed = await self._synth_and_play_stream(sentence, send_audio)
-                    if not streamed and not self._stop_playback.is_set():
-                        tts_result = await self._tts.synthesize(
-                            sentence,
-                            self.ctx.lang,
-                            self.ctx.voice_profile_id,
-                            self.ctx.tenant_id,
-                            self.ctx.session_id,
-                            self.ctx.tts_premium,
-                        )
-                        # Accumulate TTS diag stats
-                        if hasattr(self, "_tts_diag"):
-                            self._tts_diag[0] += len(sentence)
-                            self._tts_diag[1] += len(tts_result.audio)
-                            self._tts_diag[2] += 1
-                    if not self._stop_playback.is_set():
-                        t_audio = time.time()
-                        if not first_audio_sent:
-                            first_audio_sent = True
-                            # Signal filler task that audio is ready — no filler needed
-                            if first_audio_event is not None:
-                                first_audio_event.set()
-                            _milestone(
-                                "first_audio_sent",
-                                session=self.ctx.session_id,
-                                ms=f"{(t_audio - t_stt) * 1000:.0f}",
-                            )
-                            logger.info(
-                                "latency session=%s turn=%s leg=first_audio ms=%.0f",
-                                self.ctx.session_id, self._turn_index,
-                                (t_audio - t_stt) * 1000,
-                            )
-                            # [diag] first_audio breakdown: leg timings for bottleneck analysis
-                            _q_ms = (_t_synth_start - (_t_first_sentence_queued or _t_synth_start)) * 1000
-                            _synth_ms = (t_audio - _t_synth_start) * 1000
-                            _total_ms = (t_audio - t_stt) * 1000
-                            _diag(self.ctx.session_id, self._turn_index,
-                                  phase="first_audio",
-                                  mode="stream" if streamed else "batch",
-                                  total_ms=f"{_total_ms:.0f}",
-                                  llm_to_sentence_ms=f"{_q_ms:.0f}",
-                                  tts_synth_ms=f"{_synth_ms:.0f}",
-                                  sentence_chars=len(sentence))
-                        if not streamed:
-                            await _call(send_audio, tts_result.audio)
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "TTS failed for sentence=%r session=%s",
-                        sentence[:40], self.ctx.session_id,
-                    )
+        def _on_first_audio() -> None:
+            nonlocal first_audio_sent
+            if first_audio_sent:
+                return
+            first_audio_sent = True
+            t_audio = time.time()
+            if first_audio_event is not None:
+                first_audio_event.set()
+            _milestone(
+                "first_audio_sent",
+                session=self.ctx.session_id,
+                ms=f"{(t_audio - t_stt) * 1000:.0f}",
+            )
+            logger.info(
+                "latency session=%s turn=%s leg=first_audio ms=%.0f",
+                self.ctx.session_id, self._turn_index,
+                (t_audio - t_stt) * 1000,
+            )
+            _q_ms = ((_t_first_sentence_queued or t_audio) - t_stt) * 1000
+            _diag(self.ctx.session_id, self._turn_index,
+                  phase="first_audio",
+                  total_ms=f"{(t_audio - t_stt) * 1000:.0f}",
+                  llm_to_sentence_ms=f"{_q_ms:.0f}")
 
-        tts_task = asyncio.create_task(_tts_worker())
+        tts_task = asyncio.create_task(
+            self._run_synth_ahead_pipeline(tts_queue, send_audio, _on_first_audio, t_stt)
+        )
+
+        # Per-turn prosody state: chunk planner replaces _should_flush; shaper
+        # shapes each chunk before it is queued (consistent across the turn).
+        chunk_planner = SemanticChunkPlanner(
+            min_words=_CHUNK_MIN_WORDS, max_words=_CHUNK_MAX_WORDS,
+            first_words=_CHUNK_FIRST_WORDS,
+        )
+        prosody = ProsodyShaper()
+        prosody.reset_turn()
 
         try:
             # ── Consume plain-text token stream ────────────────────────────────
@@ -1242,39 +1329,39 @@ class AgentLoop:
                           first_token_ms=f"{_t_first_token_ms:.0f}")
 
                 if token:
-                    token_buffer += token
                     full_spoken += token
-
-                    if _should_flush(token_buffer, is_first_chunk=_chunk_is_first):
-                        sentence = token_buffer.strip()
-                        token_buffer = ""
-                        if sentence:
-                            if _t_first_sentence_queued is None:
-                                _t_first_sentence_queued = time.time()
-                            _diag(self.ctx.session_id, self._turn_index,
-                                  phase="chunk",
-                                  words=_word_count(sentence),
-                                  first=_chunk_is_first)
-                            _chunk_is_first = False
-                            await tts_queue.put((sentence, False))
+                    # Feed the semantic planner: it returns completed breath-group
+                    # chunks on thought-unit boundaries (never mid-word).
+                    for sentence in chunk_planner.feed(token):
+                        if _t_first_sentence_queued is None:
+                            _t_first_sentence_queued = time.time()
+                        shaped = prosody.shape(sentence)
+                        _diag(self.ctx.session_id, self._turn_index,
+                              phase="chunk",
+                              words=_word_count(shaped),
+                              first=_chunk_is_first)
+                        _chunk_is_first = False
+                        await tts_queue.put((shaped, False))
 
                 # Barge-in during LLM streaming: record partial and abort
                 if self._stop_playback.is_set():
                     self._interrupted_partial = full_spoken.strip() or None
                     break
 
-            # Flush any remaining buffer (llm_done=True → always flush)
-            if not self._stop_playback.is_set() and token_buffer.strip():
-                sentence = token_buffer.strip()
-                if _t_first_sentence_queued is None:
-                    _t_first_sentence_queued = time.time()
-                _diag(self.ctx.session_id, self._turn_index,
-                      phase="chunk",
-                      words=_word_count(sentence),
-                      first=_chunk_is_first,
-                      llm_done=True)
-                await tts_queue.put((sentence, False))
-            await tts_queue.put(("", True))  # signal TTS worker done
+            # Flush any remaining buffer (llm_done → always flush the tail)
+            if not self._stop_playback.is_set():
+                sentence = chunk_planner.flush()
+                if sentence:
+                    if _t_first_sentence_queued is None:
+                        _t_first_sentence_queued = time.time()
+                    shaped = prosody.shape(sentence)
+                    _diag(self.ctx.session_id, self._turn_index,
+                          phase="chunk",
+                          words=_word_count(shaped),
+                          first=_chunk_is_first,
+                          llm_done=True)
+                    await tts_queue.put((shaped, False))
+            await tts_queue.put(("", True))  # signal pipeline done
 
             # Wait for TTS to finish playing
             await tts_task
@@ -1372,64 +1459,38 @@ class AgentLoop:
         # Guardrail results indexed by sentence position
         guardrail_tasks: list[asyncio.Task] = []
 
-        async def _tts_worker():
+        def _on_first_audio() -> None:
             nonlocal first_audio_sent
-            while True:
-                item = await tts_queue.get()
-                sentence, is_done = item
-                if is_done and not sentence:
-                    break
-                if not sentence:
-                    continue
-                if self._stop_playback.is_set():
-                    break
-                try:
-                    # Increment chunk sequence so the audio loop resets
-                    # _bargein_consec — prevents inter-chunk count accumulation.
-                    self._tts_chunk_seq += 1
-                    # Flag-gated streaming path (first-audio ~0.3s); False → batch.
-                    streamed = await self._synth_and_play_stream(sentence, send_audio)
-                    if not streamed and not self._stop_playback.is_set():
-                        tts_result = await self._tts.synthesize(
-                            sentence,
-                            self.ctx.lang,
-                            self.ctx.voice_profile_id,
-                            self.ctx.tenant_id,
-                            self.ctx.session_id,
-                            self.ctx.tts_premium,
-                        )
-                        # Accumulate TTS diag stats
-                        if hasattr(self, "_tts_diag"):
-                            self._tts_diag[0] += len(sentence)
-                            self._tts_diag[1] += len(tts_result.audio)
-                            self._tts_diag[2] += 1
-                    if not self._stop_playback.is_set():
-                        t_audio = time.time()
-                        if not first_audio_sent:
-                            first_audio_sent = True
-                            # Signal filler task that audio is ready — no filler needed
-                            if first_audio_event is not None:
-                                first_audio_event.set()
-                            _milestone(
-                                "first_audio_sent",
-                                session=self.ctx.session_id,
-                                ms=f"{(t_audio - t_stt) * 1000:.0f}",
-                            )
-                            logger.info(
-                                "latency session=%s turn=%s leg=first_audio ms=%.0f",
-                                self.ctx.session_id, self._turn_index,
-                                (t_audio - t_stt) * 1000,
-                            )
-                        if not streamed:
-                            await _call(send_audio, tts_result.audio)
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "TTS failed for sentence=%r session=%s",
-                        sentence[:40], self.ctx.session_id,
-                    )
+            if first_audio_sent:
+                return
+            first_audio_sent = True
+            t_audio = time.time()
+            if first_audio_event is not None:
+                first_audio_event.set()
+            _milestone(
+                "first_audio_sent",
+                session=self.ctx.session_id,
+                ms=f"{(t_audio - t_stt) * 1000:.0f}",
+            )
+            logger.info(
+                "latency session=%s turn=%s leg=first_audio ms=%.0f",
+                self.ctx.session_id, self._turn_index,
+                (t_audio - t_stt) * 1000,
+            )
 
-        tts_task = asyncio.create_task(_tts_worker())
+        # Synth-ahead pipeline (T1.1): continuous playback, no inter-chunk gap.
+        tts_task = asyncio.create_task(
+            self._run_synth_ahead_pipeline(tts_queue, send_audio, _on_first_audio, t_stt)
+        )
         _chunk_is_first = True  # breath-rhythm: first chunk uses lower word threshold
+
+        # Per-turn prosody state (planner replaces _should_flush; shaper shapes).
+        chunk_planner = SemanticChunkPlanner(
+            min_words=_CHUNK_MIN_WORDS, max_words=_CHUNK_MAX_WORDS,
+            first_words=_CHUNK_FIRST_WORDS,
+        )
+        prosody = ProsodyShaper()
+        prosody.reset_turn()
 
         try:
             async for token, final_brain in self._llm.generate_stream(
@@ -1456,34 +1517,32 @@ class AgentLoop:
                         )
                         brain_out = final_brain
 
-                    # Flush any remaining buffer (llm_done=True)
-                    if token_buffer.strip():
-                        sentence = token_buffer.strip()
+                    # Flush any remaining buffer (llm_done → flush the tail)
+                    sentence = chunk_planner.flush()
+                    if sentence:
+                        shaped = prosody.shape(sentence)
                         _diag(self.ctx.session_id, self._turn_index,
                               phase="chunk",
-                              words=_word_count(sentence),
+                              words=_word_count(shaped),
                               first=_chunk_is_first,
                               llm_done=True)
-                        await tts_queue.put((sentence, False))
-                    # Signal TTS worker to finish
+                        await tts_queue.put((shaped, False))
+                    # Signal pipeline to finish
                     await tts_queue.put(("", True))
                     break
 
                 # Accumulate token
                 if token:
-                    token_buffer += token
                     full_reply += token
 
-                    if _should_flush(token_buffer, is_first_chunk=_chunk_is_first):
-                        sentence = token_buffer.strip()
-                        token_buffer = ""
-                        if sentence:
-                            _diag(self.ctx.session_id, self._turn_index,
-                                  phase="chunk",
-                                  words=_word_count(sentence),
-                                  first=_chunk_is_first)
-                            _chunk_is_first = False
-                            await tts_queue.put((sentence, False))
+                    for sentence in chunk_planner.feed(token):
+                        shaped = prosody.shape(sentence)
+                        _diag(self.ctx.session_id, self._turn_index,
+                              phase="chunk",
+                              words=_word_count(shaped),
+                              first=_chunk_is_first)
+                        _chunk_is_first = False
+                        await tts_queue.put((shaped, False))
 
             # Wait for TTS worker to drain
             await tts_task

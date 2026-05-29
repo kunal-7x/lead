@@ -147,3 +147,119 @@ def test_bargein_stops_stream(monkeypatch):
 
     asyncio.run(_run())
     assert len(sent) == 1  # aborted before second chunk
+
+
+# ── T1.1 synth-ahead pipeline (continuous playback, no inter-chunk gap) ───────
+
+
+class _TimingTTS:
+    """TTS whose synthesize() takes `synth_s` and records when each synth begins,
+    so a test can assert that chunk N+1's synth overlaps chunk N's playback."""
+
+    def __init__(self, synth_s: float = 0.05) -> None:
+        self._synth_s = synth_s
+        self.synth_starts: list[float] = []
+        self.call_count = 0
+
+    async def synthesize(self, text, lang, voice_id, tenant_id, session_id,
+                         tts_premium=False):
+        from voice_agent.clients import TTSResult
+        self.call_count += 1
+        self.synth_starts.append(asyncio.get_event_loop().time())
+        await asyncio.sleep(self._synth_s)
+        return TTSResult(audio=text.encode(), tier_used="t", cache_hit=False)
+
+
+class _PipeCtx:
+    lang = "hi-en"
+    voice_profile_id = "priya"
+    session_id = "s1"
+    tenant_id = "t1"
+    tts_premium = False
+
+
+def _pipe_loop(tts) -> AgentLoop:
+    loop = AgentLoop.__new__(AgentLoop)
+    loop._tts = tts
+    loop._stop_playback = asyncio.Event()
+    loop._tts_chunk_seq = 0
+    loop.ctx = _PipeCtx()
+    loop._turn_index = 0
+    return loop
+
+
+def test_pipeline_overlaps_synth_with_playback(monkeypatch):
+    """Synth of the NEXT chunk must start BEFORE the current chunk finishes
+    playing → the audio buffer never empties between chunks (no robotic gap)."""
+    monkeypatch.setattr(agent_mod, "_TTS_STREAMING_WS", False)  # batch synth path
+    tts = _TimingTTS(synth_s=0.05)
+    loop = _pipe_loop(tts)
+
+    play_log: list[tuple[str, float]] = []
+
+    async def send_audio(frame: bytes):
+        # Simulate real playback time for the frame.
+        play_log.append(("start", asyncio.get_event_loop().time()))
+        await asyncio.sleep(0.05)
+        play_log.append(("end", asyncio.get_event_loop().time()))
+
+    async def _run():
+        q: asyncio.Queue = asyncio.Queue()
+        await q.put(("chunk one", False))
+        await q.put(("chunk two", False))
+        await q.put(("chunk three", False))
+        await q.put(("", True))
+        await loop._run_synth_ahead_pipeline(q, send_audio, None)
+
+    asyncio.run(_run())
+
+    assert tts.call_count == 3
+    # Chunk 2 synth must START before chunk 1 finishes PLAYING (overlap).
+    first_play_end = next(t for k, t in play_log if k == "end")
+    second_synth_start = tts.synth_starts[1]
+    assert second_synth_start < first_play_end, (
+        "next-chunk synth did not overlap current playback — queue would gap"
+    )
+
+
+def test_pipeline_plays_all_chunks_in_order(monkeypatch):
+    monkeypatch.setattr(agent_mod, "_TTS_STREAMING_WS", False)
+    tts = _TimingTTS(synth_s=0.0)
+    loop = _pipe_loop(tts)
+    sent: list[bytes] = []
+
+    async def send_audio(frame: bytes):
+        sent.append(frame)
+
+    async def _run():
+        q: asyncio.Queue = asyncio.Queue()
+        for s in ("a", "b", "c"):
+            await q.put((s, False))
+        await q.put(("", True))
+        await loop._run_synth_ahead_pipeline(q, send_audio, None)
+
+    asyncio.run(_run())
+    assert sent == [b"a", b"b", b"c"]
+
+
+def test_pipeline_first_audio_callback_fires_once(monkeypatch):
+    monkeypatch.setattr(agent_mod, "_TTS_STREAMING_WS", False)
+    tts = _TimingTTS(synth_s=0.0)
+    loop = _pipe_loop(tts)
+    fired = []
+
+    def on_first():
+        fired.append(1)
+
+    async def send_audio(frame: bytes):
+        pass
+
+    async def _run():
+        q: asyncio.Queue = asyncio.Queue()
+        for s in ("a", "b"):
+            await q.put((s, False))
+        await q.put(("", True))
+        await loop._run_synth_ahead_pipeline(q, send_audio, on_first)
+
+    asyncio.run(_run())
+    assert sum(fired) == 1  # exactly once, on the first chunk
