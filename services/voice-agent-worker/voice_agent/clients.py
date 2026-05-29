@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 # so the pool must be large enough to serve N simultaneous calls without
 # serialising on a tiny default keepalive pool.
 _POOL_LIMITS = httpx.Limits(max_connections=200, max_keepalive_connections=50)
+# Streaming WS handshake timeout. Default 10s tolerates cross-region/dev networks
+# so streaming STT/TTS engages instead of falling back to the slow batch path.
+# In-region production can lower this. Override with STREAM_WS_OPEN_TIMEOUT.
+_WS_OPEN_TIMEOUT = float(os.getenv("STREAM_WS_OPEN_TIMEOUT", "10"))
 
 
 def _is_ws_closed_error(exc: BaseException) -> bool:
@@ -129,7 +133,7 @@ class HttpSTTClient:
         engine_used = ""
 
         try:
-            async with websockets.connect(ws_url, open_timeout=3, close_timeout=2) as ws:
+            async with websockets.connect(ws_url, open_timeout=_WS_OPEN_TIMEOUT, close_timeout=2) as ws:
                 # NEW protocol: NO JSON header — go straight to binary frames.
 
                 async def _send_frames():
@@ -467,7 +471,7 @@ class HttpTTSClient:
         if ws is not None:
             await self._close_stream_ws()
         ws_url = f"{self._ws_base}/v1/tts/sarvam/stream"
-        self._stream_ws = await websockets.connect(ws_url, open_timeout=3, close_timeout=2)
+        self._stream_ws = await websockets.connect(ws_url, open_timeout=_WS_OPEN_TIMEOUT, close_timeout=2)
         return self._stream_ws
 
     async def synthesize_stream(self, text: str, lang: str,
