@@ -623,3 +623,123 @@ async def test_min_partial_words_constant():
         f"_BARGEIN_MIN_PARTIAL_WORDS={_BARGEIN_MIN_PARTIAL_WORDS} must be >= 2 "
         f"so lone backchannels don't interrupt"
     )
+
+
+# ---------------------------------------------------------------------------
+# Energy-delta-above-echo-baseline barge-in (the telephony-line fix).
+# On a real phone line the bot's TTS echoes into the inbound track, so the probe
+# STT returns 0 words during playback. These tests model that: a STEADY echo
+# level (caller silent) that must NOT fire, and a caller spike clearly ABOVE the
+# echo baseline that MUST fire — WITHOUT any STT words.
+# ---------------------------------------------------------------------------
+
+from voice_agent.agent import (  # noqa: E402
+    _BARGEIN_DELTA_SUSTAIN_FRAMES,
+    _BARGEIN_DELTA_MULT,
+    _BARGEIN_DELTA_ABS_MARGIN,
+    _BARGEIN_ENERGY_DELTA_MODE,
+)
+
+# A "no STT words" STT — models the echo line where probe STT can't transcribe.
+_ECHO_LINE_STT = lambda: FakeSTT(transcript="", confidence=0.0, partial_text=None)
+
+_ECHO_RMS = 800  # steady echo baseline level
+
+
+def _frame(rms: int) -> bytes:
+    return struct.pack("<160h", *([rms] * 160))
+
+
+def _echo_steady() -> bytes:
+    """Steady residual echo of the bot's own TTS (caller silent)."""
+    return _frame(_ECHO_RMS)
+
+
+def _caller_over_echo() -> bytes:
+    """Caller speaking ON TOP of the echo: energy clearly above the adaptive
+    baseline bar = max(baseline*MULT, baseline+ABS_MARGIN)."""
+    bar = max(_ECHO_RMS * _BARGEIN_DELTA_MULT, _ECHO_RMS + _BARGEIN_DELTA_ABS_MARGIN)
+    return _frame(int(bar) + 800)
+
+
+async def test_energy_delta_mode_default_on():
+    assert _BARGEIN_ENERGY_DELTA_MODE, "energy-delta barge-in must default ON"
+
+
+async def test_steady_echo_level_does_not_trigger_bargein():
+    """Steady echo (caller silent) at the baseline level must NEVER fire, even
+    sustained well past the sustain window and with NO STT words."""
+    loop = make_loop(stt=_ECHO_LINE_STT(),
+                     vad=FakeVAD(speech_chunks=_BARGEIN_DELTA_SUSTAIN_FRAMES * 4))
+    sent_json = []
+
+    async def source():
+        loop._playing_tts = True
+        # Long run of steady echo — caller is silent.
+        for _ in range(_BARGEIN_DELTA_SUSTAIN_FRAMES * 3):
+            yield _echo_steady()
+        loop._playing_tts = False
+        for _ in range(20):
+            yield _silence()
+
+    await loop.run(source(), lambda a: None, lambda m: sent_json.append(m))
+
+    assert "stop_playback" not in [m.get("type") for m in sent_json], (
+        "Steady echo at baseline must NOT trigger barge-in (energy-delta)"
+    )
+
+
+async def test_energy_sustained_above_echo_baseline_fires_without_stt_words():
+    """Caller energy SUSTAINED clearly above the echo baseline MUST fire — even
+    though the probe STT returns ZERO words (the real telephony-line case)."""
+    loop = make_loop(stt=_ECHO_LINE_STT(),
+                     vad=FakeVAD(speech_chunks=_BARGEIN_DELTA_SUSTAIN_FRAMES * 6))
+    sent_json = []
+
+    async def source():
+        loop._playing_tts = True
+        # First establish the echo baseline with steady echo (caller silent).
+        for _ in range(_BARGEIN_DELTA_SUSTAIN_FRAMES + 5):
+            yield _echo_steady()
+        # Then the caller interrupts ON TOP of the echo — sustained above the bar.
+        for _ in range(_BARGEIN_DELTA_SUSTAIN_FRAMES + 2):
+            yield _caller_over_echo()
+        for _ in range(20):
+            yield _silence()
+
+    await loop.run(source(), lambda a: None, lambda m: sent_json.append(m))
+
+    assert "stop_playback" in [m.get("type") for m in sent_json], (
+        "Sustained energy above the echo baseline MUST trigger barge-in even "
+        "with words=0 (echo blocks STT on a real phone line)"
+    )
+
+
+async def test_brief_spike_above_echo_does_not_trigger_bargein():
+    """A brief spike above the echo baseline (a click / transient, shorter than
+    the sustain window) must NOT fire — only a SUSTAINED interruption does."""
+    loop = make_loop(stt=_ECHO_LINE_STT(),
+                     vad=FakeVAD(speech_chunks=_BARGEIN_DELTA_SUSTAIN_FRAMES * 4))
+    sent_json = []
+    # A spike strictly shorter than the sustain window. With the per-quiet-frame
+    # decay, a short burst can never reach the sustain threshold.
+    _spike_len = max(1, _BARGEIN_DELTA_SUSTAIN_FRAMES // 2)
+
+    async def source():
+        loop._playing_tts = True
+        for _ in range(_BARGEIN_DELTA_SUSTAIN_FRAMES + 5):
+            yield _echo_steady()
+        for _ in range(_spike_len):  # brief spike — below sustain window
+            yield _caller_over_echo()
+        for _ in range(_BARGEIN_DELTA_SUSTAIN_FRAMES + 5):  # back to echo
+            yield _echo_steady()
+        loop._playing_tts = False
+        for _ in range(20):
+            yield _silence()
+
+    await loop.run(source(), lambda a: None, lambda m: sent_json.append(m))
+
+    assert "stop_playback" not in [m.get("type") for m in sent_json], (
+        f"A brief {_spike_len}-frame spike must NOT trigger barge-in (sustain "
+        f"window is {_BARGEIN_DELTA_SUSTAIN_FRAMES})"
+    )

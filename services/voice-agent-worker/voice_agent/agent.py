@@ -110,6 +110,38 @@ _BARGEIN_ECHO_ENERGY_FLOOR: float = float(
 # normal STT+energy gate in the field. Default off (full-duplex).
 _BARGEIN_HALF_DUPLEX: bool = os.getenv("BARGEIN_HALF_DUPLEX", "false").lower() == "true"
 
+# ── Echo-baseline energy-delta barge-in (the telephony-line fix) ──────────────
+# On a real phone line WITHOUT echo cancellation the bot's own TTS bleeds into the
+# inbound µ-law track, so the probe STT returns ZERO words during playback and the
+# old "needs >=2 STT words" gate can NEVER confirm a real interruption. Instead we
+# track an ADAPTIVE baseline of the inbound RMS during playback while the caller is
+# silent (= the steady echo level), and declare a barge-in when the inbound energy
+# SUSTAINS clearly ABOVE that baseline (caller speaking on top of the echo).
+#
+# BARGEIN_ENERGY_DELTA_MODE=true  → energy-delta path active (default ON).
+#   false → legacy STT-word gate (kept as a fallback flag).
+_BARGEIN_ENERGY_DELTA_MODE: bool = (
+    os.getenv("BARGEIN_ENERGY_DELTA_MODE", "true").lower() == "true"
+)
+# Caller speech must exceed (baseline * MULT) OR (baseline + ABS_MARGIN), whichever
+# is the higher bar, to count as "above echo". The MULT catches loud lines; the
+# ABS_MARGIN catches quiet lines where the baseline is near zero. Calibrated from
+# the measured echo baseline, not a blind absolute threshold.
+_BARGEIN_DELTA_MULT: float = float(os.getenv("BARGEIN_DELTA_MULT", "2.0"))
+_BARGEIN_DELTA_ABS_MARGIN: float = float(os.getenv("BARGEIN_DELTA_ABS_MARGIN", "600"))
+# Consecutive frames the inbound must stay above the echo baseline to fire (the
+# sustain window). 18 ≈ 360ms at 20ms/chunk — long enough to reject a click/echo
+# transient, short enough that "रुको सुनो" fires within ~400-500ms.
+_BARGEIN_DELTA_SUSTAIN_FRAMES: int = int(
+    os.getenv("BARGEIN_DELTA_SUSTAIN_FRAMES", "18")
+)
+# EMA smoothing factor for the adaptive echo baseline. Only updated on frames AT
+# OR BELOW the current "above" bar (i.e. steady echo, not a caller spike), so a
+# real interruption never inflates the baseline. Higher = faster adaptation.
+_BARGEIN_BASELINE_ALPHA: float = float(os.getenv("BARGEIN_BASELINE_ALPHA", "0.05"))
+# Seed for the baseline at the start of each playback before any echo is measured.
+_BARGEIN_BASELINE_SEED: float = float(os.getenv("BARGEIN_BASELINE_SEED", "300"))
+
 # Backchannel tokens: short acknowledgements that should NOT count as real
 # interrupts even after VAD confirms speech. Extends _NOISE_TOKENS with Hindi
 # backchannels. If the STT result after a confirmed barge-in is ONLY one of
@@ -664,6 +696,14 @@ class AgentLoop:
 
         # Barge-in debounce counter: consecutive VAD-positive chunks during TTS
         _bargein_consec: int = 0
+        # ── Energy-delta barge-in state (telephony echo line) ──────────────────
+        # Adaptive baseline of the inbound RMS during playback while the caller is
+        # quiet (= the steady echo level). Updated by an EMA only on frames at/below
+        # the "above" bar, so a real caller spike never inflates it. None until the
+        # first playback frame seeds it.
+        _echo_baseline: float | None = None
+        # Consecutive frames whose inbound energy is clearly ABOVE the echo baseline.
+        _bargein_delta_consec: int = 0
         # Tracks _tts_chunk_seq at last reset; reset counter when seq changes
         # (new breath-chunk started → fresh debounce window, no carry-over).
         _bargein_seen_chunk_seq: int = 0
@@ -746,6 +786,53 @@ class AgentLoop:
             _bargein_has_real_partial = False
             _bargein_partial_words = 0
 
+        async def _do_bargein(trigger_chunk: bytes) -> None:
+            """Shared interrupt sequence for a CONFIRMED barge-in.
+
+            Stops the synth-ahead pipeline + player, clears the bridge's buffered
+            outbound audio, cancels the in-flight LLM/TTS utterance task (slots are
+            preserved on self._accumulated_slots), flushes STT, and starts capturing
+            the new utterance — beginning with ``trigger_chunk``. Used by BOTH the
+            energy-delta path (telephony echo line) and the legacy STT-word gate.
+            """
+            nonlocal speech_started, silence_count, _speech_chunk_count
+            nonlocal _stt_stream_queue
+            # _stop_playback short-circuits the producer + player; the JSON tells
+            # the bridge to clear already-buffered outbound audio.
+            self._stop_playback.set()
+            await _call(send_json, {"type": "stop_playback"})
+            self._playing_tts = False
+
+            if self._utterance_task is not None and not self._utterance_task.done():
+                self._utterance_task.cancel()
+                try:
+                    await self._utterance_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+                self._utterance_task = None
+
+            if self._interrupted_partial:
+                self._dialog_history.append({
+                    "role": "assistant",
+                    "content": f"[interrupted] {self._interrupted_partial}",
+                })
+                self._interrupted_partial = None
+
+            await _cancel_stt_stream()
+            audio_buffer.clear()
+            self._vad.reset()
+            # Backchannel suppression still applies on the NEXT turn's transcript:
+            # a lone "हाँ" that sneaks through won't start a real LLM turn.
+            self._next_utterance_is_bargein = True
+
+            await _start_stt_stream()
+            speech_started = True
+            silence_count = 0
+            _speech_chunk_count = 1
+            audio_buffer.extend(trigger_chunk)
+            if _stt_stream_queue is not None:
+                _stt_stream_queue.put_nowait(trigger_chunk)
+
         # Eager STT stream pre-connect: start the streaming WebSocket NOW, before
         # the first real speech chunk arrives. This ensures saaras:v3 is already
         # connected when the caller starts speaking so turn-0 never falls back to
@@ -797,6 +884,64 @@ class AgentLoop:
                 _energy = self._vad.energy(chunk)
                 _floor = _BARGEIN_ECHO_ENERGY_FLOOR * (3.0 if _BARGEIN_HALF_DUPLEX else 1.0)
                 _loud_speech = is_speech and _energy >= _floor
+
+                # ── Energy-delta-above-echo-baseline (telephony fix) ───────────
+                # The probe STT returns 0 words during playback because the bot's
+                # own TTS echo swamps the inbound µ-law track, so the word gate can
+                # never fire. Instead: maintain an ADAPTIVE baseline of the inbound
+                # RMS while the caller is quiet (steady echo level) and fire when
+                # the inbound energy SUSTAINS clearly above it. The "above" bar is
+                # max(baseline*MULT, baseline+ABS_MARGIN) so it works on both loud
+                # and quiet lines and is calibrated from the measured echo, not a
+                # blind absolute.
+                if _echo_baseline is None:
+                    _echo_baseline = max(_energy, _BARGEIN_BASELINE_SEED)
+                _above_bar = max(
+                    _echo_baseline * _BARGEIN_DELTA_MULT,
+                    _echo_baseline + _BARGEIN_DELTA_ABS_MARGIN,
+                )
+                _above_echo = _BARGEIN_ENERGY_DELTA_MODE and _energy >= _above_bar
+                if _above_echo:
+                    _bargein_delta_consec += 1
+                else:
+                    # Caller quiet (at/below the bar) → this IS the steady echo:
+                    # adapt the baseline toward it (EMA) and decay the delta count.
+                    # A real spike never updates the baseline, so it can't self-mask.
+                    _echo_baseline = (
+                        (1.0 - _BARGEIN_BASELINE_ALPHA) * _echo_baseline
+                        + _BARGEIN_BASELINE_ALPHA * _energy
+                    )
+                    if _bargein_delta_consec > 0:
+                        _bargein_delta_consec -= 1
+
+                # Energy-delta barge-in confirm: caller energy sustained above the
+                # echo baseline for the sustain window. This does NOT require STT
+                # words (echo blocks STT). STT words, if they arrive, are a bonus.
+                _delta_confirmed = (
+                    _BARGEIN_ENERGY_DELTA_MODE
+                    and _bargein_delta_consec >= _BARGEIN_DELTA_SUSTAIN_FRAMES
+                )
+
+                if _delta_confirmed:
+                    _milestone("bargein_confirmed_energy_delta",
+                               session=self.ctx.session_id,
+                               turn=self._turn_index,
+                               delta_frames=_bargein_delta_consec)
+                    _diag(self.ctx.session_id, self._turn_index,
+                          phase="bargein_confirmed",
+                          reason="energy_delta_above_echo",
+                          delta_frames=_bargein_delta_consec,
+                          energy=f"{_energy:.0f}",
+                          baseline=f"{_echo_baseline:.0f}",
+                          bar=f"{_above_bar:.0f}",
+                          words=_bargein_partial_words,
+                          chunk_seq=self._tts_chunk_seq)
+                    await _cancel_probe_stream()
+                    _bargein_consec = 0
+                    _bargein_delta_consec = 0
+                    _echo_baseline = None
+                    await _do_bargein(chunk)
+                    continue
 
                 if _loud_speech:
                     _bargein_consec += 1
@@ -852,64 +997,25 @@ class AgentLoop:
                             # Probe stays alive — more words may still arrive.
                             _bargein_consec = _BARGEIN_MIN_SPEECH_CHUNKS // 2
                         else:
-                            # Confirmed barge-in — interrupt AI reply.
+                            # Confirmed barge-in via the STT-word gate (clean line
+                            # where STT can transcribe through the echo). On a real
+                            # telephony echo line this rarely fires — the energy-delta
+                            # path above is the primary trigger.
                             _milestone("bargein_confirmed",
                                        session=self.ctx.session_id,
                                        turn=self._turn_index,
                                        consec_frames=_bargein_consec)
                             _diag(self.ctx.session_id, self._turn_index,
                                   phase="bargein_confirmed",
+                                  reason="stt_words",
                                   consec_frames=_bargein_consec,
                                   words=_bargein_partial_words,
                                   chunk_seq=self._tts_chunk_seq)
                             await _cancel_probe_stream()
-                            # Stop the synth-ahead pipeline + player immediately:
-                            # _stop_playback short-circuits both the producer and
-                            # the player (agent.py _run_synth_ahead_pipeline), and
-                            # the stop_playback JSON tells the bridge to clear the
-                            # outbound audio it has already buffered.
-                            self._stop_playback.set()
-                            await _call(send_json, {"type": "stop_playback"})
-                            self._playing_tts = False
                             _bargein_consec = 0
-
-                            # Cancel the in-flight LLM/TTS utterance task. Collected
-                            # slots live on self._accumulated_slots (NOT on the task)
-                            # so cancelling preserves all gathered context.
-                            if self._utterance_task is not None and not self._utterance_task.done():
-                                self._utterance_task.cancel()
-                                try:
-                                    await self._utterance_task
-                                except (asyncio.CancelledError, Exception):
-                                    pass
-                                self._utterance_task = None
-
-                            # Append partial/interrupted reply to dialog history
-                            if self._interrupted_partial:
-                                self._dialog_history.append({
-                                    "role": "assistant",
-                                    "content": f"[interrupted] {self._interrupted_partial}",
-                                })
-                                self._interrupted_partial = None
-
-                            # Flush in-flight STT stream; start fresh for new utterance
-                            await _cancel_stt_stream()
-                            audio_buffer.clear()
-                            speech_started = False
-                            silence_count = 0
-                            self._vad.reset()
-
-                            # Mark next utterance as post-barge-in for backchannel check
-                            self._next_utterance_is_bargein = True
-
-                            # Begin capturing the new utterance that triggered barge-in
-                            await _start_stt_stream()
-                            speech_started = True
-                            silence_count = 0
-                            _speech_chunk_count = 1  # this chunk is the first of the new utterance
-                            audio_buffer.extend(chunk)
-                            if _stt_stream_queue is not None:
-                                _stt_stream_queue.put_nowait(chunk)
+                            _bargein_delta_consec = 0
+                            _echo_baseline = None
+                            await _do_bargein(chunk)
                     else:
                         # Accumulate the debounce chunk into buffer (will be used
                         # if/when barge-in is confirmed or if TTS ends first)
@@ -940,6 +1046,10 @@ class AgentLoop:
 
             # ── Normal half-duplex listen path (not playing TTS) ──────────────
             _bargein_consec = 0  # reset whenever we're not in TTS
+            # Reset the echo-baseline + delta state so the next playback re-measures
+            # echo from scratch (the echo level differs per TTS chunk / silence).
+            _echo_baseline = None
+            _bargein_delta_consec = 0
             # Cancel any probe stream left over from TTS playback
             if _probe_task is not None and not _probe_task.done():
                 await _cancel_probe_stream()
