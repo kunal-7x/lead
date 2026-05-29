@@ -39,7 +39,8 @@ class TTSClient(Protocol):
                          tts_premium: bool) -> TTSResult: ...
 
     def synthesize_stream(self, text: str, lang: str,
-                          voice_id: str) -> AsyncIterator[bytes]: ...
+                          voice_id: str, pace: float = 1.0,
+                          temperature: float = 0.6) -> AsyncIterator[bytes]: ...
 
 
 # ── HTTP implementations ──────────────────────────────────────────────────────
@@ -396,7 +397,8 @@ class HttpTTSClient:
         return self._stream_ws
 
     async def synthesize_stream(self, text: str, lang: str,
-                                voice_id: str) -> AsyncIterator[bytes]:
+                                voice_id: str, pace: float = 1.0,
+                                temperature: float = 0.6) -> AsyncIterator[bytes]:
         """Stream PCM16 8kHz audio chunks for one utterance via the Sarvam WS.
 
         Yields raw PCM16 LE 8kHz bytes AS THEY ARRIVE (first chunk ~0.3s) so the
@@ -410,7 +412,10 @@ class HttpTTSClient:
         """
         async with self._stream_lock:
             ws = await self._ensure_stream_ws()
-            await ws.send(json.dumps({"text": text, "voice_id": voice_id, "lang": lang}))
+            await ws.send(json.dumps({
+                "text": text, "voice_id": voice_id, "lang": lang,
+                "pace": pace, "temperature": temperature,
+            }))
             completed = False
             try:
                 async for frame in ws:

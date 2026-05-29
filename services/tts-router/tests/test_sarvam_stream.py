@@ -359,3 +359,44 @@ def test_ulaw_decode_is_g711():
     assert samples[0x00] == -32124     # full-scale negative (G.711 reference)
     assert samples[0x80] == 32124      # full-scale positive (G.711 reference)
     assert min(samples) == -32124 and max(samples) == 32124
+
+
+def test_build_stream_config_default_and_dynamic_prosody():
+    """pace/temperature are per-request params (default 1.0/0.6) and settable so a
+    turn can override them; they live in the connect-time config (consistent for
+    the whole turn)."""
+    from tts_router.engines.sarvam import _build_stream_config
+
+    d = _build_stream_config("anushka", "hi-IN")["data"]
+    assert d["pace"] == 1.0 and d["temperature"] == 0.6
+
+    d2 = _build_stream_config("anushka", "hi-IN", pace=1.15, temperature=0.4)["data"]
+    assert d2["pace"] == 1.15 and d2["temperature"] == 0.4
+
+
+async def test_session_reconnects_on_prosody_change(monkeypatch):
+    """A pace/temperature change must reconnect so the new prosody is applied to
+    every chunk of the turn (config is fixed at connect)."""
+    from tts_router.engines.sarvam import SarvamStreamingSession
+
+    engine = SarvamBulbulEngine(api_key="k")
+    sess = SarvamStreamingSession(engine)
+    connects = []
+
+    async def _fake_connect(voice_id, lang):
+        connects.append((voice_id, lang, sess._pace, sess._temperature))
+        sess._ws = object()
+        sess._lang = lang
+        sess._voice_id = voice_id
+
+    sess._connect = _fake_connect  # type: ignore[assignment]
+
+    async def _close():
+        sess._ws = None
+    sess._close = _close  # type: ignore[assignment]
+
+    await sess._ensure_connected("anushka", "hi-IN", 1.0, 0.6)
+    await sess._ensure_connected("anushka", "hi-IN", 1.0, 0.6)  # no change → no reconnect
+    await sess._ensure_connected("anushka", "hi-IN", 1.2, 0.6)  # pace change → reconnect
+    assert len(connects) == 2
+    assert connects[1][2] == 1.2  # reconnect used the new pace

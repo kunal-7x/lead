@@ -312,6 +312,10 @@ async def tts_sarvam_stream_ws(websocket: WebSocket) -> None:
                 text = msg.get("text", "")
                 voice_id = msg.get("voice_id", "")
                 lang = msg.get("lang", "hi-en")
+                # Per-turn prosody (default 1.0 / 0.6). Sent by the worker; the
+                # session bakes them into the config so all chunks of the turn match.
+                pace = float(msg.get("pace", 1.0))
+                temperature = float(msg.get("temperature", 0.6))
                 if not text:
                     await websocket.send_text(json.dumps(
                         {"type": "done", "first_chunk_ms": 0, "total_chunks": 0, "engine": "silence"}))
@@ -323,7 +327,9 @@ async def tts_sarvam_stream_ws(websocket: WebSocket) -> None:
                 try:
                     # Engine yields PCM16 8k DIRECTLY (Sarvam µ-law 8k decoded in-engine);
                     # NO resample needed — send straight to the worker.
-                    async for pcm_chunk in session.synthesize(text, voice_id, lang):
+                    async for pcm_chunk in session.synthesize(
+                        text, voice_id, lang, pace, temperature
+                    ):
                         if not pcm_chunk:
                             continue
                         if first_chunk_ms < 0:
@@ -337,7 +343,7 @@ async def tts_sarvam_stream_ws(websocket: WebSocket) -> None:
                         "tts_sarvam_stream_ws TRUNCATED (chunks=%s) — REST recovery: %s",
                         getattr(trunc, "chunks_produced", "?"), trunc,
                     )
-                    pcm = await engine.synthesize(text, voice_id, lang)
+                    pcm = await engine.synthesize(text, voice_id, lang, pace, temperature)
                     if pcm:
                         await websocket.send_bytes(pcm)
                         if first_chunk_ms < 0:
@@ -348,7 +354,7 @@ async def tts_sarvam_stream_ws(websocket: WebSocket) -> None:
                     # Session synthesis failed (both attempts exhausted) — fall back to
                     # per-call batch REST synthesize so the caller still hears audio.
                     log.warning("tts_sarvam_stream_ws session failed, falling back to REST: %s", synth_exc)
-                    pcm = await engine.synthesize(text, voice_id, lang)
+                    pcm = await engine.synthesize(text, voice_id, lang, pace, temperature)
                     if pcm:
                         await websocket.send_bytes(pcm)
                         first_chunk_ms = int((time.time() - t0) * 1000)

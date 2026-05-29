@@ -96,13 +96,28 @@ def _ws_speaker(voice_id: str) -> str:
     return voice_id if voice_id in _WS_VALID_SPEAKERS else _WS_DEFAULT_SPEAKER
 
 
-def _build_stream_config(speaker: str, lang: str) -> dict:
+# Prosody defaults — natural Hindi telecaller pace/temperature. The adaptive
+# layer (T2) overrides these per-turn; they stay CONSISTENT across all chunks of
+# a turn because they are fixed at WS-connect time for that turn's session.
+_DEFAULT_PACE = float(os.getenv("SARVAM_PACE", "1.0"))
+_DEFAULT_TEMPERATURE = float(os.getenv("SARVAM_TEMPERATURE", "0.6"))
+
+
+def _build_stream_config(
+    speaker: str,
+    lang: str,
+    pace: float = _DEFAULT_PACE,
+    temperature: float = _DEFAULT_TEMPERATURE,
+) -> dict:
     """Sarvam WS config frame (bulbul:v2 — see _WS_VALID_SPEAKERS note above).
 
     output_audio_codec=mulaw + speech_sample_rate=8000 → Sarvam emits µ-law 8k
     DIRECTLY (content_type audio/mulaw), so the worker needs no 24k→8k resample.
     `model` is included for forward-compat but is ignored by the WS today. pitch/
     loudness are never sent (rejected by newer models).
+
+    pace/temperature are per-request now (default 1.0 / 0.6). They are baked into
+    the config frame at connect, so every chunk in the turn uses the SAME prosody.
     """
     return {
         "type": "config",
@@ -110,8 +125,8 @@ def _build_stream_config(speaker: str, lang: str) -> dict:
             "model": _TTS_MODEL,
             "target_language_code": _lang_code(lang),
             "speaker": speaker,
-            "pace": 1.0,
-            "temperature": 0.6,
+            "pace": pace,
+            "temperature": temperature,
             "enable_preprocessing": True,
             "output_audio_codec": "mulaw",
             "speech_sample_rate": 8000,
@@ -220,13 +235,21 @@ class SarvamBulbulEngine(TTSEngine):
         self._timeout = timeout
         self._client = httpx.AsyncClient(timeout=timeout)
 
-    async def synthesize(self, text: str, voice_id: str, lang: str) -> bytes:
+    async def synthesize(
+        self,
+        text: str,
+        voice_id: str,
+        lang: str,
+        pace: float = _DEFAULT_PACE,
+        temperature: float = _DEFAULT_TEMPERATURE,
+    ) -> bytes:
         speaker = voice_id if voice_id in _VALID_SPEAKERS else _DEFAULT_SPEAKER
         payload: dict = {
             "inputs": [text],
             "target_language_code": _lang_code(lang),
             "speaker": speaker,
-            "pace": 1.0,
+            "pace": pace,
+            "temperature": temperature,
             "speech_sample_rate": 8000,
             "enable_preprocessing": True,
             "model": _TTS_MODEL,
@@ -379,6 +402,10 @@ class SarvamStreamingSession:
         self._ping_task: asyncio.Task | None = None
         self._lang: str = "hi-en"
         self._voice_id: str = ""
+        # Per-turn prosody (baked into the config at connect → consistent for the
+        # whole turn). A change reconnects (handled in _ensure_connected).
+        self._pace: float = _DEFAULT_PACE
+        self._temperature: float = _DEFAULT_TEMPERATURE
 
     async def __aenter__(self) -> "SarvamStreamingSession":
         return self
@@ -411,7 +438,7 @@ class SarvamStreamingSession:
 
         speaker = _ws_speaker(voice_id)
         headers = {"API-Subscription-Key": self._engine._api_key}
-        config = _build_stream_config(speaker, lang)
+        config = _build_stream_config(speaker, lang, self._pace, self._temperature)
         # websockets.connect() returns an async CM; enter it and hold it open so
         # the connection persists across turns (not closed when we exit the CM block).
         cm = websockets.connect(
@@ -452,19 +479,38 @@ class SarvamStreamingSession:
         except asyncio.CancelledError:
             pass
 
-    async def _ensure_connected(self, voice_id: str, lang: str) -> None:
-        """Reconnect if WS is dead or config changed."""
-        if self._ws is None or self._lang != lang or self._voice_id != voice_id:
+    async def _ensure_connected(
+        self, voice_id: str, lang: str, pace: float, temperature: float
+    ) -> None:
+        """Reconnect if WS is dead or config (voice/lang/prosody) changed.
+
+        pace/temperature are part of the connect-time config, so a change forces a
+        reconnect — guaranteeing every chunk of a turn uses the SAME prosody.
+        """
+        if (
+            self._ws is None
+            or self._lang != lang
+            or self._voice_id != voice_id
+            or self._pace != pace
+            or self._temperature != temperature
+        ):
+            self._pace = pace
+            self._temperature = temperature
             await self._close()
             await self._connect(voice_id, lang)
 
     async def synthesize(
-        self, text: str, voice_id: str, lang: str
+        self,
+        text: str,
+        voice_id: str,
+        lang: str,
+        pace: float = _DEFAULT_PACE,
+        temperature: float = _DEFAULT_TEMPERATURE,
     ) -> AsyncIterator[bytes]:
         """Synthesize text on the persistent WS; reconnect once if WS is dead."""
         for attempt in range(2):
             try:
-                await self._ensure_connected(voice_id, lang)
+                await self._ensure_connected(voice_id, lang, pace, temperature)
                 ws = self._ws
                 await ws.send(json.dumps({"type": "text", "data": {"text": text,
                                                                     "send_completion_event": True}}))

@@ -273,6 +273,23 @@ class AgentLoop:
         # blips must never trigger filler. Set to True the first time noise gate
         # accepts a user turn; never reset (filler stays eligible for the whole call).
         self._real_utterance_seen: bool = False
+        # Per-turn TTS prosody (pace/temperature). Settable per turn (T2 adaptive
+        # layer overrides these); kept CONSISTENT across all chunks of a turn.
+        # Defaults match Sarvam's natural Hindi telecaller config (1.0 / 0.6).
+        self._turn_pace: float = float(os.getenv("TTS_PACE", "1.0"))
+        self._turn_temperature: float = float(os.getenv("TTS_TEMPERATURE", "0.6"))
+
+    def set_turn_prosody(self, pace: float | None = None,
+                         temperature: float | None = None) -> None:
+        """Set pace/temperature for the upcoming turn's TTS (consistent across all
+        chunks of that turn). Called by the adaptive prosody layer (T2); no-ops
+        keep the current defaults. Values flow through _synth_chunk_frames →
+        synthesize_stream → the Sarvam WS config frame.
+        """
+        if pace is not None:
+            self._turn_pace = pace
+        if temperature is not None:
+            self._turn_temperature = temperature
 
     async def _synth_and_play_stream(self, sentence: str, send_audio: callable) -> bool:
         """Stream one sentence via Sarvam WS, feeding chunks to send_audio as they
@@ -319,6 +336,8 @@ class AgentLoop:
             try:
                 async for pcm_chunk in self._tts.synthesize_stream(
                     sentence, self.ctx.lang, self.ctx.voice_profile_id,
+                    getattr(self, "_turn_pace", 1.0),
+                    getattr(self, "_turn_temperature", 0.6),
                 ):
                     if self._stop_playback.is_set():
                         break
