@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from voice_agent.prosody import ProsodyShaper, SemanticChunkPlanner
+from voice_agent.prosody import ProsodyShaper, SemanticChunkPlanner, next_connector
 
 
 def _feed_words(planner: SemanticChunkPlanner, text: str) -> list[str]:
@@ -162,3 +162,63 @@ def test_shaper_reset_restores_budget():
     shaper.reset_turn()
     assert shaper._injections_used == 0 and shaper._chunk_index == 0
     assert used_before >= 0
+
+
+# ── connector rotation (fixes "देखिए" every turn) ─────────────────────────────
+
+
+def _inject_for_turn(connector: str) -> str:
+    """Run a long Hindi chunk through a shaper for one turn; return the injected
+    connector ("" if nothing was injected)."""
+    shaper = ProsodyShaper(connector=connector)
+    shaper.reset_turn()
+    shaper.shape("नमस्ते जी कैसे हैं आप")  # idx 0 — never injected
+    out = shaper.shape("यह प्लान आपके लिए बहुत फायदेमंद रहेगा सर बिल्कुल")
+    for cand in ProsodyShaper.CONNECTORS:
+        if out.startswith(cand + "،"):
+            return cand
+    return ""
+
+
+def test_connector_not_injected_every_turn():
+    """The field bug: "देखिए" appeared on turns 0,1,2 (every turn). With rare
+    rotation, most turns must inject NOTHING."""
+    last = None
+    injected = []
+    for t in range(9):
+        c = next_connector(t, last)
+        if c:
+            last = c
+        injected.append(_inject_for_turn(c))
+    n_with = sum(1 for c in injected if c)
+    # ~1 in 3 turns → at most 4 of 9, and strictly fewer than all turns.
+    assert 1 <= n_with <= 4, injected
+    assert n_with < 9, "connector injected on every turn (the regression)"
+
+
+def test_connector_rotates_and_never_repeats_consecutively():
+    """Across the turns that DO inject, the connector rotates and is never the
+    same as the immediately preceding injected one."""
+    last = None
+    chosen = []
+    for t in range(30):
+        c = next_connector(t, last)
+        if c:
+            assert c in ProsodyShaper.CONNECTORS
+            assert c != last, f"connector {c!r} repeated consecutively at turn {t}"
+            last = c
+            chosen.append(c)
+    # Rotation actually visited more than one distinct connector.
+    assert len(set(chosen)) >= 2, chosen
+
+
+def test_shaper_uses_given_connector_not_hardcoded_dekhiye():
+    """When a non-default connector is selected for the turn, it is the one
+    injected — not the hardcoded देखिए."""
+    got = _inject_for_turn("अच्छा")
+    assert got == "अच्छा", got
+
+
+def test_shaper_empty_connector_suppresses_injection():
+    """connector="" means this turn injects nothing (the sparse/rare path)."""
+    assert _inject_for_turn("") == ""

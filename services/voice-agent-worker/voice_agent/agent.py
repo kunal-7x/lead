@@ -13,7 +13,7 @@ from typing import AsyncIterator
 from voice_agent.actions import Publisher, handle_actions
 from voice_agent.clients import STTClient, LLMClient, GuardrailClient, TTSClient
 from voice_agent.models import SessionContext, STTResult, BrainOutput
-from voice_agent.prosody import SemanticChunkPlanner, ProsodyShaper
+from voice_agent.prosody import SemanticChunkPlanner, ProsodyShaper, next_connector
 from voice_agent.recorder import TurnStore, record_turn
 from voice_agent.vad import VAD, SILENCE_THRESHOLD_MS, CHUNK_MS
 
@@ -285,6 +285,10 @@ class AgentLoop:
         # across breath-chunks and trigger a false barge-in.
         self._tts_chunk_seq: int = 0
         self._filler_index = 0  # round-robin through fillers
+        # Prosody connector rotation (cross-turn): the last connector actually
+        # injected, so the next turn never repeats it. ProsodyShaper is rebuilt
+        # per turn, so this rotation state must live on the agent instance.
+        self._last_connector: str | None = None
         # Tracks the currently-running _process_utterance Task for barge-in cancel
         self._utterance_task: asyncio.Task | None = None
         # Accumulates spoken text from interrupted turns (appended to history)
@@ -1396,7 +1400,10 @@ class AgentLoop:
             min_words=_CHUNK_MIN_WORDS, max_words=_CHUNK_MAX_WORDS,
             first_words=_CHUNK_FIRST_WORDS,
         )
-        prosody = ProsodyShaper()
+        _conn = next_connector(self._turn_index, self._last_connector)
+        if _conn:
+            self._last_connector = _conn
+        prosody = ProsodyShaper(connector=_conn)
         prosody.reset_turn()
 
         try:
@@ -1583,7 +1590,10 @@ class AgentLoop:
             min_words=_CHUNK_MIN_WORDS, max_words=_CHUNK_MAX_WORDS,
             first_words=_CHUNK_FIRST_WORDS,
         )
-        prosody = ProsodyShaper()
+        _conn = next_connector(self._turn_index, self._last_connector)
+        if _conn:
+            self._last_connector = _conn
+        prosody = ProsodyShaper(connector=_conn)
         prosody.reset_turn()
 
         try:

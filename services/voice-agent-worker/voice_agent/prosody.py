@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["SemanticChunkPlanner", "ProsodyShaper"]
+__all__ = ["SemanticChunkPlanner", "ProsodyShaper", "next_connector"]
 
 # ── Boundary detection ────────────────────────────────────────────────────────
 # Clause-final punctuation: Latin + Devanagari danda + ellipsis. A boundary here
@@ -265,8 +265,12 @@ class ProsodyShaper:
     injection budget is restored.
     """
 
-    # Conservative, natural openers. देखिए = "look/see", मतलब = "meaning/so",
-    # तो = "so". These are common, polite telecaller discourse markers.
+    # Conservative, natural openers, rotated across turns. देखिए = "look/see",
+    # अच्छा = "well/ok", तो = "so", मतलब = "meaning/so", "हाँ तो" = "so then".
+    # The agent picks ONE per turn (see CONNECTORS / next_connector) so the same
+    # marker never repeats turn after turn (the field bug: "देखिए" on every turn).
+    CONNECTORS = ("देखिए", "अच्छा", "तो", "मतलब", "हाँ तो")
+    # Default if the caller doesn't pass an explicit connector for this turn.
     _INJECT_CONNECTOR = "देखिए"
     # Don't inject if the chunk already starts with any of these (avoid doubling).
     _LEADING_MARKERS = ("देखिए", "मतलब", "तो", "अच्छा", "हाँ", "जी", "अरे")
@@ -274,8 +278,13 @@ class ProsodyShaper:
     # a real clause, never as a standalone filler.
     _MIN_WORDS_FOR_INJECT = 4
 
-    def __init__(self, max_injections_per_turn: int = 1) -> None:
+    def __init__(self, max_injections_per_turn: int = 1,
+                 connector: str | None = None) -> None:
         self.max_injections_per_turn = max_injections_per_turn
+        # Per-turn connector chosen by the caller (rotated across turns). When
+        # None we fall back to the static default. Empty string => never inject
+        # this turn (the "rare" path: connectors are sparse, not every turn).
+        self._connector = connector if connector is not None else self._INJECT_CONNECTOR
         self._injections_used = 0
         self._chunk_index = 0
 
@@ -297,6 +306,7 @@ class ProsodyShaper:
         self._chunk_index += 1
         if (
             allow_inject
+            and self._connector  # empty => suppressed this turn (rare-injection)
             and self._injections_used < self.max_injections_per_turn
             and self._should_inject(shaped, idx)
         ):
@@ -338,6 +348,31 @@ class ProsodyShaper:
         return True
 
     def _inject(self, shaped: str) -> str:
-        # Prepend the connector + comma micro-pause. Result is never a bare filler
-        # because shaped is a substantial clause (guarded by _should_inject).
-        return f"{self._INJECT_CONNECTOR}، {shaped}"
+        # Prepend the (per-turn rotated) connector + comma micro-pause. Result is
+        # never a bare filler because shaped is a substantial clause (guarded by
+        # _should_inject).
+        return f"{self._connector}، {shaped}"
+
+
+def next_connector(turn_index: int, last_connector: str | None,
+                   *, every_n: int = 3) -> str:
+    """Pick the connector for this turn, or "" to inject nothing this turn.
+
+    Rotation policy (fixes the field bug where "देखिए" was injected on EVERY
+    turn 0,1,2…):
+      * Connectors are RARE — only ~1 in ``every_n`` turns gets one ("" = none).
+      * When one is injected it ROTATES through ``ProsodyShaper.CONNECTORS`` and
+        is NEVER the same as ``last_connector`` (no twice-in-a-row).
+
+    Deterministic (turn-index driven, no RNG) so tests are stable. The caller
+    keeps ``last_connector`` across turns on the agent instance.
+    """
+    if every_n <= 0 or turn_index % every_n != 0:
+        return ""  # most turns: no connector at all (sparse)
+    pool = ProsodyShaper.CONNECTORS
+    # Step deterministically through the pool by how many injections happened so
+    # far (turn_index // every_n), then skip the last-used one to avoid repeats.
+    choice = pool[(turn_index // every_n) % len(pool)]
+    if choice == last_connector:
+        choice = pool[((turn_index // every_n) + 1) % len(pool)]
+    return choice
