@@ -189,7 +189,8 @@ class HttpLLMClient:
 
     def _build_payload(self, ctx: SessionContext, user_turn: str,
                        dialog_history: list[dict],
-                       collected_slots: dict | None = None) -> dict:
+                       collected_slots: dict | None = None,
+                       system_prompt_suffix: str | None = None) -> dict:
         payload: dict = {
             "user_turn": user_turn,
             "lang": ctx.lang,
@@ -201,13 +202,18 @@ class HttpLLMClient:
         }
         if collected_slots:
             payload["collected_slots"] = collected_slots
+        # T2.1: per-turn adaptive directive from CSO/RSP — inject when present.
+        if system_prompt_suffix:
+            payload["system_prompt_suffix"] = system_prompt_suffix
         return payload
 
     async def generate(self, ctx: SessionContext, user_turn: str,
                        dialog_history: list[dict],
-                       collected_slots: dict | None = None) -> BrainOutput:
+                       collected_slots: dict | None = None,
+                       system_prompt_suffix: str | None = None) -> BrainOutput:
         """Batch LLM — waits for the full reply before returning."""
-        payload = self._build_payload(ctx, user_turn, dialog_history, collected_slots)
+        payload = self._build_payload(ctx, user_turn, dialog_history,
+                                      collected_slots, system_prompt_suffix)
         resp = await self._client.post(f"{self._base_url}/v1/llm/generate", json=payload)
         resp.raise_for_status()
         body = resp.json()
@@ -219,6 +225,7 @@ class HttpLLMClient:
         user_turn: str,
         dialog_history: list[dict],
         collected_slots: dict | None = None,
+        system_prompt_suffix: str | None = None,
     ) -> AsyncIterator[tuple[str, None]]:
         """Plain-text streaming LLM via SSE — ~0.8s first-token, no JSON mode.
 
@@ -229,7 +236,8 @@ class HttpLLMClient:
         Each SSE event: data: {"token":"...","done":false}
         Final event:    data: {"token":"","done":true}
         """
-        payload = self._build_payload(ctx, user_turn, dialog_history, collected_slots)
+        payload = self._build_payload(ctx, user_turn, dialog_history,
+                                      collected_slots, system_prompt_suffix)
         async with self._client.stream(
             "POST",
             f"{self._base_url}/v1/llm/generate/stream_text",

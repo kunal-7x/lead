@@ -12,6 +12,7 @@ from typing import AsyncIterator
 
 from voice_agent.actions import Publisher, handle_actions
 from voice_agent.clients import STTClient, LLMClient, GuardrailClient, TTSClient
+from voice_agent.conversation_state import ConversationStateEngine
 from voice_agent.models import SessionContext, STTResult, BrainOutput
 from voice_agent.prosody import SemanticChunkPlanner, ProsodyShaper, next_connector
 from voice_agent.recorder import TurnStore, record_turn
@@ -341,6 +342,8 @@ class AgentLoop:
         # Defaults match Sarvam's natural Hindi telecaller config (1.0 / 0.6).
         self._turn_pace: float = float(os.getenv("TTS_PACE", "1.0"))
         self._turn_temperature: float = float(os.getenv("TTS_TEMPERATURE", "0.6"))
+        # T2.1: Adaptive Conversational Intelligence — CSO engine (per-session).
+        self._cso_engine = ConversationStateEngine()
 
     def set_turn_prosody(self, pace: float | None = None,
                          temperature: float | None = None) -> None:
@@ -1464,6 +1467,14 @@ class AgentLoop:
         first_audio_sent = False
         _t_first_sentence_queued: float | None = None  # when first sentence hit tts_queue
 
+        # ── T2.1: Fire CSO classification IN PARALLEL (before LLM warmup) ──────
+        # The classification call (fast ~300ms Groq 8B model) runs concurrently
+        # with everything below — it resolves before we need its result.  On any
+        # error it silently falls back to the previous CSO state; never blocks.
+        _cso_task: asyncio.Task = asyncio.create_task(
+            self._cso_engine.update(self._dialog_history, stt_result.text)
+        )
+
         # ── Start parallel metadata call (non-blocking) ────────────────────────
         _slots_snapshot = dict(self._accumulated_slots) if self._accumulated_slots else None
         metadata_task: asyncio.Task = asyncio.create_task(
@@ -1516,6 +1527,35 @@ class AgentLoop:
         prosody = ProsodyShaper(connector=_conn)
         prosody.reset_turn()
 
+        # ── T2.1: Collect CSO result; derive directive + prosody ──────────────
+        # By now the CSO task has had time to run in parallel while we were
+        # setting up the TTS pipeline above (~0ms wait typical).  If still
+        # running, wait a short grace window — never more than CSO_TIMEOUT_S.
+        # On timeout/error: directive="" (no suffix), prosody=(None, None).
+        _cso_directive: str = ""
+        try:
+            await asyncio.wait_for(asyncio.shield(_cso_task), timeout=0.2)
+        except (asyncio.TimeoutError, Exception):
+            pass  # will still run in background; collect below
+        # Collect final CSO state regardless (may already be done)
+        try:
+            await asyncio.wait_for(_cso_task, timeout=1.0)
+        except (asyncio.TimeoutError, Exception):
+            pass
+        _cso_directive = self._cso_engine.directive()
+        _cso_pace, _cso_temp = self._cso_engine.prosody_params()
+        # Apply prosody params for this turn (T1.2 hook)
+        self.set_turn_prosody(pace=_cso_pace, temperature=_cso_temp)
+        _cso_snapshot = self._cso_engine.current_cso()
+        _diag(self.ctx.session_id, self._turn_index,
+              phase="cso",
+              mood=_cso_snapshot.get("user_mood"),
+              density=_cso_snapshot.get("response_density_target"),
+              stage=_cso_snapshot.get("sales_stage"),
+              patience=f"{_cso_snapshot.get('user_patience', 0):.2f}",
+              pace=_cso_pace,
+              directive=repr(_cso_directive[:60] if _cso_directive else ""))
+
         try:
             # ── Consume plain-text token stream ────────────────────────────────
             first_token_logged = False
@@ -1523,6 +1563,7 @@ class AgentLoop:
             async for token, _ in self._llm.generate_stream_text(
                 self.ctx, stt_result.text, self._dialog_history,
                 collected_slots=_slots_snapshot,
+                system_prompt_suffix=_cso_directive or None,
             ):
                 if not first_token_logged and token:
                     first_token_logged = True

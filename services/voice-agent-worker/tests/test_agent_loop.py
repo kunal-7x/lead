@@ -109,14 +109,15 @@ async def test_collected_slots_accumulated_and_passed():
             })
 
         async def generate(self, ctx, user_turn, dialog_history,
-                           collected_slots=None):
+                           collected_slots=None, system_prompt_suffix=None):
             self.slots_received.append(collected_slots)
             self.call_count += 1
             self.last_collected_slots = collected_slots
             return self._make_brain()
 
         async def generate_stream_text(self, ctx, user_turn, dialog_history,
-                                        collected_slots=None):
+                                        collected_slots=None,
+                                        system_prompt_suffix=None):
             brain = self._make_brain()
             words = brain.reply.split()
             for i, word in enumerate(words):

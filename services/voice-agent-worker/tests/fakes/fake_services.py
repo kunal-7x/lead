@@ -78,6 +78,7 @@ class FakeLLM:
         self.whatsapp = whatsapp
         self.call_count = 0
         self.last_collected_slots: dict | None = None
+        self.last_system_prompt_suffix: str | None = None
 
     def _make_brain(self) -> BrainOutput:
         return BrainOutput(
@@ -96,9 +97,11 @@ class FakeLLM:
 
     async def generate(self, ctx: SessionContext, user_turn: str,
                        dialog_history: list,
-                       collected_slots: dict | None = None) -> BrainOutput:
+                       collected_slots: dict | None = None,
+                       system_prompt_suffix: str | None = None) -> BrainOutput:
         self.call_count += 1
         self.last_collected_slots = collected_slots
+        self.last_system_prompt_suffix = system_prompt_suffix
         return self._make_brain()
 
     async def generate_stream(
@@ -116,6 +119,7 @@ class FakeLLM:
     async def generate_stream_text(
         self, ctx: SessionContext, user_turn: str, dialog_history: list,
         collected_slots: dict | None = None,
+        system_prompt_suffix: str | None = None,
     ) -> AsyncIterator[tuple[str, None]]:
         """Fake plain-text streaming LLM: yields reply word-by-word, no final brain."""
         # NOTE: generate() is called separately (parallel metadata) — don't increment
