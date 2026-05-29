@@ -83,6 +83,33 @@ _BARGEIN_MIN_SPEECH_CHUNKS: int = int(
     os.getenv("BARGEIN_MIN_SPEECH_CHUNKS", "16")
 )  # ≈ 320ms at 20ms/chunk — requires sustained deliberate speech + real STT text
 
+# Max time (seconds) to WAIT for the probe STT to emit a real partial once the
+# VAD frame-count threshold is met. Saaras streaming STT needs ~200-500ms to
+# emit a first partial, so the old 8×sleep(0) (~0ms) made confirm impossible.
+# We poll _bargein_has_real_partial across this window; if a >=2-word partial
+# arrives we confirm, otherwise we keep the probe running (caller may still be
+# mid-word) and re-evaluate on subsequent frames.
+_BARGEIN_PARTIAL_WAIT_S: float = float(os.getenv("BARGEIN_PARTIAL_WAIT_S", "0.45"))
+
+# Min real words in a probe partial to confirm a barge-in. A lone backchannel
+# ("हाँ"/"hmm"/"ok") is 1 word and is also caught by _BACKCHANNEL_TOKENS, so
+# 2 words = a deliberate interruption ("रुको सुनो", "रुक जाओ").
+_BARGEIN_MIN_PARTIAL_WORDS: int = int(os.getenv("BARGEIN_MIN_PARTIAL_WORDS", "2"))
+
+# Echo-rejection energy gate. During TTS playback, residual echo of the bot's
+# own audio bleeds into the inbound track at LOW energy. A real caller speaking
+# over the bot is clearly louder. We require RMS >= this floor for a frame to
+# count toward the barge-in debounce while playing. Echo sits well under
+# ~700 RMS on decoded 8k; deliberate speech is 1000+.
+_BARGEIN_ECHO_ENERGY_FLOOR: float = float(
+    os.getenv("BARGEIN_ECHO_ENERGY_FLOOR", "700")
+)
+
+# Half-duplex fallback: when true, barge-in is suppressed UNLESS inbound energy
+# strongly exceeds the echo floor (3×). Use only if echo still leaks through the
+# normal STT+energy gate in the field. Default off (full-duplex).
+_BARGEIN_HALF_DUPLEX: bool = os.getenv("BARGEIN_HALF_DUPLEX", "false").lower() == "true"
+
 # Backchannel tokens: short acknowledgements that should NOT count as real
 # interrupts even after VAD confirms speech. Extends _NOISE_TOKENS with Hindi
 # backchannels. If the STT result after a confirmed barge-in is ONLY one of
@@ -648,22 +675,36 @@ class AgentLoop:
         _probe_queue: asyncio.Queue | None = None
         _probe_task: asyncio.Task | None = None
 
+        # Word count of the best probe partial seen this candidate window.
+        _bargein_partial_words: int = 0
+
         def _on_bargein_partial(text: str) -> None:
-            """Called by probe STT stream when a real interim transcript arrives."""
-            nonlocal _bargein_has_real_partial
-            # Require at least one non-trivial word (strip punctuation check)
+            """Called by probe STT stream when a real interim transcript arrives.
+
+            Records the running max word count so the confirm logic can require
+            >= _BARGEIN_MIN_PARTIAL_WORDS real words (a deliberate interruption)
+            while still flagging that SOME real text was heard.
+            """
+            nonlocal _bargein_has_real_partial, _bargein_partial_words
             stripped = text.strip().rstrip(".!?,।").strip()
-            if stripped and len(stripped.split()) >= 1:
+            if not stripped:
+                return
+            nwords = len(stripped.split())
+            if nwords >= 1:
                 _bargein_has_real_partial = True
+                if nwords > _bargein_partial_words:
+                    _bargein_partial_words = nwords
 
         async def _start_probe_stream() -> None:
             """Start a lightweight STT probe stream for barge-in real-text detection."""
             nonlocal _probe_queue, _probe_task, _bargein_has_real_partial
+            nonlocal _bargein_partial_words
             if not hasattr(self._stt, "stream_transcribe"):
                 return
             if _probe_task is not None and not _probe_task.done():
                 return  # already running
             _bargein_has_real_partial = False
+            _bargein_partial_words = 0
             q: asyncio.Queue = asyncio.Queue()
             _probe_queue = q
 
@@ -684,6 +725,7 @@ class AgentLoop:
         async def _cancel_probe_stream() -> None:
             """Cancel the probe STT stream and reset barge-in partial flag."""
             nonlocal _probe_queue, _probe_task, _bargein_has_real_partial
+            nonlocal _bargein_partial_words
             if _probe_queue is not None:
                 try:
                     _probe_queue.put_nowait(None)  # sentinel
@@ -698,6 +740,7 @@ class AgentLoop:
                     pass
                 _probe_task = None
             _bargein_has_real_partial = False
+            _bargein_partial_words = 0
 
         # Eager STT stream pre-connect: start the streaming WebSocket NOW, before
         # the first real speech chunk arrives. This ensures saaras:v3 is already
@@ -735,74 +778,100 @@ class AgentLoop:
             # Counter also resets on each new TTS breath-chunk (via _tts_chunk_seq)
             # so partial counts from one chunk can't carry over into the next.
             if self._playing_tts:
-                # Reset debounce if a new breath-chunk started since last check
+                # T1.3: the probe STT and the speech-frame counter are NOT reset
+                # on a _tts_chunk_seq bump anymore. A caller speaking THROUGH a
+                # breath-chunk boundary previously had _bargein_consec zeroed and
+                # the probe cancelled every ~2-6s, so a sustained interruption
+                # never accumulated. We now only track the seq for diag; the
+                # counter/probe are reset solely on genuine VAD silence (below).
                 if self._tts_chunk_seq != _bargein_seen_chunk_seq:
-                    if _bargein_consec > 0:
-                        _diag(self.ctx.session_id, self._turn_index,
-                              phase="bargein_rejected",
-                              reason="inter_chunk_reset",
-                              consec_frames=_bargein_consec,
-                              chunk_seq=self._tts_chunk_seq)
-                    _bargein_consec = 0
                     _bargein_seen_chunk_seq = self._tts_chunk_seq
-                    # Cancel probe stream on chunk boundary — fresh probe for new chunk
-                    await _cancel_probe_stream()
-                if is_speech:
+
+                # Echo rejection: a frame only counts toward the debounce if VAD
+                # says speech AND its energy is clearly above the residual echo
+                # floor. In half-duplex mode the bar is 3× the floor.
+                _energy = self._vad.energy(chunk)
+                _floor = _BARGEIN_ECHO_ENERGY_FLOOR * (3.0 if _BARGEIN_HALF_DUPLEX else 1.0)
+                _loud_speech = is_speech and _energy >= _floor
+
+                if _loud_speech:
                     _bargein_consec += 1
                     # Diagnostic: candidate (not yet confirmed)
                     if _bargein_consec == 1:
                         _diag(self.ctx.session_id, self._turn_index,
                               phase="bargein_candidate",
                               consec_frames=_bargein_consec,
+                              energy=f"{_energy:.0f}",
                               chunk_seq=self._tts_chunk_seq)
-                        # Start probe STT stream on first VAD frame of candidate
+                        # Start probe STT stream on first loud frame of candidate
                         await _start_probe_stream()
-                    # Feed debounce chunk to probe stream so STT can produce partials
+                    # Feed every loud frame to the probe so STT builds a partial,
+                    # continuously across chunk boundaries (the regression fix).
                     if _probe_queue is not None:
                         try:
                             _probe_queue.put_nowait(chunk)
                         except Exception:  # noqa: BLE001
                             pass
                     if _bargein_consec >= _BARGEIN_MIN_SPEECH_CHUNKS:
-                        # VAD threshold met — but ALSO require real STT partial text.
-                        # Echo/bot-audio produces VAD energy but no coherent words.
-                        # Yield ticks to let the probe STT task process queued audio
-                        # and fire partial_callback if real words are present.
-                        # Use 8 ticks (was 3) — fragmented Hindi words like "रुको"
-                        # may need extra STT decode time across async boundaries.
-                        for _ in range(8):
-                            await asyncio.sleep(0)
-                        if not _bargein_has_real_partial:
-                            # VAD says speech but STT sees no real words → echo/noise.
-                            # Don't hard-reset to 0 — instead back off to half-threshold
-                            # so a continuing real interruption re-triggers within ~160ms
-                            # rather than requiring a full new 320ms window. Echo (no text)
-                            # still can't accumulate past the threshold.
+                        # VAD+energy threshold met. Now give the probe STT a REAL
+                        # window (~450ms) to emit a partial with >=2 real words.
+                        # Echo/bot-audio produces energy spikes but no coherent
+                        # multi-word text, so it cannot pass this gate.
+                        _deadline = time.time() + _BARGEIN_PARTIAL_WAIT_S
+                        while time.time() < _deadline:
+                            if (_bargein_has_real_partial and
+                                    _bargein_partial_words >= _BARGEIN_MIN_PARTIAL_WORDS):
+                                break
+                            await asyncio.sleep(0.01)
+                        _confirmed = (
+                            _bargein_has_real_partial and
+                            _bargein_partial_words >= _BARGEIN_MIN_PARTIAL_WORDS
+                        )
+                        if not _confirmed:
+                            # Why rejected: no text at all → echo; some text but
+                            # < min words → too short / lone backchannel.
+                            if not _bargein_has_real_partial:
+                                _reason = "echo_no_words"
+                            elif _bargein_partial_words < _BARGEIN_MIN_PARTIAL_WORDS:
+                                _reason = "too_short"
+                            else:
+                                _reason = "backchannel"
                             _diag(self.ctx.session_id, self._turn_index,
                                   phase="bargein_rejected",
-                                  reason="no_real_text",
+                                  reason=_reason,
                                   consec_frames=_bargein_consec,
+                                  words=_bargein_partial_words,
                                   chunk_seq=self._tts_chunk_seq)
+                            # Back off to half-threshold so a continuing REAL
+                            # interruption re-confirms within ~160ms once its
+                            # partial arrives, rather than restarting the window.
+                            # Probe stays alive — more words may still arrive.
                             _bargein_consec = _BARGEIN_MIN_SPEECH_CHUNKS // 2
-                            # Keep probe running — real words may still arrive
                         else:
-                            # Also apply backchannel check via _BACKCHANNEL_TOKENS
-                            # (the partial text is a rough preview — full check happens
-                            # post-utterance in _process_utterance; this is a pre-check).
-                            # We only block barge-in here for single-token backchannels.
-                            # Multi-word partials always proceed to barge-in confirm.
-                            # Confirmed barge-in — interrupt AI reply
+                            # Confirmed barge-in — interrupt AI reply.
                             _milestone("bargein_confirmed",
                                        session=self.ctx.session_id,
                                        turn=self._turn_index,
                                        consec_frames=_bargein_consec)
+                            _diag(self.ctx.session_id, self._turn_index,
+                                  phase="bargein_confirmed",
+                                  consec_frames=_bargein_consec,
+                                  words=_bargein_partial_words,
+                                  chunk_seq=self._tts_chunk_seq)
                             await _cancel_probe_stream()
+                            # Stop the synth-ahead pipeline + player immediately:
+                            # _stop_playback short-circuits both the producer and
+                            # the player (agent.py _run_synth_ahead_pipeline), and
+                            # the stop_playback JSON tells the bridge to clear the
+                            # outbound audio it has already buffered.
                             self._stop_playback.set()
                             await _call(send_json, {"type": "stop_playback"})
                             self._playing_tts = False
                             _bargein_consec = 0
 
-                            # Cancel the utterance task (TTS will see _stop_playback)
+                            # Cancel the in-flight LLM/TTS utterance task. Collected
+                            # slots live on self._accumulated_slots (NOT on the task)
+                            # so cancelling preserves all gathered context.
                             if self._utterance_task is not None and not self._utterance_task.done():
                                 self._utterance_task.cancel()
                                 try:
@@ -848,15 +917,21 @@ class AgentLoop:
                                   reason="noise_during_greeting",
                                   consec_frames=_bargein_consec)
                 else:
-                    # Non-speech during TTS — reset debounce counter
-                    if _bargein_consec > 0:
-                        _diag(self.ctx.session_id, self._turn_index,
-                              phase="bargein_rejected",
-                              reason="silence_reset",
-                              consec_frames=_bargein_consec,
-                              chunk_seq=self._tts_chunk_seq)
-                    _bargein_consec = 0
-                    await _cancel_probe_stream()
+                    # Not loud speech (silence, or low-energy echo). Only treat a
+                    # genuine VAD-silence as the end of a candidate: reset the
+                    # counter + probe. Low-energy frames that VAD still flags as
+                    # speech (echo) simply don't increment — they neither reset
+                    # nor accumulate, so a real interruption riding over the same
+                    # chunk keeps its progress.
+                    if not is_speech:
+                        if _bargein_consec > 0:
+                            _diag(self.ctx.session_id, self._turn_index,
+                                  phase="bargein_rejected",
+                                  reason="silence_reset",
+                                  consec_frames=_bargein_consec,
+                                  chunk_seq=self._tts_chunk_seq)
+                        _bargein_consec = 0
+                        await _cancel_probe_stream()
                 continue  # keep consuming; utterance task runs concurrently
 
             # ── Normal half-duplex listen path (not playing TTS) ──────────────

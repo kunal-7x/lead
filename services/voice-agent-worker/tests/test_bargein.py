@@ -3,7 +3,12 @@ from __future__ import annotations
 import asyncio
 
 from voice_agent.vad import FakeVAD, SILENCE_THRESHOLD_MS, CHUNK_MS
-from voice_agent.agent import _BARGEIN_MIN_SPEECH_CHUNKS, _BACKCHANNEL_TOKENS
+from voice_agent.agent import (
+    _BARGEIN_MIN_SPEECH_CHUNKS,
+    _BACKCHANNEL_TOKENS,
+    _BARGEIN_ECHO_ENERGY_FLOOR,
+    _BARGEIN_MIN_PARTIAL_WORDS,
+)
 from tests.conftest import make_loop, make_ctx, run_loop
 from tests.fakes.fake_services import FakeSTT, FakeLLM, FakeTTS
 import struct
@@ -13,7 +18,16 @@ _SHORT_BLIP_FRAMES = max(1, _BARGEIN_MIN_SPEECH_CHUNKS // 4)  # ≤ 25% of thres
 
 
 def _speech() -> bytes:
+    # RMS 1000 — clearly above the echo-energy floor → counts as loud speech.
     return struct.pack("<160h", *([1000] * 160))
+
+
+def _quiet_echo() -> bytes:
+    """Low-energy frame: VAD may flag it as speech, but RMS is BELOW the echo
+    floor — models residual echo of the bot's own TTS bleeding into the inbound
+    track. Must NOT count toward the barge-in debounce."""
+    amp = int(_BARGEIN_ECHO_ENERGY_FLOOR / 2)  # well under the floor
+    return struct.pack("<160h", *([amp] * 160))
 
 
 def _silence() -> bytes:
@@ -344,51 +358,46 @@ async def test_sustained_speech_during_playback_triggers_bargein():
     )
 
 
-async def test_inter_chunk_counter_reset_prevents_accumulation():
-    """Partial speech counts from one breath-chunk must NOT carry over to the
-    next breath-chunk and trigger a false barge-in.
+async def test_speech_through_chunk_boundary_still_accumulates():
+    """T1.3 REGRESSION FIX: a caller speaking CONTINUOUSLY across a TTS breath-
+    chunk boundary (_tts_chunk_seq bump) must keep accumulating and confirm.
 
-    Bug: with old code, 7 frames during chunk 1 (below threshold of 8)
-    + 1 frame during chunk 2 synthesis gap = 8 total → false barge-in fired.
-    Fix: _tts_chunk_seq increment resets _bargein_consec between chunks.
+    THIS is the bug that broke barge-in in the field: the old code zeroed
+    _bargein_consec AND cancelled the probe STT on every _tts_chunk_seq bump
+    (every ~2-6s), so a caller talking through a boundary never reached the
+    threshold and barge-in never fired ("रुक जाओ" 7× ignored). The fix only
+    resets on genuine VAD silence, never on a chunk bump.
+
+    Here the caller speaks half the threshold, a new TTS chunk starts mid-speech
+    (seq bump, NO silence), then speaks the other half — total >= threshold WITH
+    a real >=2-word partial → barge-in MUST confirm.
     """
-    # Use a threshold that allows testing: need blip < threshold but blip*2 >= threshold
-    # With threshold=22: half_blip=11 * 2 = 22 >= 22, each alone (11) < 22. Perfect.
-    half_blip = _BARGEIN_MIN_SPEECH_CHUNKS // 2
-    assert half_blip < _BARGEIN_MIN_SPEECH_CHUNKS, "threshold must be > 1 for this test"
-    assert half_blip * 2 >= _BARGEIN_MIN_SPEECH_CHUNKS, "half_blip*2 must hit threshold"
-
-    loop = make_loop(vad=FakeVAD(speech_chunks=half_blip + 5))
+    half = _BARGEIN_MIN_SPEECH_CHUNKS // 2 + 1  # two halves comfortably exceed threshold
+    # Default FakeSTT partial_text="test speech" → 2 words → passes the word gate
+    loop = make_loop(vad=FakeVAD(speech_chunks=half * 2 + 5))
     sent_json = []
 
     async def source():
         loop._playing_tts = True
-        # Chunk 1: inject half_blip speech frames (below threshold on its own)
-        for _ in range(half_blip):
+        # First half of a continuous interruption
+        for _ in range(half):
             yield _speech()
-        # Simulate inter-chunk gap: new TTS sentence starts
-        loop._tts_chunk_seq += 1  # triggers counter reset in audio loop
-        # Brief silence (synthesis latency)
-        for _ in range(3):
-            yield _silence()
-        # Chunk 2: inject half_blip speech frames again
-        # Without the fix, accumulated total = half_blip*2 → false barge-in
-        # With the fix, counter was reset → only half_blip consec → no trigger
-        for _ in range(half_blip):
+        # New TTS breath-chunk starts WHILE the caller is still speaking. No
+        # silence frame — this is mid-word. Old code reset here; new code must not.
+        loop._tts_chunk_seq += 1
+        # Second half — speech continues uninterrupted
+        for _ in range(half):
             yield _speech()
-        # Silence to end
-        for _ in range(5):
-            yield _silence()
-        loop._playing_tts = False
         for _ in range(20):
             yield _silence()
 
     await loop.run(source(), lambda a: None, lambda m: sent_json.append(m))
 
     types = [m.get("type") for m in sent_json]
-    assert "stop_playback" not in types, (
-        f"Inter-chunk counter accumulation must NOT trigger barge-in; "
-        f"half_blip={half_blip} < threshold={_BARGEIN_MIN_SPEECH_CHUNKS}. Got: {types}"
+    assert "stop_playback" in types, (
+        f"Continuous speech through a chunk boundary MUST accumulate and confirm "
+        f"barge-in (the field regression). half={half}, threshold="
+        f"{_BARGEIN_MIN_SPEECH_CHUNKS}. Got: {types}"
     )
 
 
@@ -440,7 +449,8 @@ async def test_vad_with_real_stt_partial_triggers_bargein():
     stt = FakeSTT(
         transcript="mujhe 2BHK chahiye",
         confidence=0.85,
-        partial_text="mujhe",  # real word → _bargein_has_real_partial = True
+        # >=2 real words → deliberate interruption (T1.3 gate: lone words don't fire)
+        partial_text="mujhe 2BHK",
     )
     loop = make_loop(stt=stt, vad=FakeVAD(speech_chunks=_BARGEIN_MIN_SPEECH_CHUNKS + 5))
     sent_json = []
@@ -461,26 +471,19 @@ async def test_vad_with_real_stt_partial_triggers_bargein():
 
 
 async def test_backchannel_stt_partial_does_not_trigger_bargein():
-    """W3: VAD frames during TTS playback with a backchannel-only STT partial
-    (e.g. "हाँ") must NOT trigger barge-in.
+    """T1.3: a LONE backchannel partial ("हाँ") during TTS playback must NOT
+    trigger barge-in.
 
-    The backchannel check in _process_utterance handles post-barge-in suppression,
-    but here we test the pre-barge-in gate: a single-token backchannel partial
-    still counts as a real partial (it's a real word), so barge-in IS confirmed
-    at the VAD level and backchannel suppression happens in _process_utterance.
-
-    This test specifically validates that a PURE echo (no partial at all) does
-    NOT trigger and a real word ("हाँ") DOES allow barge-in to proceed so the
-    post-barge-in backchannel suppression path can handle it correctly.
-    NOTE: A "हाँ" by itself IS a real word — barge-in fires, then
-    _process_utterance suppresses the LLM reply (existing logic). If we
-    blocked barge-in here for single-word backchannels we'd miss legitimate
-    single-word answers. So this test confirms barge-in fires for "हाँ".
+    The barge-in confirm gate requires >= _BARGEIN_MIN_PARTIAL_WORDS (2) real
+    words. A single-token backchannel ("हाँ"/"hmm"/"ok") is the caller saying
+    "I hear you, keep going" — it is exactly 1 word, so it is rejected at the
+    gate (reason=too_short) and the AI keeps talking. This is the field
+    requirement: a lone "हाँ" while the bot speaks does not cut it off.
     """
     stt = FakeSTT(
         transcript="हाँ",
         confidence=0.90,
-        partial_text="हाँ",  # backchannel word — still a real word, partial fires
+        partial_text="हाँ",  # 1 word backchannel — below the 2-word confirm gate
     )
     loop = make_loop(stt=stt, vad=FakeVAD(speech_chunks=_BARGEIN_MIN_SPEECH_CHUNKS + 5))
     sent_json = []
@@ -488,18 +491,20 @@ async def test_backchannel_stt_partial_does_not_trigger_bargein():
     async def source():
         loop._playing_tts = True
         loop._next_utterance_is_bargein = True
-        for _ in range(_BARGEIN_MIN_SPEECH_CHUNKS):
+        for _ in range(_BARGEIN_MIN_SPEECH_CHUNKS + 4):
             yield _speech()
         for _ in range(_N_SILENCE + 2):
+            yield _silence()
+        loop._playing_tts = False
+        for _ in range(10):
             yield _silence()
 
     await loop.run(source(), lambda a: None, lambda m: sent_json.append(m))
 
     types = [m.get("type") for m in sent_json]
-    # Barge-in fires (real word present) — stop_playback is sent
-    assert "stop_playback" in types, (
-        f"Backchannel 'हाँ' is a real word — barge-in should fire (LLM suppressed "
-        f"by post-barge-in backchannel logic). Got: {types}"
+    # Lone backchannel ("हाँ" = 1 word) must NOT interrupt the AI.
+    assert "stop_playback" not in types, (
+        f"Lone backchannel 'हाँ' (1 word) must NOT trigger barge-in. Got: {types}"
     )
 
 
@@ -520,7 +525,7 @@ async def test_bargein_fires_with_real_partial_within_window():
     stt = FakeSTT(
         transcript="रुको रुको",
         confidence=0.85,
-        partial_text="रुको",  # real Hindi word arrives in probe stream
+        partial_text="रुको रुको",  # >=2 real Hindi words arrive in probe stream
     )
     loop = make_loop(stt=stt, vad=FakeVAD(speech_chunks=_BARGEIN_MIN_SPEECH_CHUNKS + 5))
     sent_json = []
@@ -571,4 +576,50 @@ async def test_echo_without_stt_partial_still_rejected_after_threshold_lower():
     assert "stop_playback" not in types, (
         f"Echo (VAD only, no STT partial) must NOT trigger barge-in even with "
         f"lowered threshold={_BARGEIN_MIN_SPEECH_CHUNKS}. Got: {types}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# T1.3 tests: energy gate + 2-word confirm + through-boundary regression
+# ---------------------------------------------------------------------------
+
+async def test_low_energy_echo_frames_do_not_trigger_bargein():
+    """T1.3 energy gate: VAD-positive frames that sit BELOW the echo-energy
+    floor (residual echo of the bot's own TTS) must NOT count toward barge-in,
+    even with a real STT partial configured.
+
+    This guards against the bot interrupting itself on its own audio echo.
+    """
+    # Real 2-word partial is configured — proving the rejection is the ENERGY
+    # gate, not the word gate.
+    stt = FakeSTT(transcript="रुको रुको", confidence=0.85, partial_text="रुको रुको")
+    # FakeVAD flags every frame as speech for the whole window.
+    loop = make_loop(stt=stt, vad=FakeVAD(speech_chunks=_BARGEIN_MIN_SPEECH_CHUNKS + 20))
+    sent_json = []
+
+    async def source():
+        loop._playing_tts = True
+        # Plenty of VAD-positive frames, but all BELOW the energy floor (echo).
+        for _ in range(_BARGEIN_MIN_SPEECH_CHUNKS + 8):
+            yield _quiet_echo()
+        for _ in range(10):
+            yield _silence()
+        loop._playing_tts = False
+        for _ in range(20):
+            yield _silence()
+
+    await loop.run(source(), lambda a: None, lambda m: sent_json.append(m))
+
+    types = [m.get("type") for m in sent_json]
+    assert "stop_playback" not in types, (
+        f"Low-energy echo frames must NOT trigger barge-in (energy gate). Got: {types}"
+    )
+
+
+async def test_min_partial_words_constant():
+    """A lone backchannel is 1 word; a deliberate interruption is >=2. The
+    confirm gate must require at least 2 so single tokens never cut off the AI."""
+    assert _BARGEIN_MIN_PARTIAL_WORDS >= 2, (
+        f"_BARGEIN_MIN_PARTIAL_WORDS={_BARGEIN_MIN_PARTIAL_WORDS} must be >= 2 "
+        f"so lone backchannels don't interrupt"
     )
