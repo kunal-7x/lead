@@ -132,6 +132,87 @@ def test_client_stream_without_done_raises(monkeypatch):
     assert raised is True              # but absence of 'done' raised => fallback
 
 
+def test_client_reconnects_on_send_after_close(monkeypatch):
+    """Regression: a per-session WS that was closed (or is closing) must NOT be
+    reused. If a send raises the websockets 'Cannot call "send" once a close
+    message has been sent' RuntimeError, the client must transparently reopen a
+    fresh WS and stream the utterance — NOT raise up (which forces batch + skips
+    the turn under concurrent multi-turn calls)."""
+    import json as _json
+
+    from voice_agent.clients import HttpTTSClient
+
+    _PCM_CHUNK = b"\x22\x22" * 80
+
+    class _DeadWS:
+        """A stale WS that LOOKS open (state OPEN, close_code None) but whose
+        send raises 'send after close' — models the real race where the close
+        handshake started after _ensure_stream_ws checked state. Forces the
+        reconnect-on-send recovery rather than the pre-send state check."""
+        state = "State.OPEN"
+        close_code = None
+
+        async def send(self, _data):
+            raise RuntimeError(
+                'Cannot call "send" once a close message has been sent.'
+            )
+
+        async def close(self):
+            self.close_code = 1000
+
+        def __aiter__(self):
+            async def _gen():
+                if False:
+                    yield b""  # never reached
+            return _gen()
+
+    class _LiveWS:
+        """A fresh WS: accepts the send, streams one chunk + a done frame."""
+        state = "State.OPEN"
+        close_code = None
+
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, data):
+            self.sent.append(data)
+
+        async def close(self):
+            self.close_code = 1000
+
+        def __aiter__(self):
+            async def _gen():
+                yield _PCM_CHUNK
+                yield _json.dumps({"type": "done", "first_chunk_ms": 10,
+                                   "total_chunks": 1, "engine": "sarvam"})
+            return _gen()
+
+    client = HttpTTSClient(base_url="http://x")
+    client._stream_ws = _DeadWS()  # poison the cache with a stale/closing WS
+    live = _LiveWS()
+    connects = {"n": 0}
+
+    async def _fake_connect(_url, **_kw):
+        connects["n"] += 1
+        return live
+
+    import voice_agent.clients as clients_mod  # noqa
+    import websockets  # type: ignore
+    monkeypatch.setattr(websockets, "connect", _fake_connect)
+
+    async def _run():
+        got = []
+        async for c in client.synthesize_stream("namaste duniya", "hi-en", "priya"):
+            got.append(c)
+        return got
+
+    got = asyncio.run(_run())
+    assert got == [_PCM_CHUNK]          # utterance streamed successfully
+    assert connects["n"] == 1           # reopened exactly one fresh WS
+    assert live.sent and "namaste duniya" in live.sent[0]  # re-sent on new WS
+    assert client._stream_ws is live    # fresh WS cached for reuse next turn
+
+
 def test_bargein_stops_stream(monkeypatch):
     monkeypatch.setattr(agent_mod, "_TTS_STREAMING_WS", True)
     tts = FakeTTS(stream_chunks=[_PCM] * 10)

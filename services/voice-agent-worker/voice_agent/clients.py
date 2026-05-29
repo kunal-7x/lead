@@ -24,6 +24,27 @@ logger = logging.getLogger(__name__)
 _POOL_LIMITS = httpx.Limits(max_connections=200, max_keepalive_connections=50)
 
 
+def _is_ws_closed_error(exc: BaseException) -> bool:
+    """True if `exc` indicates the WS was already closed/closing.
+
+    Covers websockets' ConnectionClosed family AND the bare RuntimeError the
+    library raises on a send after the close handshake started:
+    'Cannot call "send" once a close message has been sent.' — the exact
+    regression seen under concurrent multi-turn calls.
+    """
+    try:
+        import websockets.exceptions as _wse  # type: ignore
+
+        if isinstance(exc, _wse.ConnectionClosed):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    if isinstance(exc, RuntimeError):
+        msg = str(exc).lower()
+        return "close message has been sent" in msg or "close frame" in msg
+    return False
+
+
 class STTClient(Protocol):
     async def transcribe(self, audio: bytes, lang: str, session_id: str) -> STTResult: ...
 
@@ -404,22 +425,47 @@ class HttpTTSClient:
             cache_hit=resp.headers.get("X-Cache-Hit", "false") == "true",
         )
 
-    async def _ensure_stream_ws(self):
+    @staticmethod
+    def _ws_is_open(ws) -> bool:
+        """True only if `ws` is genuinely OPEN and safe to send on.
+
+        A WS in CONNECTING/CLOSING/CLOSED must NOT be reused: a send on a
+        CLOSING socket raises 'Cannot call "send" once a close message has been
+        sent', which is exactly the regression we are guarding against. We trust
+        the websockets `State` enum (>=11); `close_code is None` alone is NOT
+        sufficient because it stays None during the CLOSING handshake.
+        """
+        if ws is None:
+            return False
+        state = getattr(ws, "state", None)
+        if state is not None:
+            try:
+                from websockets.protocol import State  # type: ignore
+
+                return state is State.OPEN
+            except Exception:  # noqa: BLE001
+                return str(state).endswith("OPEN")
+        # No state attr (test doubles / old lib): fall back to close_code.
+        return getattr(ws, "close_code", None) is None
+
+    async def _ensure_stream_ws(self, force_new: bool = False):
         """Open (or reuse) the per-session Sarvam streaming WS.
 
-        Reconnects if the existing connection is closed. One WS per session is
-        reused across turns; closed via aclose() on hangup.
+        Reconnects if the existing connection is not OPEN (closed, closing, or
+        connecting). One WS per session is reused across turns; closed via
+        aclose() on hangup. `force_new=True` discards any cached WS first — used
+        to recover after a send/recv hits a closed socket mid-utterance.
         """
         import websockets  # type: ignore
 
+        if force_new and self._stream_ws is not None:
+            await self._close_stream_ws()
         ws = self._stream_ws
-        if ws is not None and getattr(ws, "close_code", None) is None:
-            try:
-                # websockets >=11 exposes .state; treat OPEN as reusable.
-                if getattr(ws, "state", None) is None or str(ws.state).endswith("OPEN"):
-                    return ws
-            except Exception:  # noqa: BLE001
-                pass
+        if self._ws_is_open(ws):
+            return ws
+        # Drop any non-open cached WS so we never leave a dead handle around.
+        if ws is not None:
+            await self._close_stream_ws()
         ws_url = f"{self._ws_base}/v1/tts/sarvam/stream"
         self._stream_ws = await websockets.connect(ws_url, open_timeout=3, close_timeout=2)
         return self._stream_ws
@@ -438,12 +484,31 @@ class HttpTTSClient:
           send {"text","voice_id","lang"} → recv binary PCM16 chunks → recv
           {"type":"done",...} terminates this utterance (WS stays open for reuse).
         """
+        import websockets  # type: ignore
+
+        # The lock serialises turns on this session's single WS so two turns can
+        # never interleave sends on the same socket (one closing while another
+        # sends → 'send after close'). It is held for the whole utterance.
         async with self._stream_lock:
-            ws = await self._ensure_stream_ws()
-            await ws.send(json.dumps({
+            req = json.dumps({
                 "text": text, "voice_id": voice_id, "lang": lang,
                 "pace": pace, "temperature": temperature,
-            }))
+            })
+            # Send the request frame, reconnecting ONCE if the cached WS turns
+            # out to be closed/closing under us (the regression: a dead WS got
+            # reused across turns). This recovers transparently instead of
+            # raising up to _run_streaming_llm_tts and forcing the batch path.
+            ws = await self._ensure_stream_ws()
+            try:
+                await ws.send(req)
+            except (websockets.exceptions.ConnectionClosed, RuntimeError) as exc:
+                if not _is_ws_closed_error(exc):
+                    raise
+                logger.info(
+                    "[diag] phase=tts_stream reconnect reason=%s — reopening WS", type(exc).__name__,
+                )
+                ws = await self._ensure_stream_ws(force_new=True)
+                await ws.send(req)
             completed = False
             try:
                 async for frame in ws:
