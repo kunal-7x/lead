@@ -34,6 +34,7 @@ func (h *Handler) Router() http.Handler {
 		r.Get("/", h.listCampaigns)
 		r.Get("/{id}", h.getCampaign)
 		r.Post("/{id}/leads", h.attachLeads)
+		r.Get("/{id}/leads", h.listLeads)
 		r.Post("/{id}/launch", h.launchCampaign)
 		r.Post("/{id}/pause", h.pauseCampaign)
 		r.Post("/{id}/resume", h.resumeCampaign)
@@ -111,6 +112,24 @@ func (h *Handler) attachLeads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"attached": len(body.LeadIDs)})
+}
+
+type listLeadsResponse struct {
+	CampaignID string                  `json:"campaign_id"`
+	Leads      []*model.CampaignLead   `json:"leads"`
+}
+
+func (h *Handler) listLeads(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	leads, err := h.svc.ListLeads(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if leads == nil {
+		leads = []*model.CampaignLead{}
+	}
+	writeJSON(w, http.StatusOK, listLeadsResponse{CampaignID: id, Leads: leads})
 }
 
 func (h *Handler) launchCampaign(w http.ResponseWriter, r *http.Request) {
