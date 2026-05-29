@@ -139,8 +139,13 @@ async def _load_context(session_id: str) -> SessionContext:
     if raw is None:
         return SessionContext(session_id=session_id, tenant_id="unknown")
     data = json.loads(raw)
-    return SessionContext(session_id=session_id, **{
+    ctx = SessionContext(session_id=session_id, **{
         k: v for k, v in data.items()
         if k in SessionContext.__dataclass_fields__
         and k != "session_id"
     })
+    # Operational override: force premium TTS (e.g. ElevenLabs) when the primary
+    # provider is unavailable/out of credits. Set TTS_PREMIUM=1 on the worker.
+    if os.getenv("TTS_PREMIUM") == "1":
+        ctx.tts_premium = True
+    return ctx
