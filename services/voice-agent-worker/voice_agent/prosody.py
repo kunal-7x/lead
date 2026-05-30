@@ -1,7 +1,6 @@
 """Prosody layer for natural, continuous Hindi telecaller speech.
 
-Two production-grade classes used by the agent loop to make Sarvam Bulbul speech
-sound natural instead of robotic:
+Two production-grade classes used by the agent loop:
 
 - :class:`SemanticChunkPlanner` — decides chunk (breath-group) boundaries on
   *thought units*, never mid-word. Streaming LLM tokens are fed in; the planner
@@ -10,15 +9,13 @@ sound natural instead of robotic:
   short for a fast first-audio onset. A too-short trailing clause is held and
   joined with the next chunk so we never emit a 2-word stub.
 
-- :class:`ProsodyShaper` — shapes the chunk *text* (NO SSML — bulbul ignores it)
-  for natural delivery: keeps Devanagari intact, normalises pause punctuation to
-  natural micro-pauses, and OPTIONALLY injects a single sparse, natural Hindi
-  connector (देखिए / मतलब / तो) at a clause start where it reads naturally — at
-  most once per turn, driven by simple state (never random, never a bare
-  standalone filler).
+- :class:`ProsodyShaper` — SAFETY NET only (connector injection removed; the LLM
+  now produces natural prosody via SPEECH OUTPUT RULES). Strips any stray
+  markdown/symbols the LLM might accidentally emit (**, #, *, |, etc.) so they
+  never reach TTS, and normalises whitespace/line-breaks. Does NOT inject
+  connectors (देखिए/अच्छा/तो) — those come from the LLM naturally.
 
-Both classes are pure / deterministic (the shaper's injection is gated by a
-per-turn counter, not randomness) so they are fully unit-testable.
+Both classes are pure / deterministic and fully unit-testable.
 """
 
 from __future__ import annotations
@@ -238,80 +235,55 @@ class SemanticChunkPlanner:
 
 
 # ── Prosody shaping ───────────────────────────────────────────────────────────
-# Map repeated/odd pause punctuation to a single natural micro-pause. Sarvam
-# bulbul honours a comma as a short pause and a danda/period as a longer one.
+# Normalisation patterns.
 _MULTISPACE = re.compile(r"[ \t]{2,}")
 _ELLIPSIS = re.compile(r"\.{3,}|…")
 _NEWLINES = re.compile(r"\s*[\r\n]+\s*")
-# A "bare filler" = the connector standing entirely alone as the whole chunk.
-# We must never produce one of these.
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]")
+# Stray markdown/symbol patterns that should never reach TTS.
+# Strips: **bold**, *italic*, __underline__, # headings, | pipes, → arrows,
+# leading bullets (- or * at line start), {} [] angle brackets used as labels.
+_MARKDOWN_BOLD_ITALIC = re.compile(r"\*{1,3}([^*]*)\*{1,3}")
+_MARKDOWN_UNDERLINE = re.compile(r"_{1,2}([^_]*)_{1,2}")
+_MARKDOWN_HEADING = re.compile(r"(?m)^#{1,6}\s*")
+_MARKDOWN_BULLET = re.compile(r"(?m)^[\-\*]\s+")
+_MARKDOWN_PIPE = re.compile(r"\|")
+_MARKDOWN_ARROW = re.compile(r"→|->|=>")
+_MARKDOWN_BRACKETS = re.compile(r"[\[\]{}<>]")
+_MARKDOWN_BACKTICK = re.compile(r"`+")
 
 
 class ProsodyShaper:
-    """Shape chunk text for natural Sarvam speech (no SSML).
+    """SAFETY NET: strip stray markdown/symbols before TTS; normalise whitespace.
 
-    * Keeps Hindi in Devanagari untouched (only normalises whitespace/pauses).
-    * Maps line-breaks → comma micro-pause, collapses multi-space, and converts
-      an ellipsis ``…`` / ``...`` to a Devanagari comma so bulbul renders a soft
-      trailing pause instead of reading dots.
-    * OPTIONALLY injects ONE sparse natural connector (देखिए / मतलब / तो) at a
-      clause start, at most once per turn (gated by an internal counter, NOT
-      random), and only when the chunk does not already begin with a connector
-      and is long enough to carry it naturally. Never injects a bare standalone
-      filler.
+    Connector injection (देखिए/अच्छा/तो) has been REMOVED — prosody now comes
+    from the LLM natively via SPEECH OUTPUT RULES in the system prompt.
 
-    Call :meth:`reset_turn` at the start of each agent turn so the once-per-turn
-    injection budget is restored.
+    ``shape()`` only:
+    1. Strips stray markdown/symbols (**, *, #, |, →, [], {}, backticks).
+    2. Maps line-breaks → comma micro-pause.
+    3. Normalises whitespace.
+
+    ``reset_turn()`` kept for backward-compat (no-op now). ``allow_inject``
+    parameter kept for backward-compat but has no effect.
     """
 
-    # Conservative, natural openers, rotated across turns. देखिए = "look/see",
-    # अच्छा = "well/ok", तो = "so", मतलब = "meaning/so", "हाँ तो" = "so then".
-    # The agent picks ONE per turn (see CONNECTORS / next_connector) so the same
-    # marker never repeats turn after turn (the field bug: "देखिए" on every turn).
+    # Kept for backward-compat with callers that reference CONNECTORS / next_connector.
     CONNECTORS = ("देखिए", "अच्छा", "तो", "मतलब", "हाँ तो")
-    # Default if the caller doesn't pass an explicit connector for this turn.
-    _INJECT_CONNECTOR = "देखिए"
-    # Don't inject if the chunk already starts with any of these (avoid doubling).
-    _LEADING_MARKERS = ("देखिए", "मतलब", "तो", "अच्छा", "हाँ", "जी", "अरे")
-    # Only inject on a reasonably substantial chunk so the marker reads as part of
-    # a real clause, never as a standalone filler.
-    _MIN_WORDS_FOR_INJECT = 4
 
     def __init__(self, max_injections_per_turn: int = 1,
                  connector: str | None = None) -> None:
-        self.max_injections_per_turn = max_injections_per_turn
-        # Per-turn connector chosen by the caller (rotated across turns). When
-        # None we fall back to the static default. Empty string => never inject
-        # this turn (the "rare" path: connectors are sparse, not every turn).
-        self._connector = connector if connector is not None else self._INJECT_CONNECTOR
-        self._injections_used = 0
+        # All injection params are ignored; kept for drop-in backward-compat.
         self._chunk_index = 0
 
     def reset_turn(self) -> None:
-        """Reset the per-turn injection budget and chunk counter."""
-        self._injections_used = 0
+        """Reset chunk counter (no-op for injection; kept for compat)."""
         self._chunk_index = 0
 
-    def shape(self, text: str, *, allow_inject: bool = True) -> str:
-        """Return the prosody-shaped text for one chunk.
-
-        ``allow_inject`` lets the caller suppress connector injection on chunks
-        where it would be inappropriate (e.g. a question the user must answer).
-        """
+    def shape(self, text: str, *, allow_inject: bool = True) -> str:  # noqa: ARG002
+        """Strip markdown/symbols and normalise whitespace. No connector injection."""
         shaped = self._normalize(text)
-        if not shaped:
-            return shaped
-        idx = self._chunk_index
         self._chunk_index += 1
-        if (
-            allow_inject
-            and self._connector  # empty => suppressed this turn (rare-injection)
-            and self._injections_used < self.max_injections_per_turn
-            and self._should_inject(shaped, idx)
-        ):
-            shaped = self._inject(shaped)
-            self._injections_used += 1
         return shaped
 
     # ── helpers ─────────────────────────────────────────────────────────────--
@@ -319,60 +291,37 @@ class ProsodyShaper:
         s = text.strip()
         if not s:
             return ""
-        # Line breaks become a soft comma pause, not a hard cut.
+        # Strip markdown bold/italic/underline (keep inner text).
+        s = _MARKDOWN_BOLD_ITALIC.sub(r"\1", s)
+        s = _MARKDOWN_UNDERLINE.sub(r"\1", s)
+        # Strip heading markers.
+        s = _MARKDOWN_HEADING.sub("", s)
+        # Strip leading bullet markers.
+        s = _MARKDOWN_BULLET.sub("", s)
+        # Strip pipes (table separators), arrows, brackets, backticks.
+        s = _MARKDOWN_PIPE.sub(" ", s)
+        s = _MARKDOWN_ARROW.sub(" ", s)
+        s = _MARKDOWN_BRACKETS.sub("", s)
+        s = _MARKDOWN_BACKTICK.sub("", s)
+        # Line breaks become a soft comma pause.
         s = _NEWLINES.sub(", ", s)
-        # Ellipsis → Devanagari comma (soft trailing pause); bulbul reads "…" oddly.
-        s = _ELLIPSIS.sub("، ", s)
+        # Ellipsis → short pause marker (retain as comma); bulbul reads "…" oddly.
+        s = _ELLIPSIS.sub(", ", s)
         # Collapse runs of spaces/tabs.
         s = _MULTISPACE.sub(" ", s)
         # Tidy space-before-punctuation introduced by normalisation.
-        s = re.sub(r"\s+([،,.?!।])", r"\1", s)
+        s = re.sub(r"\s+([,,.?!।])", r"\1", s)
         return s.strip()
 
     def _has_devanagari(self, text: str) -> bool:
         return bool(_DEVANAGARI.search(text))
 
-    def _should_inject(self, shaped: str, chunk_index: int) -> bool:
-        # Inject only into Hindi chunks, not on the very first chunk (keep onset
-        # snappy), only on chunks long enough to carry the marker, and never when
-        # the chunk already opens with a discourse marker.
-        if chunk_index == 0:
-            return False
-        if not self._has_devanagari(shaped):
-            return False
-        if _word_count(shaped) < self._MIN_WORDS_FOR_INJECT:
-            return False
-        first_word = shaped.split(maxsplit=1)[0].strip("।,.?!، ")
-        if first_word in self._LEADING_MARKERS:
-            return False
-        return True
-
-    def _inject(self, shaped: str) -> str:
-        # Prepend the (per-turn rotated) connector + comma micro-pause. Result is
-        # never a bare filler because shaped is a substantial clause (guarded by
-        # _should_inject).
-        return f"{self._connector}، {shaped}"
-
 
 def next_connector(turn_index: int, last_connector: str | None,
                    *, every_n: int = 3) -> str:
-    """Pick the connector for this turn, or "" to inject nothing this turn.
+    """Kept for backward-compat. Connector injection is now handled by the LLM.
 
-    Rotation policy (fixes the field bug where "देखिए" was injected on EVERY
-    turn 0,1,2…):
-      * Connectors are RARE — only ~1 in ``every_n`` turns gets one ("" = none).
-      * When one is injected it ROTATES through ``ProsodyShaper.CONNECTORS`` and
-        is NEVER the same as ``last_connector`` (no twice-in-a-row).
-
-    Deterministic (turn-index driven, no RNG) so tests are stable. The caller
-    keeps ``last_connector`` across turns on the agent instance.
+    Always returns "" (no injection). The LLM's SPEECH OUTPUT RULES produce
+    natural connectors natively; the ProsodyShaper no longer injects them.
     """
-    if every_n <= 0 or turn_index % every_n != 0:
-        return ""  # most turns: no connector at all (sparse)
-    pool = ProsodyShaper.CONNECTORS
-    # Step deterministically through the pool by how many injections happened so
-    # far (turn_index // every_n), then skip the last-used one to avoid repeats.
-    choice = pool[(turn_index // every_n) % len(pool)]
-    if choice == last_connector:
-        choice = pool[((turn_index // every_n) + 1) % len(pool)]
-    return choice
+    return ""
