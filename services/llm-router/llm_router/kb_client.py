@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Protocol
 
@@ -9,6 +10,8 @@ from llm_router.models import KbChunk
 
 _KB_URL = os.getenv("KNOWLEDGE_SERVICE_URL", "http://knowledge:8104")
 _TOP_K = 5
+
+log = logging.getLogger("llm_router.kb")
 
 
 class KbRetriever(Protocol):
@@ -33,14 +36,24 @@ class HttpKbRetriever:
         if not project_id:
             return []
         payload = {"query": query, "lang": lang, "top_k": top_k}
-        resp = await self._client.post(
-            f"{self._base_url}/v1/knowledge/projects/{project_id}/retrieve",
-            json=payload,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return [KbChunk(text=c["text"], source=c.get("source", ""), score=c.get("score", 1.0))
-                for c in data.get("chunks", [])]
+        # KB retrieval is enrichment, not a hard dependency: if the knowledge
+        # service is unreachable (DNS failure, timeout, 5xx) the LLM call must
+        # still proceed with no KB context rather than 500 the whole turn. This
+        # is what was breaking the parallel slot-extraction /v1/llm/generate call
+        # on the droplet (KNOWLEDGE_SERVICE_URL=http://knowledge:8104 didn't
+        # resolve → ConnectError → unhandled 500).
+        try:
+            resp = await self._client.post(
+                f"{self._base_url}/v1/knowledge/projects/{project_id}/retrieve",
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return [KbChunk(text=c["text"], source=c.get("source", ""), score=c.get("score", 1.0))
+                    for c in data.get("chunks", [])]
+        except (httpx.HTTPError, ValueError, KeyError) as exc:
+            log.warning("KB retrieve failed (%r) — proceeding without KB context", exc)
+            return []
 
     async def aclose(self) -> None:
         await self._client.aclose()
