@@ -130,8 +130,8 @@ def _build_stream_config(
             "enable_preprocessing": True,
             "output_audio_codec": "mulaw",
             "speech_sample_rate": 8000,
-            "min_buffer_size": 50,
-            "max_chunk_length": 250,
+            "min_buffer_size": 80,
+            "max_chunk_length": 180,
         },
     }
 
