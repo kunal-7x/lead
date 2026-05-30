@@ -539,13 +539,10 @@ async def _llm_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncIt
         slots_block,
         f"KB Context (अगर ज़रूरी हो तो इसी से जानकारी दो):\n{kb_context}",
         "",
-        "अभी सिर्फ़ बोला जाने वाला जवाब दो — कोई JSON नहीं, कोई schema नहीं, "
-        "कोई markdown या extra टिप्पणी नहीं। सिर्फ़ देवनागरी में, बोलचाल वाली "
-        "हिंदी में। जवाब की लंबाई बातचीत की असली ज़रूरत के हिसाब से रखो — कोई "
-        "शब्द-सीमा नहीं। विचारों को 'मतलब/देखिए/तो/और' जैसे जोड़ने वाले शब्दों से "
-        "बहते हुए जोड़ो, ताकि लगे कि तुम बोलते-बोलते सोच रही हो। अकेला सूखा "
-        "'जी'/'ठीक है' मत बोलो — हमेशा बात आगे बढ़ाओ। एक असली इंसानी टेलीकॉलर "
-        "की तरह स्वाभाविक रूप से बोलो।",
+        "अभी सिर्फ़ बोला जाने वाला जवाब दो — कोई JSON नहीं, कोई schema नहीं। "
+        "ऊपर दिए SPEECH OUTPUT RULES को सख्ती से follow करो: Devanagari Hindi, "
+        "कोई markdown/bullets/symbols नहीं, punctuation से prosody, numbers spoken-form, "
+        "max 1 filler। जवाब की लंबाई बातचीत की असली ज़रूरत के हिसाब से — कोई शब्द-सीमा नहीं।",
     ]
     # Inject campaign-specific context (product, offer, talking points, etc.) when present.
     if campaign_block:
