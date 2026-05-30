@@ -12,6 +12,7 @@ dependencies = [
     "redis[asyncio]>=5.0.0",
     "structlog>=24.1.0",
     "numpy>=1.26.0",
+    "nats-py>=2.6.0",
     "evs-common",
     "stt-router",
     "llm-router",
