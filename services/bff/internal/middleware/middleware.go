@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"strings"
 
@@ -96,11 +97,12 @@ func TenantContext(cache *tenantcache.Cache) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Resolve from subdomain: {slug}.evs.app
-			host := r.Host
-			parts := strings.SplitN(host, ".", 2)
-			if len(parts) == 2 && parts[1] != "" {
-				slug := parts[0]
+			// Resolve from subdomain: {slug}.{base-domain} (e.g. acme.evs.app).
+			// Only attempt this for true subdomain hosts. Bare hosts, IP
+			// addresses (e.g. 139.59.23.204:3000) and localhost have no tenant
+			// slug — the tenant_id arrives in the JWT or request body instead, so
+			// skip resolution rather than misparse an IP octet as a slug.
+			if slug, ok := subdomainSlug(r.Host); ok {
 				if tid, err := cache.Resolve(ctx, slug); err == nil {
 					ctx = context.WithValue(ctx, keyTenantID, tid)
 				} else {
@@ -112,6 +114,29 @@ func TenantContext(cache *tenantcache.Cache) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// subdomainSlug extracts a tenant slug from a true subdomain host such as
+// "acme.evs.app" -> ("acme", true). It returns ok=false for hosts that carry
+// no tenant subdomain: IP literals (139.59.23.204), localhost, and bare
+// apex/two-label domains (evs.app). The port, if any, is stripped first.
+func subdomainSlug(host string) (string, bool) {
+	if host == "" {
+		return "", false
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	// IP literal (v4/v6) has no subdomain.
+	if net.ParseIP(host) != nil {
+		return "", false
+	}
+	labels := strings.Split(host, ".")
+	// Need at least slug + 2-label base domain (slug.base.tld).
+	if len(labels) < 3 || labels[0] == "" {
+		return "", false
+	}
+	return labels[0], true
 }
 
 // RequireAuth rejects requests that have not been authenticated.
