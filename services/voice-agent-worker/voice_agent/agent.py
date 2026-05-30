@@ -442,6 +442,34 @@ class AgentLoop:
                 frames = [tts_result.audio]
         return frames, streamed
 
+    async def _synth_chunk_frames_iter(self, sentence: str):
+        """Yield PCM16 8k frames for ONE chunk AS THEY ARRIVE from the Sarvam WS.
+
+        Unlike _synth_chunk_frames (which collects the whole chunk before
+        returning), this forwards each streamed frame immediately so the caller
+        can emit first audio at Sarvam-TTFB (~0.5s) without waiting for the
+        chunk's idle-terminator. On streaming disabled/error/zero-audio it yields
+        nothing — the caller falls back to the batch path for this chunk.
+        """
+        if not (_TTS_STREAMING_WS and hasattr(self._tts, "synthesize_stream")):
+            return
+        try:
+            async for pcm_chunk in self._tts.synthesize_stream(
+                sentence, self.ctx.lang, self.ctx.voice_profile_id,
+                getattr(self, "_turn_pace", 1.0),
+                getattr(self, "_turn_temperature", 0.6),
+            ):
+                if self._stop_playback.is_set():
+                    return
+                if pcm_chunk:
+                    yield pcm_chunk
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "TTS streaming (iter) failed (%r) — batch fallback session=%s",
+                exc, self.ctx.session_id,
+            )
+            return
+
     async def _run_synth_ahead_pipeline(
         self,
         tts_queue: "asyncio.Queue[tuple[str, bool]]",
@@ -468,6 +496,7 @@ class AgentLoop:
         audio_buf: asyncio.Queue = asyncio.Queue(maxsize=2)
 
         async def _producer() -> None:
+            _is_first_chunk = True
             while True:
                 sentence, is_done = await tts_queue.get()
                 if is_done and not sentence:
@@ -480,6 +509,37 @@ class AgentLoop:
                     continue
                 # Bump chunk seq so the barge-in loop resets its per-chunk count.
                 self._tts_chunk_seq += 1
+                # FIRST CHUNK ONLY: forward PCM frames to the player AS THEY ARRIVE
+                # from the Sarvam WS (don't wait for the whole chunk + the 0.6s
+                # idle-terminator). The player then sends + fires on_first_audio on
+                # the very first frame → first audio reaches the caller ~Sarvam-TTFB
+                # (~0.5s) instead of after the full first-chunk synth/idle wait.
+                # Subsequent chunks stay batched (one frame-list per audio_buf slot)
+                # to preserve the gapless synth-ahead prefetch.
+                if _is_first_chunk:
+                    _is_first_chunk = False
+                    produced_any = False
+                    try:
+                        async for frame in self._synth_chunk_frames_iter(sentence):
+                            if self._stop_playback.is_set():
+                                break
+                            if frame:
+                                produced_any = True
+                                await audio_buf.put(([frame], False))
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "TTS synth (first-chunk stream) failed sentence=%r session=%s",
+                            sentence[:40], self.ctx.session_id,
+                        )
+                    if not produced_any and not self._stop_playback.is_set():
+                        # Streaming yielded nothing — recover the full chunk via batch.
+                        try:
+                            frames, _ = await self._synth_chunk_frames(sentence)
+                        except Exception:  # noqa: BLE001
+                            frames = []
+                        if frames and not self._stop_playback.is_set():
+                            await audio_buf.put((frames, False))
+                    continue
                 try:
                     frames, _streamed = await self._synth_chunk_frames(sentence)
                 except Exception:  # noqa: BLE001
@@ -503,11 +563,17 @@ class AgentLoop:
                     if self._stop_playback.is_set():
                         return
                     if frame:
+                        # Fire on_first_audio BEFORE sending the very first frame.
+                        # send_audio paces each chunk at real-time (20ms/frame), so
+                        # firing AFTER the whole first frame-list finished playing
+                        # mis-attributed the entire first-chunk playback duration
+                        # (~2-3s) to first-audio latency. The caller actually hears
+                        # audio the moment this first frame is sent.
+                        if not first_done:
+                            first_done = True
+                            if on_first_audio is not None:
+                                await _call(on_first_audio)
                         await _call(send_audio, frame)
-                if not first_done:
-                    first_done = True
-                    if on_first_audio is not None:
-                        await _call(on_first_audio)
 
         producer = asyncio.create_task(_producer())
         try:
