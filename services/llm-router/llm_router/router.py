@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 from typing import AsyncIterator
@@ -22,6 +23,8 @@ except Exception:  # evs_common optional outside repo
     @contextlib.asynccontextmanager
     async def trace_span(*a, **kw):  # type: ignore
         yield {"output": None}
+
+logger = logging.getLogger("llm_router.router")
 
 _TIMEOUT_S = 20.0
 
@@ -243,13 +246,26 @@ class LLMRouter:
     async def _apply_claim_control(self, req: LLMRequest, brain: BrainOutput) -> BrainOutput:
         if self._claim_control is None or not req.project_id:
             return brain
-        result = await self._claim_control.check(
-            tenant_id=req.tenant_id,
-            project_id=req.project_id,
-            session_id=req.session_id,
-            channel="voice",
-            text=brain.reply,
-        )
+        # Claim-control is a post-LLM guardrail enrichment, not a hard dependency.
+        # If the service is unreachable (DNS failure / timeout / 5xx) we MUST NOT
+        # discard a good LLM response — returning the brain unchanged. Previously a
+        # claim-control outage raised here, INSIDE generate()'s backend try-block,
+        # so a healthy LLM turn was mis-treated as a backend failure → the chain
+        # exhausted → FALLBACK_BRAIN. This was the second cause of /v1/llm/generate
+        # falling back (only when project_id was set → claim-control invoked).
+        try:
+            result = await self._claim_control.check(
+                tenant_id=req.tenant_id,
+                project_id=req.project_id,
+                session_id=req.session_id,
+                channel="voice",
+                text=brain.reply,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "claim_control check failed (%r) — returning LLM brain unchanged", exc
+            )
+            return brain
         if result.ok:
             return brain
         reply = result.rewritten or "Let me check that and get back to you."
