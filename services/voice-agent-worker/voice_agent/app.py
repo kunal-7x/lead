@@ -14,6 +14,7 @@ from voice_agent.clients import (
     HttpSTTClient, HttpLLMClient, HttpGuardrailClient, HttpTTSClient, _POOL_LIMITS,
 )
 from voice_agent.demo_runtime import DemoEventPublisher, DemoTurnStore
+from voice_agent.events_nats import NATSEventPublisher, NatsTurnStore
 from voice_agent.models import SessionContext
 from voice_agent.vad import SileroVAD
 from voice_agent.vobiz_media import run_vobiz_bridge
@@ -34,15 +35,25 @@ _llm: HttpLLMClient | None = None
 _guardrail: HttpGuardrailClient | None = None
 _tts_http: httpx.AsyncClient | None = None
 
+# Process-wide NATS publisher (created once when EVENT_PUBLISHER=nats). Shared by
+# every call so all calls reuse a single NATS connection. None in demo mode.
+_nats_publisher: NATSEventPublisher | None = None
+
+# Event backend selection. Default to real NATS in production; set
+# EVENT_PUBLISHER=demo for local JSONL-to-disk runs (no NATS dependency).
+_EVENT_PUBLISHER = os.getenv("EVENT_PUBLISHER", "nats").strip().lower()
+
 
 @app.on_event("startup")
 async def startup() -> None:
-    global _redis, _stt, _llm, _guardrail, _tts_http
+    global _redis, _stt, _llm, _guardrail, _tts_http, _nats_publisher
     _redis = aioredis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"))
     _stt = HttpSTTClient()
     _llm = HttpLLMClient()
     _guardrail = HttpGuardrailClient()
     _tts_http = httpx.AsyncClient(timeout=10.0, limits=_POOL_LIMITS)
+    if _EVENT_PUBLISHER == "nats":
+        _nats_publisher = NATSEventPublisher()
 
 
 @app.on_event("shutdown")
@@ -52,6 +63,8 @@ async def shutdown() -> None:
             await c.aclose()
     if _tts_http is not None:
         await _tts_http.aclose()
+    if _nats_publisher is not None:
+        await _nats_publisher.aclose()
 
 
 def _make_shared_services() -> tuple:
@@ -61,13 +74,19 @@ def _make_shared_services() -> tuple:
     instance that reuses the shared httpx pool but keeps its own per-session
     streaming WS. publisher/store/vad stay per-call as before.
     """
+    if _EVENT_PUBLISHER == "nats" and _nats_publisher is not None:
+        publisher = _nats_publisher
+        store = NatsTurnStore(_nats_publisher)
+    else:
+        publisher = DemoEventPublisher()
+        store = DemoTurnStore()
     return (
         _stt,
         _llm,
         _guardrail,
         HttpTTSClient(shared_http_client=_tts_http),
-        DemoEventPublisher(),
-        DemoTurnStore(),
+        publisher,
+        store,
         SileroVAD(),
     )
 

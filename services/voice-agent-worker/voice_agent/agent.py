@@ -317,6 +317,9 @@ class AgentLoop:
         self._greeting_audio = greeting_audio
         self._dialog_history: list[dict] = []
         self._turn_index = 0
+        # Wall-clock start of the call, set at run() entry. Used to compute
+        # duration_s for the enriched call.completed event (analytics fact_calls).
+        self._call_start_ts: float | None = None
         self._playing_tts = False
         self._stop_playback = asyncio.Event()
         # Incremented each time TTS starts playing a new sentence/chunk.
@@ -699,6 +702,7 @@ class AgentLoop:
     async def run(self, audio_source: AsyncIterator[bytes],
                   send_audio: callable, send_json: callable) -> BrainOutput | None:
         """Main agent loop. Returns final brain output when call ends."""
+        self._call_start_ts = time.time()
         # Pre-synthesize filler phrases only when FILLER_ENABLED=true
         if _FILLER_ENABLED:
             asyncio.create_task(self._warm_fillers())
@@ -2048,12 +2052,46 @@ class AgentLoop:
 
         return brain
 
+    def _build_transcript(self) -> list[dict]:
+        """Flatten dialog history into an ordered transcript for the post-call
+        pipeline. Each entry is {speaker, text} where speaker is caller/agent."""
+        transcript: list[dict] = []
+        for msg in self._dialog_history:
+            role = msg.get("role")
+            speaker = "caller" if role == "user" else "agent"
+            transcript.append({"speaker": speaker, "text": msg.get("content", "")})
+        return transcript
+
     async def _finalize(self, last_brain: BrainOutput | None, send_json: callable) -> None:
         outcome = last_brain.next_action if last_brain else "unknown"
         summary = last_brain.summary if last_brain else "Call ended"
         await self._store.complete_call(self.ctx.session_id, summary, outcome)
         await _call(send_json, {"type": "call_complete", "outcome": outcome})
+        transcript = self._build_transcript()
+        duration_s = (
+            round(time.time() - self._call_start_ts, 3)
+            if self._call_start_ts is not None else 0.0
+        )
+        # Enriched call.completed: carries the full transcript + summary so the
+        # post-call automation pipeline (Phase 2) has everything it needs without
+        # a follow-up fetch. tenant/campaign/lead ids let analytics-sink and the
+        # canonical-event consumers route the fact rows correctly.
+        payload = {
+            "session_id": self.ctx.session_id,
+            "tenant_id": self.ctx.tenant_id,
+            "campaign_id": self.ctx.campaign_id,
+            "lead_id": self.ctx.lead_id,
+            "project_id": self.ctx.project_id,
+            "outcome": outcome,
+            "status": "completed",
+            "summary": summary,
+            "lead_status": last_brain.lead_status if last_brain else "",
+            "lead_score": last_brain.lead_score if last_brain else 0,
+            "duration_s": duration_s,
+            "turn_count": self._turn_index,
+            "transcript": transcript,
+        }
         await self._publisher.publish(
             "call.completed",
-            json.dumps({"session_id": self.ctx.session_id, "outcome": outcome}).encode(),
+            json.dumps(payload).encode(),
         )
