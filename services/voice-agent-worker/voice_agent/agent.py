@@ -19,6 +19,13 @@ from voice_agent.recorder import TurnStore, record_turn
 from voice_agent.vad import VAD, SILENCE_THRESHOLD_MS, CHUNK_MS
 
 _MIN_CONFIDENCE = 0.3
+# Barge-in turns where STT confidence falls below this threshold (and the
+# transcript has ≥2 tokens) are treated as low-confidence: the LLM gets a
+# per-turn suffix asking it to clarify + re-anchor rather than follow garbled
+# input.  Groq-whisper fallback typically reports ~0.80 for garbled barge-ins.
+_LOW_CONF_BARGE_IN_THRESHOLD: float = float(
+    os.getenv("LOW_CONF_BARGE_IN_THRESHOLD", "0.85")
+)
 _END_ACTIONS = {"end_call", "opt_out"}
 
 # Noise-token blocklist: standalone utterances that are almost certainly VAD
@@ -337,6 +344,10 @@ class AgentLoop:
         # blips must never trigger filler. Set to True the first time noise gate
         # accepts a user turn; never reset (filler stays eligible for the whole call).
         self._real_utterance_seen: bool = False
+        # Set True for turns where barge-in STT conf is below _LOW_CONF_BARGE_IN_THRESHOLD
+        # and transcript is multi-token (garbled Groq-whisper fallback scenario).
+        # Reset to False each turn in _process_utterance.
+        self._low_conf_turn: bool = False
         # Per-turn TTS prosody (pace/temperature). Settable per turn (T2 adaptive
         # layer overrides these); kept CONSISTENT across all chunks of a turn.
         # Defaults match Sarvam's natural Hindi telecaller config (1.0 / 0.6).
@@ -1325,6 +1336,33 @@ class AgentLoop:
             return _skip
         # ── /Backchannel suppression ──────────────────────────────────────────
 
+        # ── Low-confidence barge-in flag ──────────────────────────────────────
+        # When the barge-in STT result has low confidence AND is multi-token,
+        # the transcript is likely garbled (e.g. Groq-whisper fallback ~0.80).
+        # Store a per-turn flag so _stream_text_path can inject a [LOW_CONF_TURN]
+        # directive, steering the LLM to clarify + re-anchor rather than
+        # hallucinate on garbled input.  Non-barge-in turns with real STT
+        # confidence are unaffected.
+        _is_low_conf_bargein = (
+            is_barge_in
+            and stt_result.confidence < _LOW_CONF_BARGE_IN_THRESHOLD
+            and len(_text_stripped.split()) >= 2
+        )
+        if _is_low_conf_bargein:
+            _diag(self.ctx.session_id, self._turn_index,
+                  phase="noise_gate", reason="low_conf_bargein_flagged",
+                  conf=f"{stt_result.confidence:.3f}",
+                  text=repr(_text_stripped[:60]))
+            print(
+                f"[voice_agent] low_conf_bargein_flagged"
+                f" conf={stt_result.confidence:.3f}"
+                f" text={_text_stripped!r}"
+                f" session={self.ctx.session_id} turn={self._turn_index}",
+                file=sys.stderr,
+            )
+        self._low_conf_turn: bool = _is_low_conf_bargein
+        # ── /Low-confidence barge-in flag ─────────────────────────────────────
+
         # Ensure filler has been sent before starting the real reply
         try:
             await asyncio.wait_for(filler_task, timeout=0.5)
@@ -1570,6 +1608,21 @@ class AgentLoop:
               pace=_cso_pace,
               directive=repr(_cso_directive[:60] if _cso_directive else ""))
 
+        # ── Low-confidence barge-in directive ────────────────────────────────
+        # Merge a [LOW_CONF_TURN] tag into the system suffix so the PERSONA
+        # guard (OFF-DOMAIN / LOW-CONFIDENCE section) can trigger re-anchor.
+        _low_conf_suffix = (
+            "[LOW_CONF_TURN] caller की बात garbled / unclear है — "
+            "कृपया gently कहो कि सुनाई नहीं दिया और property topic पर re-anchor करो।"
+            " इस garbled text को सच मत मानो।"
+            if getattr(self, "_low_conf_turn", False)
+            else ""
+        )
+        _effective_suffix = "\n\n".join(
+            s for s in [_cso_directive, _low_conf_suffix] if s
+        ) or None
+        # ── /Low-confidence barge-in directive ───────────────────────────────
+
         try:
             # ── Consume plain-text token stream ────────────────────────────────
             first_token_logged = False
@@ -1577,7 +1630,7 @@ class AgentLoop:
             async for token, _ in self._llm.generate_stream_text(
                 self.ctx, stt_result.text, self._dialog_history,
                 collected_slots=_slots_snapshot,
-                system_prompt_suffix=_cso_directive or None,
+                system_prompt_suffix=_effective_suffix,
             ):
                 if not first_token_logged and token:
                     first_token_logged = True
