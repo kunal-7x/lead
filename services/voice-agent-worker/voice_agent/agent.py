@@ -190,6 +190,14 @@ _SILENCE_FULL_MS: int = int(os.getenv("SILENCE_THRESHOLD_MS", str(SILENCE_THRESH
 _ENDPOINT_FINAL_PUNCT = ("।", ".", "?", "!", "؟")
 _ENDPOINT_SHORT_WORDS: int = int(os.getenv("SEMANTIC_ENDPOINT_SHORT_WORDS", "4"))
 
+# ── LLM history window (first-token latency control) ──────────────────────────
+# The FULL dialog history is kept for the post-call transcript, but only the most
+# recent N messages are sent to the LLM per turn — otherwise the prompt (and thus
+# first_token latency) grows linearly with call length. The system prompt + slots
+# already carry the durable context, so a recent window is enough for coherence.
+# 0 = unbounded (old behaviour). Default 12 messages ≈ last 6 turns.
+_LLM_HISTORY_MAX_MSGS: int = int(os.getenv("LLM_HISTORY_MAX_MSGS", "12"))
+
 
 def _partial_is_complete(text: str) -> bool:
     """Heuristic: does this streaming-STT partial look like a finished turn?
@@ -1281,6 +1289,17 @@ class AgentLoop:
         await self._finalize(last_brain, send_json)
         return last_brain
 
+    def _llm_history(self) -> list[dict]:
+        """Recent-window view of the dialog history for LLM prompts.
+
+        Keeps first_token latency flat on long calls by capping how much history
+        is sent (the full history is retained on self._dialog_history for the
+        post-call transcript). Returns the last _LLM_HISTORY_MAX_MSGS messages.
+        """
+        if _LLM_HISTORY_MAX_MSGS <= 0 or len(self._dialog_history) <= _LLM_HISTORY_MAX_MSGS:
+            return self._dialog_history
+        return self._dialog_history[-_LLM_HISTORY_MAX_MSGS:]
+
     async def _process_utterance(
         self,
         audio: bytes,
@@ -1676,7 +1695,7 @@ class AgentLoop:
         # ── Start parallel metadata call (non-blocking) ────────────────────────
         _slots_snapshot = dict(self._accumulated_slots) if self._accumulated_slots else None
         metadata_task: asyncio.Task = asyncio.create_task(
-            self._llm.generate(self.ctx, stt_result.text, self._dialog_history,
+            self._llm.generate(self.ctx, stt_result.text, self._llm_history(),
                                collected_slots=_slots_snapshot)
         )
 
@@ -1774,7 +1793,7 @@ class AgentLoop:
             first_token_logged = False
             _chunk_is_first = True  # breath-rhythm: first chunk uses lower threshold
             async for token, _ in self._llm.generate_stream_text(
-                self.ctx, stt_result.text, self._dialog_history,
+                self.ctx, stt_result.text, self._llm_history(),
                 collected_slots=_slots_snapshot,
                 system_prompt_suffix=_effective_suffix,
             ):
@@ -1962,7 +1981,7 @@ class AgentLoop:
 
         try:
             async for token, final_brain in self._llm.generate_stream(
-                self.ctx, stt_result.text, self._dialog_history
+                self.ctx, stt_result.text, self._llm_history()
             ):
                 if final_brain is not None:
                     # Stream done — run guardrail
@@ -2048,7 +2067,7 @@ class AgentLoop:
         # LLM
         try:
             brain = await self._llm.generate(
-                self.ctx, stt_result.text, self._dialog_history
+                self.ctx, stt_result.text, self._llm_history()
             )
         except Exception:  # noqa: BLE001
             logger.exception(
