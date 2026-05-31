@@ -69,8 +69,9 @@ async def main() -> int:
         ) as ws:
             print("RESULT connected=1 (no 403)")
             await ws.send(json.dumps(CONFIG))
-            await ws.send(json.dumps(
-                {"type": "text", "data": {"text": TEXT, "send_completion_event": True}}))
+            # send_completion_event is a URL query param (see WS_URL). Putting it
+            # in the text frame makes v3 ignore the text → 408 (live-verified).
+            await ws.send(json.dumps({"type": "text", "data": {"text": TEXT}}))
             await ws.send(json.dumps({"type": "flush"}))
             try:
                 async for raw in ws:

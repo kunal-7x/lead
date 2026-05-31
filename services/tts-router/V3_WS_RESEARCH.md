@@ -85,3 +85,18 @@ Switch the streaming WS path to **bulbul:v3 / priya** by:
 
 This makes the WHOLE call v3/priya — greeting (REST v3) and conversation (WS v3)
 both the same good voice, no mid-call drop, and keeps µ-law 8k + synth-ahead.
+
+## LIVE-VERIFIED ON DROPLET .204 (2026-06-01)
+Probed wss://api.sarvam.ai/text-to-speech/ws?model=bulbul:v3 with speaker=priya,
+output_audio_codec=mulaw, speech_sample_rate=8000:
+- **v3/priya streams over WS — CONFIRMED.** 34 µ-law-8k audio frames, ~4.67 s of
+  audio for a 1-sentence Hindi line. **first_chunk_ms = 442** (vs ~2.2 s REST).
+  Frames are MANY small chunks (good for synth-ahead), each with content_type
+  audio/mulaw. End-of-utterance = a `{"type":"event","event_type":"final"}` frame
+  (only when send_completion_event=true is the QUERY param).
+- **GOTCHA (cost us a 408):** if `send_completion_event` is placed INSIDE the
+  `{"type":"text","data":{...}}` frame, v3 IGNORES the text and the socket 408s
+  ("Websocket was left open without any messages for too long") with ZERO audio.
+  FIX: send a PLAIN text frame `{"type":"text","data":{"text":...}}` and pass
+  `send_completion_event=true` ONLY as the URL query param. (engine + probe fixed.)
+- Auth header `api-subscription-key` (lowercase) accepted on the WS.

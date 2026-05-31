@@ -355,8 +355,10 @@ class SarvamBulbulEngine(TTSEngine):
         try:
             async with ws_cm as ws:
                 await ws.send(json.dumps(config))
-                await ws.send(json.dumps({"type": "text", "data": {"text": text,
-                                                                    "send_completion_event": True}}))
+                # send_completion_event is a URL query param (_ws_url); putting it
+                # INSIDE the text frame makes v3 ignore the text → 408 idle-timeout
+                # with zero audio (live-verified 2026-06-01). Text frame is plain.
+                await ws.send(json.dumps({"type": "text", "data": {"text": text}}))
                 await ws.send(json.dumps({"type": "flush"}))
                 # Completion-correct consumption: idle-after-audio = done; zero-audio
                 # close/error = _StreamTruncated → caller REST-recovers the full text.
@@ -545,8 +547,9 @@ class SarvamStreamingSession:
             try:
                 await self._ensure_connected(voice_id, lang, pace, temperature)
                 ws = self._ws
-                await ws.send(json.dumps({"type": "text", "data": {"text": text,
-                                                                    "send_completion_event": True}}))
+                # Plain text frame — send_completion_event is the URL query param,
+                # NOT an in-frame field (in-frame field → v3 408 with no audio).
+                await ws.send(json.dumps({"type": "text", "data": {"text": text}}))
                 await ws.send(json.dumps({"type": "flush"}))
                 # Completion-correct: idle-gap-after-audio = done (Sarvam sends no
                 # completion event); the WS stays OPEN for the next turn's reuse.
