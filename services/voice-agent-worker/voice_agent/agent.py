@@ -171,6 +171,39 @@ _SENTENCE_END = re.compile(r'(?<=[.!?।])\s+')
 # arrives, dropping first-audio from 5-9s → <2.5s.
 _FIRST_CHUNK_EARLY_FLUSH = re.compile(r'(?<=[,،।])\s+')
 
+# ── Semantic / predictive endpointing ─────────────────────────────────────────
+# The fixed SILENCE_THRESHOLD_MS (750ms) is a safe upper bound that tolerates a
+# natural mid-sentence breath. But when the streaming-STT partial already looks
+# like a COMPLETE turn (ends in sentence-final punctuation, OR is a short complete
+# reply), we don't need to wait the full 750ms — a brief confirm pause is enough.
+# So we shorten the end-of-turn wait to SILENCE_SHORT_MS (~300ms) the instant the
+# latest partial is semantically complete, and KEEP 750ms as the fallback for
+# incomplete/ongoing speech. Net perceived win ~350-450ms on completed turns.
+# Tunable; set SEMANTIC_ENDPOINT=false to disable and always use the 750ms wait.
+_SEMANTIC_ENDPOINT: bool = os.getenv("SEMANTIC_ENDPOINT", "true").lower() == "true"
+_SILENCE_SHORT_MS: int = int(os.getenv("SILENCE_SHORT_MS", "300"))
+_SILENCE_FULL_MS: int = int(os.getenv("SILENCE_THRESHOLD_MS", str(SILENCE_THRESHOLD_MS)))
+# A partial counts as "semantically complete" if it ends with sentence-final
+# punctuation, OR it is a short (≤_ENDPOINT_SHORT_WORDS) reply with ≥1 real word
+# (e.g. "हाँ बिल्कुल", "नहीं चाहिए", a phone number readback) — these are whole
+# turns even without trailing punctuation.
+_ENDPOINT_FINAL_PUNCT = ("।", ".", "?", "!", "؟")
+_ENDPOINT_SHORT_WORDS: int = int(os.getenv("SEMANTIC_ENDPOINT_SHORT_WORDS", "4"))
+
+
+def _partial_is_complete(text: str) -> bool:
+    """Heuristic: does this streaming-STT partial look like a finished turn?
+
+    True when it ends in sentence-final punctuation, or is a short complete reply.
+    Used to shorten the end-of-turn silence wait (predictive endpointing).
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t.endswith(_ENDPOINT_FINAL_PUNCT):
+        return True
+    return 0 < len(t.split()) <= _ENDPOINT_SHORT_WORDS
+
 # ── Filler / acknowledgment phrases ──────────────────────────────────────────
 # FILLER_ENABLED=false (default) — fillers are OFF by default.
 # Set FILLER_ENABLED=true AND FILLER_DELAY_MS to the threshold (ms) after which
@@ -726,11 +759,25 @@ class AgentLoop:
                       phase="greeting", status="complete",
                       audio_bytes=len(self._greeting_audio))
 
-        silence_chunks_needed = SILENCE_THRESHOLD_MS // CHUNK_MS
+        # End-of-turn silence: full 750ms is the fallback upper bound; semantic
+        # endpointing (below) shortens it to ~300ms once the live partial looks
+        # like a complete turn.
+        silence_chunks_full = _SILENCE_FULL_MS // CHUNK_MS
+        silence_chunks_short = _SILENCE_SHORT_MS // CHUNK_MS
+        silence_chunks_needed = silence_chunks_full
         speech_started = False
         silence_count = 0
         audio_buffer = bytearray()
         last_brain: BrainOutput | None = None
+
+        # Latest streaming-STT partial transcript for THIS utterance, updated live
+        # by the main-stream partial callback; consumed by semantic endpointing.
+        _latest_partial: str = ""
+
+        def _on_main_partial(text: str) -> None:
+            nonlocal _latest_partial
+            if text:
+                _latest_partial = text
 
         # For streaming STT: we maintain a live queue to push chunks into
         _stt_stream_queue: asyncio.Queue[bytes | None] | None = None
@@ -738,6 +785,8 @@ class AgentLoop:
         _stt_stream_result: list[STTResult] = []  # filled by streaming task
 
         async def _start_stt_stream(partial_cb=None):
+            if partial_cb is None:
+                partial_cb = _on_main_partial
             nonlocal _stt_stream_queue, _stt_stream_task, _stt_stream_result
             # If a stream is already running (eager pre-connect), reuse it.
             # This avoids creating a duplicate WS connection on first speech.
@@ -1157,6 +1206,7 @@ class AgentLoop:
                     # New utterance starting — kick off streaming STT
                     await _start_stt_stream()
                     _speech_chunk_count = 0
+                    _latest_partial = ""  # fresh utterance → reset semantic state
                 speech_started = True
                 silence_count = 0
                 _speech_chunk_count += 1
@@ -1167,7 +1217,20 @@ class AgentLoop:
             elif speech_started:
                 silence_count += 1
                 audio_buffer.extend(chunk)
+                # Predictive endpointing: if the live partial already reads as a
+                # complete turn, end on the SHORT wait (~300ms); else hold the full
+                # 750ms fallback. Re-evaluated every silence frame so a partial that
+                # completes mid-pause still triggers the early end.
+                if _SEMANTIC_ENDPOINT and _partial_is_complete(_latest_partial):
+                    silence_chunks_needed = silence_chunks_short
+                else:
+                    silence_chunks_needed = silence_chunks_full
                 if silence_count >= silence_chunks_needed:
+                    if silence_chunks_needed == silence_chunks_short:
+                        _diag(self.ctx.session_id, self._turn_index,
+                              phase="endpoint", mode="semantic_short",
+                              wait_ms=_SILENCE_SHORT_MS,
+                              partial=repr((_latest_partial or "")[:40]))
                     # Signal end-of-speech to STT stream (flush)
                     if _stt_stream_queue is not None:
                         _stt_stream_queue.put_nowait(None)  # sentinel = flush
@@ -1194,6 +1257,7 @@ class AgentLoop:
                     audio_buffer.clear()
                     speech_started = False
                     silence_count = 0
+                    silence_chunks_needed = silence_chunks_full  # reset for next turn
                     self._vad.reset()
 
                     # Do NOT await here — continue consuming audio so the
@@ -1254,9 +1318,16 @@ class AgentLoop:
         )
 
         # ── STT ──────────────────────────────────────────────────────────────
-        # Try streaming result first; fall back to batch.
+        # Streaming STT is the real path. The slow batch/CPU transcribe() is a
+        # GENUINE-FAILURE fallback ONLY — it must NOT run on a real streamed turn,
+        # because that path adds 1-3s cold-start outliers per turn. So we fall back
+        # to batch ONLY when the stream produced NO result object at all (task
+        # errored/cancelled, or the client has no streaming support). If the stream
+        # completed and returned a result, that result IS ground truth even when its
+        # text is empty (= silence/noise turn → handled downstream as a skip).
         stt_result: STTResult | None = None
         try:
+            _stream_produced_result = False
             if stt_stream_task is not None:
                 # Wait for streaming STT to complete (it already has the audio)
                 try:
@@ -1266,10 +1337,15 @@ class AgentLoop:
 
                 if stt_stream_result:
                     stt_result = stt_stream_result[0]
+                    _stream_produced_result = True
                     logger.debug("Used streaming STT result: %r", stt_result.text)
 
-            if stt_result is None or not stt_result.text:
-                # Fall back to batch STT
+            if stt_result is None and not _stream_produced_result:
+                # GENUINE stream failure (no result at all) → batch recovery.
+                logger.info(
+                    "STT stream produced no result session=%s turn=%s — batch recovery",
+                    self.ctx.session_id, self._turn_index,
+                )
                 stt_result = await self._stt.transcribe(
                     audio, self.ctx.lang, self.ctx.session_id
                 )
