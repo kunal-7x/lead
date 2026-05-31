@@ -168,6 +168,19 @@ func (p *PostgresStore) AppendStatusHistory(ctx context.Context, h *model.LeadSt
 	return p.kv.Put(ctx, "lead_status_history", h.ID, *h)
 }
 
+func (p *PostgresStore) UpdateLeadScore(ctx context.Context, tenantID, leadID string, score int) error {
+	lead, ok, err := pgkv.Get[model.Lead](ctx, p.kv, "leads", leadID)
+	if err != nil {
+		return err
+	}
+	if !ok || lead.TenantID != tenantID {
+		return fmt.Errorf("lead not found: %s", leadID)
+	}
+	lead.Score = score
+	lead.UpdatedAt = time.Now().UTC()
+	return p.kv.Put(ctx, "leads", lead.ID, lead)
+}
+
 func (p *PostgresStore) CheckAndSetIdempotencyKey(ctx context.Context, key string) (bool, error) {
 	inserted, err := p.kv.Insert(ctx, "idempotency_keys", key, map[string]string{"key": key})
 	if err != nil {

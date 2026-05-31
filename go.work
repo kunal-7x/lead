@@ -3,6 +3,7 @@ go 1.25.0
 use (
 	./libs/go
 	./services/analytics-sink
+	./services/call-intel
 	./services/bff
 	./services/billing-meter
 	./services/campaign

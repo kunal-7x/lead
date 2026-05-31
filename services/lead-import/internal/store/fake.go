@@ -138,6 +138,17 @@ func (f *Fake) ListLeads(ctx context.Context, tenantID string, filters LeadFilte
 func (f *Fake) AppendActivity(_ context.Context, _ *model.LeadActivity) error  { return nil }
 func (f *Fake) AppendStatusHistory(_ context.Context, _ *model.LeadStatusHistory) error { return nil }
 
+func (f *Fake) UpdateLeadScore(_ context.Context, tenantID, leadID string, score int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	l, ok := f.leads[leadID]
+	if !ok || l.TenantID != tenantID {
+		return fmt.Errorf("lead not found: %s", leadID)
+	}
+	l.Score = score
+	return nil
+}
+
 func (f *Fake) CheckAndSetIdempotencyKey(_ context.Context, key string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

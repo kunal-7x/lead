@@ -25,6 +25,9 @@ type Store interface {
 	AppendActivity(ctx context.Context, act *model.LeadActivity) error
 	AppendStatusHistory(ctx context.Context, h *model.LeadStatusHistory) error
 
+	// UpdateLeadScore overwrites the lead's score field.
+	UpdateLeadScore(ctx context.Context, tenantID, leadID string, score int) error
+
 	// Idempotency for webhooks
 	CheckAndSetIdempotencyKey(ctx context.Context, key string) (alreadyExists bool, err error)
 }

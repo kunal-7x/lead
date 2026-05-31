@@ -119,3 +119,35 @@ func TestTenantIsolation(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateLeadScore(t *testing.T) {
+	r := newRouter(t)
+
+	// Create a lead first.
+	w := postJSON(t, r, "/v1/leads", "tenant-1", map[string]string{
+		"phone": "+919876543299",
+		"name":  "Score Test",
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create lead: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var created map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &created)
+	leadID := created["lead"].(map[string]any)["id"].(string)
+
+	// PATCH score.
+	b, _ := json.Marshal(map[string]int{"score": 75})
+	req := httptest.NewRequest(http.MethodPatch, "/v1/leads/"+leadID+"/score", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Tenant-ID", "tenant-1")
+	rw := httptest.NewRecorder()
+	r.ServeHTTP(rw, req)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("patch score: expected 200, got %d: %s", rw.Code, rw.Body.String())
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(rw.Body.Bytes(), &resp)
+	if resp["score"].(float64) != 75 {
+		t.Errorf("expected score=75, got %v", resp["score"])
+	}
+}

@@ -19,6 +19,7 @@ func New(svc *service.Service) *Handler {
 
 func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/handoffs", h.handleCreateHandoff)
+	mux.HandleFunc("POST /v1/handoffs/from-call", h.handleCreateHandoffFromCall)
 	mux.HandleFunc("POST /v1/handoffs/", h.handleHandoffAction)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 }
@@ -78,6 +79,35 @@ func (h *Handler) handleHandoffAction(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusNotFound, "unknown handoff action")
 	}
+}
+
+// handleCreateHandoffFromCall accepts an inline snapshot so call-intel can
+// create a handoff in a single HTTP round-trip without a pre-existing snapshot.
+//
+// Body: {tenant_id, lead_id, reason, summary, snapshot: {id, tenant_id, lead_id, ...}}
+func (h *Handler) handleCreateHandoffFromCall(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		model.CreateHandoffRequest
+		Snapshot *model.ScoringSnapshot `json:"snapshot"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if body.Snapshot != nil {
+		// Persist snapshot so CreateHandoff can retrieve it.
+		if err := h.service.Store().SaveScoringSnapshot(r.Context(), *body.Snapshot); err != nil {
+			writeErr(w, http.StatusInternalServerError, "save snapshot: "+err.Error())
+			return
+		}
+		body.CreateHandoffRequest.ScoringSnapshotID = body.Snapshot.ID
+	}
+	handoff, err := h.service.CreateHandoff(r.Context(), body.CreateHandoffRequest)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, handoff)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

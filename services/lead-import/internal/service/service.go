@@ -32,6 +32,7 @@ func (svc *Service) Mount(r chi.Router) {
 	r.Post("/v1/leads", svc.handleIngestApiLead)
 	r.Get("/v1/leads", svc.handleListLeads)
 	r.Get("/v1/leads/{id}", svc.handleGetLead)
+	r.Patch("/v1/leads/{id}/score", svc.handleUpdateLeadScore)
 	r.Post("/v1/webhooks/fb-lead-ads", svc.handleFBWebhook)
 	r.Post("/v1/webhooks/google-lead-forms", svc.handleGoogleWebhook)
 }
@@ -304,6 +305,30 @@ func (svc *Service) handleGetLead(w http.ResponseWriter, r *http.Request) {
 		resp["contact"] = contact
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleUpdateLeadScore accepts PATCH /v1/leads/{id}/score
+// Body: {"score": 75}
+// Header: X-Tenant-ID required
+func (svc *Service) handleUpdateLeadScore(w http.ResponseWriter, r *http.Request) {
+	tenantID := r.Header.Get("X-Tenant-ID")
+	if tenantID == "" {
+		writeErr(w, http.StatusBadRequest, "X-Tenant-ID header required")
+		return
+	}
+	leadID := chi.URLParam(r, "id")
+	var req struct {
+		Score int `json:"score"`
+	}
+	if err := decode(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if err := svc.store.UpdateLeadScore(r.Context(), tenantID, leadID, req.Score); err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"lead_id": leadID, "score": req.Score})
 }
 
 // handleFBWebhook receives Facebook Lead Ads webhook events.
