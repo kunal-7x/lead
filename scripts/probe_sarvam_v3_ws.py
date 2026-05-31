@@ -21,7 +21,9 @@ import time
 
 import websockets
 
-WS_URL = "wss://api.sarvam.ai/text-to-speech/ws"
+# Model is selected by the URL query param (NOT the config frame). Default v3.
+_MODEL = os.getenv("SARVAM_TTS_MODEL", "bulbul:v3")
+WS_URL = f"wss://api.sarvam.ai/text-to-speech/ws?model={_MODEL}&send_completion_event=true"
 KEY = os.getenv("SARVAM_API_KEY", "").strip()
 
 # ~30 Hindi words (the case that truncated mid-word before the fix).
@@ -92,10 +94,14 @@ async def main() -> int:
                                 first_ms = int((time.time() - t0) * 1000)
                             total_ulaw += len(base64.b64decode(b64))
                             n_audio += 1
-                    elif mtype in _COMPLETION:
+                        continue
+                    etype = (msg.get("data") or {}).get("event_type", "") if isinstance(msg.get("data"), dict) else ""
+                    etype = etype or msg.get("event_type", "")
+                    if mtype in _COMPLETION or etype in _COMPLETION:
                         completed = True
                         break
                     elif mtype == "error":
+                        # A v3 speaker on a v2 session errors here — proves model selection.
                         print("RESULT error_frame=%r" % msg)
                         return 2
             except websockets.exceptions.ConnectionClosed as exc:
