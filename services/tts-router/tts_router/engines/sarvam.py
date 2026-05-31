@@ -17,9 +17,13 @@ log = logging.getLogger(__name__)
 
 _API_KEY = os.getenv("SARVAM_API_KEY", "").strip()  # strip \r\n from Windows .env files
 _URL = "https://api.sarvam.ai/text-to-speech"
-# Streaming WS endpoint (bulbul:v3). Correct endpoint: /ws (NOT /stream).
-# model goes into the config JSON frame — NOT as a URL query param.
-_WS_URL = "wss://api.sarvam.ai/text-to-speech/ws"
+# Streaming WS endpoint base. Correct endpoint path: /ws (NOT /stream).
+# CRITICAL (see V3_WS_RESEARCH.md): the WS selects the model from a URL QUERY
+# PARAM `?model=bulbul:v3` — NOT the config-frame `model` field (which is ignored
+# for engine selection). With no query param the WS defaults to bulbul:v2, and a
+# v2 session rejects v3 speakers like "priya". That is exactly why our earlier
+# attempt silently ran v2/anushka on the WS. _ws_url() below appends the query.
+_WS_URL_BASE = "wss://api.sarvam.ai/text-to-speech/ws"
 _TIMEOUT = 10.0
 # bulbul:v3 WS emits µ-law 8kHz DIRECTLY when output_audio_codec=mulaw +
 # speech_sample_rate=8000 — no 24k→8k resample needed. The streaming session
@@ -70,30 +74,48 @@ _VOICES = _VOICES_V3 if _TTS_MODEL_IS_V3 else _VOICES_V2
 _DEFAULT_SPEAKER = _SARVAM_TTS_SPEAKER
 _VALID_SPEAKERS = {v.id for v in _VOICES}
 
-# Frame types that signal a REAL end of synthesis for the current utterance.
-_COMPLETION_TYPES = ("flush_done", "done", "complete", "completion")
+# Frame types / event_types that signal a REAL end of synthesis for the utterance.
+# bulbul:v3 + send_completion_event=true emits event_type=="final"; older docs
+# used flush_done/done. We accept any of them (in `type` OR `event_type`).
+_COMPLETION_TYPES = ("flush_done", "done", "complete", "completion", "final")
 
-# LIVE-VERIFIED Sarvam WS behaviour (probe 2026-05-28, droplet blr1):
-#   * The /text-to-speech/ws endpoint runs bulbul:v2 — the `model` field in the
-#     config is ACCEPTED but IGNORED (a v3 speaker like "priya" errors with
-#     "not compatible with model bulbul:v2"). So the WS path MUST use a v2 speaker.
-#   * output_audio_codec="mulaw" + speech_sample_rate=8000 works and the audio
-#     frames carry content_type="audio/mulaw" → µ-law 8k DIRECTLY (no resample).
-#   * Sarvam delivers the WHOLE utterance in ONE audio frame, then goes IDLE and
-#     NEVER sends a flush_done/done completion event (it eventually 408-closes).
-#     So end-of-utterance is detected by an IDLE GAP after audio, not a frame.
-# WS-path speaker: map any requested voice to a valid v2 speaker (default anushka).
-_WS_DEFAULT_SPEAKER = os.getenv("SARVAM_WS_SPEAKER", "anushka")
-_WS_VALID_SPEAKERS = {v.id for v in _VOICES_V2}
+# Sarvam WS behaviour (V3_WS_RESEARCH.md, 2026-06-01 — bulbul:v3 confirmed on WS):
+#   * The model is selected by the URL QUERY PARAM ?model=bulbul:v3. Sending it
+#     ONLY in the config frame leaves the session on the default bulbul:v2 (which
+#     is why "priya" used to error). _ws_url() appends ?model=&send_completion_event=true.
+#   * output_audio_codec="mulaw" + speech_sample_rate=8000 → µ-law 8k DIRECTLY
+#     (Bulbul v3 is the #1 performer at 8 kHz telephony). No 24k→8k resample.
+#   * With send_completion_event=true the server emits a frame with
+#     event_type/"type" == "final" at end-of-utterance. We honour that AND keep a
+#     post-audio idle-gap as a belt-and-suspenders terminator.
+# WS-path speaker: on v3, use the v3 speaker directly (priya); on v2, map to a
+# valid v2 speaker (anushka). The remap only kicks in for the OTHER model's voices.
+_WS_DEFAULT_SPEAKER_V2 = os.getenv("SARVAM_WS_SPEAKER", "anushka")
 # Idle gap (s) after the last audio frame that we treat as "utterance complete".
-# Sarvam sends all audio up-front in one frame then idles, so a short gap is a
-# reliable terminator. Must be small to keep turn latency low.
+# With v3 + send_completion_event the "final" frame ends the turn; the idle gap is
+# only a fallback, so it can be small to keep turn latency low.
 _STREAM_IDLE_DONE_S = float(os.getenv("SARVAM_WS_IDLE_DONE_S", "0.6"))
 
 
+def _ws_url() -> str:
+    """WS URL with the model as a query param (the only place model is honoured).
+
+    send_completion_event=true so the server emits an explicit end-of-utterance
+    "final" frame (see _consume_stream).
+    """
+    return f"{_WS_URL_BASE}?model={_TTS_MODEL}&send_completion_event=true"
+
+
 def _ws_speaker(voice_id: str) -> str:
-    """Pick a bulbul:v2-compatible speaker for the WS path (v3 voices error)."""
-    return voice_id if voice_id in _WS_VALID_SPEAKERS else _WS_DEFAULT_SPEAKER
+    """Pick a model-compatible speaker for the WS path.
+
+    On v3 the WS serves the v3 voice set (priya etc.) directly — use the requested
+    voice if valid, else the configured default. Only on v2 do we remap to a v2
+    speaker, because a v3 voice on a v2 session errors.
+    """
+    if _TTS_MODEL_IS_V3:
+        return voice_id if voice_id in _VALID_SPEAKERS else _DEFAULT_SPEAKER
+    return voice_id if voice_id in {v.id for v in _VOICES_V2} else _WS_DEFAULT_SPEAKER_V2
 
 
 # Prosody defaults — natural Hindi telecaller pace/temperature. The adaptive
@@ -109,12 +131,13 @@ def _build_stream_config(
     pace: float = _DEFAULT_PACE,
     temperature: float = _DEFAULT_TEMPERATURE,
 ) -> dict:
-    """Sarvam WS config frame (bulbul:v2 — see _WS_VALID_SPEAKERS note above).
+    """Sarvam WS config frame (model selected by ?model= query param, see _ws_url).
 
     output_audio_codec=mulaw + speech_sample_rate=8000 → Sarvam emits µ-law 8k
     DIRECTLY (content_type audio/mulaw), so the worker needs no 24k→8k resample.
-    `model` is included for forward-compat but is ignored by the WS today. pitch/
-    loudness are never sent (rejected by newer models).
+    `model` is also included in the frame for clarity/forward-compat (the query
+    param is what actually selects the engine). pitch/loudness are never sent
+    (rejected by bulbul:v3).
 
     pace/temperature are per-request now (default 1.0 / 0.6). They are baked into
     the config frame at connect, so every chunk in the turn uses the SAME prosody.
@@ -207,14 +230,20 @@ async def _consume_stream(ws, log_prefix: str):
         except (ValueError, TypeError):
             continue
         mtype = msg.get("type", "")
+        # v3 marks completion via event_type=="final" (often on a type=="events"
+        # frame); v2/older used a top-level type. Check both.
+        etype = ""
+        if isinstance(msg.get("data"), dict):
+            etype = msg["data"].get("event_type", "") or ""
+        etype = etype or msg.get("event_type", "")
         if mtype in ("audio", "audio_chunk"):
             data_field = msg.get("data", {})
             audio_b64 = data_field.get("audio") or data_field.get("audio_chunk") or ""
             if audio_b64:
                 produced += 1
                 yield _ulaw_to_pcm16(base64.b64decode(audio_b64))
-        elif mtype in _COMPLETION_TYPES:
-            return  # explicit completion (rare on this WS, but honour it)
+        elif mtype in _COMPLETION_TYPES or etype in _COMPLETION_TYPES:
+            return  # explicit completion (v3 "final" event) — honour it
         elif mtype == "error":
             err_data = msg.get("data") or msg.get("message") or msg
             err_code = (msg.get("data") or {}).get("code") if isinstance(msg.get("data"), dict) else None
@@ -306,11 +335,12 @@ class SarvamBulbulEngine(TTSEngine):
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("websockets package not installed; streaming TTS unavailable") from exc
 
-        # WS path is bulbul:v2 (model field ignored); v3 voices error → map to v2.
+        # Model is selected by the ?model= query param (see _ws_url); on v3 we use
+        # the v3 voice directly (priya), on v2 we map to a v2 speaker.
         speaker = _ws_speaker(voice_id)
 
-        # URL is plain (no query params, no path model) — model goes in config frame.
-        url = _WS_URL
+        # URL carries ?model=<model>&send_completion_event=true (model selection).
+        url = _ws_url()
         headers = {"API-Subscription-Key": self._api_key}
         config = _build_stream_config(speaker, lang)
 
@@ -445,7 +475,7 @@ class SarvamStreamingSession:
         # websockets.connect() returns an async CM; enter it and hold it open so
         # the connection persists across turns (not closed when we exit the CM block).
         cm = websockets.connect(
-            _WS_URL, additional_headers=headers, open_timeout=3, close_timeout=2
+            _ws_url(), additional_headers=headers, open_timeout=3, close_timeout=2
         )
         ws = await cm.__aenter__()
         await ws.send(json.dumps(config))
