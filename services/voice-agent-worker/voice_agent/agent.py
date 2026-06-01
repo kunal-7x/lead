@@ -40,6 +40,45 @@ _NOISE_TOKENS: frozenset[str] = frozenset({
 # Confidence value that batch-Sarvam sets when it has NO real confidence data.
 _DEFAULTED_CONFIDENCE = 0.9
 
+# Carrier / network "this call is being recorded / monitored" disclaimer that some
+# operators play at call-open. STT transcribes it as the caller's first utterance
+# (observed: 'द कॉल इज नाउ बीइंग रिपोर्टेड' = "the call is now being recorded"),
+# making the AI reply to a machine announcement. We detect it by substring on a
+# normalised (lower, no-punct) transcript and SKIP the turn before it reaches the
+# LLM. Matched conservatively (recording/monitoring/disclaimer keywords) so a real
+# human sentence is never dropped. Devanagari spellings cover Sarvam's Hindi-script
+# transliteration of the English announcement.
+_CARRIER_DISCLAIMER_SUBSTRINGS: tuple[str, ...] = (
+    # English (Latin)
+    "this call is being recorded",
+    "this call is now being recorded",
+    "call is being recorded",
+    "call may be recorded",
+    "call is being monitored",
+    "recorded for quality",
+    "recorded for training",
+    "for quality and training",
+    # Sarvam Hindi-script transliterations of the same announcement
+    "कॉल इज बीइंग रिकॉर्डेड",
+    "कॉल इज नाउ बीइंग रिकॉर्डेड",
+    "कॉल इज बीइंग रिपोर्टेड",
+    "कॉल इज नाउ बीइंग रिपोर्टेड",
+    "द कॉल इज",
+    "कॉल रिकॉर्ड",
+    "कॉल मॉनिटर",
+)
+
+
+def _is_carrier_disclaimer(text: str) -> bool:
+    """True if `text` looks like a carrier 'call is being recorded' announcement
+    rather than caller speech. Normalises to lower-case and strips trailing
+    punctuation so 'रिपोर्टेड।' matches 'रिपोर्टेड'."""
+    if not text:
+        return False
+    norm = text.strip().lower().replace("।", " ").replace(".", " ")
+    norm = " ".join(norm.split())
+    return any(sub in norm for sub in _CARRIER_DISCLAIMER_SUBSTRINGS)
+
 # Single-word legitimate Hindi answers that must NOT be dropped even when
 # they appear alone with defaulted confidence.
 _VALID_HINDI_SINGLE_WORDS: frozenset[str] = frozenset({
@@ -740,6 +779,59 @@ class AgentLoop:
                   phase="filler", status="skipped",
                   reason="barge_in", gap_ms=f"{gap_ms:.0f}")
 
+    async def _prewarm_stack(self) -> None:
+        """Warm STT + LLM connections at call connect so turn 1 is hot.
+
+        Cold turn-1 cost (~500ms extra) comes from first-use connection setup and
+        model load on each backend (observed: turn0 llm_first_token ~1.16s vs turn1
+        ~0.62s). We fire cheap, side-effect-free warmups in the background so they
+        overlap the greeting playback and the caller's first answer:
+
+          * TTS  — already warmed by the greeting synth (batch + WS) and, when
+            enabled, _warm_fillers; no extra call needed here.
+          * LLM  — start a tiny plain-text stream, consume ONE token, then bail
+            (closes the stream). This warms the router/model + HTTP pool.
+          * STT  — open the streaming WS and immediately send the end-of-utterance
+            sentinel (empty audio) so the Sarvam streaming session is established
+            before the caller speaks. On any failure we silently skip — warmup must
+            never affect the live call.
+
+        All failures are swallowed: a warmup error must never break the call.
+        """
+        async def _warm_llm() -> None:
+            try:
+                if not hasattr(self._llm, "generate_stream_text"):
+                    return
+                agen = self._llm.generate_stream_text(
+                    self.ctx, "namaste", [],
+                )
+                async for _tok in agen:
+                    break  # one token is enough to warm; stop the stream
+                aclose = getattr(agen, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("LLM prewarm skipped: %r", exc)
+
+        async def _warm_stt() -> None:
+            try:
+                if not hasattr(self._stt, "stream_transcribe"):
+                    return
+                q: asyncio.Queue[bytes | None] = asyncio.Queue()
+                q.put_nowait(None)  # immediate end-of-utterance sentinel (no audio)
+                await asyncio.wait_for(
+                    self._stt.stream_transcribe(
+                        q, self.ctx.lang, f"{self.ctx.session_id}:warm",
+                        self.ctx.tenant_id,
+                    ),
+                    timeout=4.0,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("STT prewarm skipped: %r", exc)
+
+        await asyncio.gather(_warm_llm(), _warm_stt(), return_exceptions=True)
+        _diag(self.ctx.session_id, 0, phase="prewarm", status="complete")
+
     async def run(self, audio_source: AsyncIterator[bytes],
                   send_audio: callable, send_json: callable) -> BrainOutput | None:
         """Main agent loop. Returns final brain output when call ends."""
@@ -747,6 +839,8 @@ class AgentLoop:
         # Pre-synthesize filler phrases only when FILLER_ENABLED=true
         if _FILLER_ENABLED:
             asyncio.create_task(self._warm_fillers())
+        # Pre-warm STT + LLM in the background so turn 1 is hot (overlaps greeting).
+        asyncio.create_task(self._prewarm_stack())
 
         # Play greeting if available.
         # Set _playing_tts=True so that the audio loop below (which starts
@@ -1348,9 +1442,14 @@ class AgentLoop:
         try:
             _stream_produced_result = False
             if stt_stream_task is not None:
-                # Wait for streaming STT to complete (it already has the audio)
+                # Wait for streaming STT to complete (it already has the audio).
+                # Streaming finals land in 250-600ms; cap the wait at 2.5s so a
+                # stalled stream can't add a multi-second tail. On timeout we still
+                # use whatever the stream produced (ground truth) — we only fall to
+                # the slow batch path when the stream returned NO result object at
+                # all (genuine failure), never on a slow/empty streamed final.
                 try:
-                    await asyncio.wait_for(stt_stream_task, timeout=3.0)
+                    await asyncio.wait_for(stt_stream_task, timeout=2.5)
                 except (asyncio.TimeoutError, asyncio.CancelledError, Exception) as exc:
                     logger.debug("Streaming STT wait error: %r", exc)
 
@@ -1414,6 +1513,25 @@ class AgentLoop:
                   reason="empty_transcript", msg="filler_cancelled")
             print(
                 f"[voice_agent] turn_skipped_noise reason=empty"
+                f" session={self.ctx.session_id} turn={self._turn_index}",
+                file=sys.stderr,
+            )
+            filler_task.cancel()
+            return _skip
+        # Carrier "this call is being recorded" announcement → not caller speech.
+        # Skip it before it reaches the LLM so the AI does not reply to a machine
+        # disclaimer. Most likely on turn 0 (call-open) but a tail can land on
+        # turn 1 too, so we filter on any early turn, not turn 0 only.
+        if _is_carrier_disclaimer(_text_stripped):
+            _diag(self.ctx.session_id, self._turn_index,
+                  phase="noise_gate", reason="carrier_disclaimer",
+                  text=repr(_text_stripped[:80]), conf=f"{stt_result.confidence:.3f}")
+            _diag(self.ctx.session_id, self._turn_index,
+                  phase="filler_decision", turn_type="noise",
+                  reason="carrier_disclaimer", msg="filler_cancelled")
+            print(
+                f"[voice_agent] turn_skipped_carrier_disclaimer"
+                f" text={_text_stripped[:80]!r}"
                 f" session={self.ctx.session_id} turn={self._turn_index}",
                 file=sys.stderr,
             )
@@ -1587,7 +1705,12 @@ class AgentLoop:
         _diag(self.ctx.session_id, self._turn_index,
               phase="tts",
               model=os.getenv("SARVAM_TTS_MODEL", "bulbul:v3"),
-              speaker=os.getenv("SARVAM_TTS_SPEAKER", "priya"),
+              # Reflect the ACTUAL speaker used: the tts-router resolves the
+              # worker-sent voice_id (ctx.voice_profile_id) → that voice if it is
+              # a valid v3 speaker, else SARVAM_TTS_SPEAKER. With the worker now
+              # defaulting voice_profile_id to SARVAM_TTS_SPEAKER, this is the
+              # one true speaker for greeting + replies alike.
+              speaker=self.ctx.voice_profile_id or os.getenv("SARVAM_TTS_SPEAKER", "rahul"),
               sentences=_tts_sentences,
               chars=_tts_chars,
               audio_bytes=_tts_bytes)

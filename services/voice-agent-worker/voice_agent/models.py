@@ -1,8 +1,25 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any
 from pydantic import BaseModel
+
+
+def _default_voice_profile_id() -> str:
+    """Default speaker for ALL synthesis (greeting + per-turn replies).
+
+    Both the greeting (vobiz_media.run_vobiz_bridge) and every reply chunk
+    (AgentLoop) send ctx.voice_profile_id to the tts-router as the `voice_id`.
+    To guarantee ONE consistent voice across both paths, default it to the
+    same SARVAM_TTS_SPEAKER env the tts-router uses (rahul = natural male
+    bulbul:v3). Redis may still override per-campaign. Previously this was
+    hardcoded to the v2 female "anushka", which only sounded male by relying
+    on the tts-router's "unknown voice → default speaker" fallback — a fragile
+    coincidence that broke the moment the env/default diverged (the reported
+    female-greeting / male-reply split).
+    """
+    return os.getenv("SARVAM_TTS_SPEAKER", "rahul")
 
 
 @dataclass
@@ -11,7 +28,8 @@ class SessionContext:
     tenant_id: str
     campaign_id: str = ""
     kb_version_id: str = ""
-    voice_profile_id: str = "anushka"  # Sarvam bulbul:v2 natural Hindi female voice
+    # Single source of truth for the spoken voice across greeting + replies.
+    voice_profile_id: str = field(default_factory=_default_voice_profile_id)
     lang: str = "hi-en"
     system_prompt_version: str = "v1"
     lead_id: str = ""
