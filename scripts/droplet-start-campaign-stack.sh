@@ -54,5 +54,20 @@ start_go lead-import ./services/lead-import/cmd/server 8106
 start_go campaign    ./services/campaign/cmd/server    8115
 start_go scheduler   ./services/scheduler/cmd/server   8107
 start_go bff         ./services/bff/cmd/bff             8090
+start_go analytics-sink ./services/analytics-sink/cmd/server 8116
+
+# Dashboard (Next.js — needs pnpm + node)
+echo "starting dashboard :3000"
+fuser -k "3000/tcp" 2>/dev/null || true
+sleep 0.3
+export NEXT_TELEMETRY_DISABLED=1
+export NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-http://localhost:8090}"
+# Build only if no .next dir
+if [ ! -d "$ROOT/apps/dashboard/.next" ]; then
+  echo "building dashboard"
+  (cd "$ROOT/apps/dashboard" && pnpm build)
+fi
+nohup bash -c "cd $ROOT/apps/dashboard && pnpm start" > "$LOGS/dashboard.log" 2>&1 &
+echo $! > "$LOGS/dashboard.pid"
 
 echo "CAMPAIGN_STACK_STARTED"
