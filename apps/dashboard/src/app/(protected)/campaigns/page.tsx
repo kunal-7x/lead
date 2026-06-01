@@ -19,7 +19,24 @@ interface CampaignContext {
   goal: string;
   language: string;
   business_hours: string;
+  // Sarvam bulbul:v3 speaker id. Drives the TTS voice + greeting grammar + LLM
+  // persona gender for the WHOLE conversation (see VOICE_OPTIONS below).
+  voice: string;
 }
+
+// Available agent voices (Sarvam bulbul:v3). The gender label tells the vendor
+// the conversation's gender — picking a voice flips greeting grammar + persona.
+const VOICE_OPTIONS: { id: string; label: string; gender: 'Male' | 'Female' }[] = [
+  { id: 'rahul', label: 'Rahul', gender: 'Male' },
+  { id: 'aditya', label: 'Aditya', gender: 'Male' },
+  { id: 'rohan', label: 'Rohan', gender: 'Male' },
+  { id: 'kabir', label: 'Kabir', gender: 'Male' },
+  { id: 'priya', label: 'Priya', gender: 'Female' },
+  { id: 'neha', label: 'Neha', gender: 'Female' },
+  { id: 'pooja', label: 'Pooja', gender: 'Female' },
+  { id: 'kavya', label: 'Kavya', gender: 'Female' },
+  { id: 'simran', label: 'Simran', gender: 'Female' },
+];
 
 interface CampaignLimits {
   daily_call_cap: number;
@@ -85,6 +102,7 @@ const emptyContext: CampaignContext = {
   goal: '',
   language: 'English',
   business_hours: '',
+  voice: 'rahul',
 };
 
 const emptyLimits: CampaignLimits = {
@@ -376,6 +394,22 @@ export default function CampaignsPage() {
               AI Context fields {extractMutation.isSuccess ? '(prefilled)' : ''}
             </summary>
             <div className="mt-3 grid gap-3">
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium text-foreground">
+                  Voice <span className="text-muted-foreground">(agent voice — sets the conversation gender)</span>
+                </span>
+                <select
+                  className="rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  value={context.voice}
+                  onChange={(e) => setContext((c) => ({ ...c, voice: e.target.value }))}
+                >
+                  {VOICE_OPTIONS.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.label} ({v.gender})
+                    </option>
+                  ))}
+                </select>
+              </label>
               <TextAreaField
                 label="Product description"
                 value={context.product_description}

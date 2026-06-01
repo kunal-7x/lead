@@ -101,6 +101,18 @@ func (f *Fake) UpdateCampaignPinnedVersions(ctx context.Context, id, scriptVersi
 	return nil
 }
 
+func (f *Fake) UpdateCampaignVoice(ctx context.Context, id, voice string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.campaigns[id]
+	if !ok {
+		return fmt.Errorf("campaign %q not found", id)
+	}
+	c.Context.Voice = voice
+	c.UpdatedAt = time.Now()
+	return nil
+}
+
 func (f *Fake) AttachLeads(ctx context.Context, campaignID string, leadIDs []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -32,6 +32,11 @@ type CampaignContext struct {
 	Goal                string              `json:"goal"`
 	Language            string              `json:"language"`
 	BusinessHours       string              `json:"business_hours"`
+	// Voice is the Sarvam bulbul:v3 speaker id chosen by the vendor when creating
+	// the campaign (e.g. "rahul" male, "priya" female). It flows to the voice-agent
+	// as voice_profile_id and drives the TTS speaker, greeting grammar and LLM
+	// persona gender for the WHOLE conversation. Empty -> worker default speaker.
+	Voice               string              `json:"voice,omitempty"`
 }
 
 type Campaign struct {

@@ -56,6 +56,7 @@ func (h *Handler) Router() http.Handler {
 		r.Get("/{id}/health", h.getCampaignHealth)
 		r.Put("/{id}/limits", h.setCampaignLimits)
 		r.Get("/{id}/limits", h.getCampaignLimits)
+		r.Put("/{id}/voice", h.updateCampaignVoice)
 	})
 
 	return r
@@ -231,6 +232,24 @@ func (h *Handler) getCampaignLimits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, limits)
+}
+
+// updateCampaignVoice sets the campaign's chosen TTS speaker id (context.voice),
+// which the dispatcher forwards to the voice-agent as voice_profile_id.
+func (h *Handler) updateCampaignVoice(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var body struct {
+		Voice string `json:"voice"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := h.svc.UpdateVoice(r.Context(), id, body.Voice); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": id, "voice": body.Voice})
 }
 
 type extractRequest struct {

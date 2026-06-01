@@ -327,12 +327,16 @@ async def run_vobiz_bridge(
     # immediately on answer. Uses a warm real-estate telecaller opener in Hindi.
     # Falls back gracefully on TTS failure (no greeting rather than crash).
     greeting_audio: bytes | None = None
-    # Use session greeting if set (e.g. custom per-campaign), else natural Hindi opener.
-    # NOTE: the agent voice is male (rahul, bulbul:v3) — the greeting verb forms must
-    # be MASCULINE ("कर रहा हूँ", not the old feminine "कर रही हूँ") so the words match
-    # the synthesized voice. A female-grammar greeting on a male voice is jarring.
+    # Use session greeting if set (e.g. custom per-campaign), else a natural Hindi
+    # opener whose grammar MATCHES THE CHOSEN VOICE'S GENDER. The campaign picks the
+    # voice (ctx.voice_profile_id = the Sarvam speaker id); we look up its gender and
+    # render the verb form accordingly — male "कर रहा हूँ", female "कर रही हूँ" — so
+    # the words always agree with the synthesized voice. NOTHING is hardcoded.
+    from voice_agent.voice_gender import is_male as _is_male
+    _greet_male = _is_male(ctx.voice_profile_id)
+    _greet_verb = "कर रहा हूँ" if _greet_male else "कर रही हूँ"
     greeting_text = getattr(ctx, "greeting", None) or (
-        "नमस्ते! मैं आपको प्रॉपर्टी के बारे में जानकारी देने के लिए कॉल कर रहा हूँ। "
+        f"नमस्ते! मैं आपको प्रॉपर्टी के बारे में जानकारी देने के लिए कॉल {_greet_verb}। "
         "क्या आप अभी बात कर सकते हैं?"
     )
     try:

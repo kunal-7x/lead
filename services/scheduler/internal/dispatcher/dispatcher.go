@@ -469,10 +469,20 @@ func (d *Dispatcher) placeCall(ctx context.Context, row *DialRow) (placed bool, 
 
 	// Write Redis session context for voice-agent-worker.
 	lang := "en-IN"
+	// voice = the campaign's chosen Sarvam speaker id (context.voice). It becomes
+	// the voice-agent's voice_profile_id, which drives the TTS speaker, the greeting
+	// grammar and the LLM persona gender for the WHOLE conversation. Empty -> the
+	// worker falls back to its default speaker (SARVAM_TTS_SPEAKER).
+	voice := ""
 	if row.CampaignCtx != nil {
 		if v, ok := row.CampaignCtx["language"]; ok {
 			if s, ok := v.(string); ok && s != "" {
 				lang = s
+			}
+		}
+		if v, ok := row.CampaignCtx["voice"]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				voice = s
 			}
 		}
 	}
@@ -485,6 +495,11 @@ func (d *Dispatcher) placeCall(ctx context.Context, row *DialRow) (placed bool, 
 		"lang":                   lang,
 		"system_prompt_version":  "v1",
 		"campaign_context":       row.CampaignCtx,
+	}
+	// Only set voice_profile_id when the campaign actually chose a voice, so an
+	// unset campaign keeps the worker's env default rather than forcing an empty id.
+	if voice != "" {
+		sessionData["voice_profile_id"] = voice
 	}
 	sessionJSON, err := json.Marshal(sessionData)
 	if err != nil {
@@ -525,6 +540,9 @@ type campaignContext struct {
 	Goal                string              `json:"goal"`
 	Language            string              `json:"language"`
 	BusinessHours       string              `json:"business_hours"`
+	// Voice: the campaign's chosen Sarvam speaker id. Flows into CampaignCtx["voice"]
+	// and then to the voice-agent as voice_profile_id (see sessionData build above).
+	Voice               string              `json:"voice,omitempty"`
 }
 
 type campaignLimitsResponse struct {

@@ -84,6 +84,12 @@ class LLMRequest(BaseModel):
     # When present, a formatted block is appended to the system prompt so the LLM
     # is grounded in campaign-specific context every turn.
     campaign_context: dict | None = None
+    # Gender of the telecaller persona, derived from the campaign's chosen voice
+    # ("male" | "female"). Drives the Hindi verb-gender forms in the persona prompt
+    # so the WHOLE conversation agrees with the synthesized voice. Default "female"
+    # keeps backward-compat with the original persona; the worker always sends the
+    # value resolved from ctx.voice_profile_id.
+    persona_gender: str = "female"
 
 
 class LLMResponse(BaseModel):

@@ -222,6 +222,10 @@ class HttpLLMClient:
                        dialog_history: list[dict],
                        collected_slots: dict | None = None,
                        system_prompt_suffix: str | None = None) -> dict:
+        # Persona gender is derived from the campaign's chosen voice (the Sarvam
+        # speaker id in ctx.voice_profile_id) so the LLM's Hindi verb-gender forms
+        # agree with the synthesized voice. NOTHING hardcoded — one map, one source.
+        from voice_agent.voice_gender import gender_for_speaker
         payload: dict = {
             "user_turn": user_turn,
             "lang": ctx.lang,
@@ -230,6 +234,7 @@ class HttpLLMClient:
             "project_id": ctx.project_id,
             "system_prompt_version": ctx.system_prompt_version,
             "dialog_history": dialog_history,
+            "persona_gender": gender_for_speaker(ctx.voice_profile_id),
         }
         if collected_slots:
             payload["collected_slots"] = collected_slots

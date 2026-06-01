@@ -132,6 +132,7 @@ func New(cfg Config, logger *slog.Logger) (http.Handler, error) {
 		r.Get("/v1/campaigns/{id}/health", productProxy.ProxyTo("campaign"))
 		r.Put("/v1/campaigns/{id}/limits", productProxy.ProxyTo("campaign"))
 		r.Get("/v1/campaigns/{id}/limits", productProxy.ProxyTo("campaign"))
+		r.Put("/v1/campaigns/{id}/voice", productProxy.ProxyTo("campaign"))
 			r.Get("/v1/campaigns/{id}/progress", productProxy.ProxyTo("scheduler"))
 
 		// WhatsApp inbox APIs. The WhatsApp adapter is not deployed in every

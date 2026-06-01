@@ -546,12 +546,14 @@ async def _llm_stream_text(backend, req: LLMRequest, kb_context: str) -> AsyncIt
 
     # Build a trimmed system prompt: same persona + KB, but instruct plain-text reply only.
     # Reuse the SHARED persona so the spoken path behaves identically to the batch path.
-    from llm_router.backends.base import PERSONA_PROMPT, _build_slots_block, format_campaign_context
+    # Persona gender comes from the campaign's chosen voice (req.persona_gender), so the
+    # spoken path's Hindi verb-gender forms agree with the synthesized voice.
+    from llm_router.backends.base import build_persona_prompt, _build_slots_block, format_campaign_context
 
     slots_block = _build_slots_block(req.collected_slots)
     campaign_block = format_campaign_context(req.campaign_context or {})
     system_lines = [
-        PERSONA_PROMPT,
+        build_persona_prompt(getattr(req, "persona_gender", None) or "female"),
         slots_block,
         f"KB Context (अगर ज़रूरी हो तो इसी से जानकारी दो):\n{kb_context}",
         "",

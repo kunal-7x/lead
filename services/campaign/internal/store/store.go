@@ -13,6 +13,8 @@ type Store interface {
 	ListCampaigns(ctx context.Context, tenantID string) ([]*model.Campaign, error)
 	UpdateCampaignStatus(ctx context.Context, id, status, pauseReason string) error
 	UpdateCampaignPinnedVersions(ctx context.Context, id, scriptVersionID, promptVersionID string) error
+	// UpdateCampaignVoice sets the campaign's chosen TTS speaker (context.voice).
+	UpdateCampaignVoice(ctx context.Context, id, voice string) error
 
 	// Leads
 	AttachLeads(ctx context.Context, campaignID string, leadIDs []string) error

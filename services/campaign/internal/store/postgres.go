@@ -86,6 +86,16 @@ func (p *PostgresStore) UpdateCampaignPinnedVersions(ctx context.Context, id, sc
 	return p.kv.Put(ctx, "campaigns", id, *c)
 }
 
+func (p *PostgresStore) UpdateCampaignVoice(ctx context.Context, id, voice string) error {
+	c, err := p.GetCampaign(ctx, id)
+	if err != nil {
+		return err
+	}
+	c.Context.Voice = voice
+	c.UpdatedAt = time.Now().UTC()
+	return p.kv.Put(ctx, "campaigns", id, *c)
+}
+
 func (p *PostgresStore) AttachLeads(ctx context.Context, campaignID string, leadIDs []string) error {
 	now := time.Now().UTC()
 	for _, leadID := range leadIDs {

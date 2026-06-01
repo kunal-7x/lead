@@ -47,6 +47,15 @@ func (s *Service) AttachLeads(ctx context.Context, campaignID string, leadIDs []
 	return s.store.AttachLeads(ctx, campaignID, leadIDs)
 }
 
+// UpdateVoice sets the campaign's chosen TTS speaker (context.voice). Empty voice
+// clears it (worker falls back to its default speaker).
+func (s *Service) UpdateVoice(ctx context.Context, campaignID, voice string) error {
+	if campaignID == "" {
+		return fmt.Errorf("campaign id is required")
+	}
+	return s.store.UpdateCampaignVoice(ctx, campaignID, voice)
+}
+
 // ListLeads returns all leads attached to the given campaign.
 func (s *Service) ListLeads(ctx context.Context, campaignID string) ([]*model.CampaignLead, error) {
 	return s.store.ListCampaignLeads(ctx, campaignID)
