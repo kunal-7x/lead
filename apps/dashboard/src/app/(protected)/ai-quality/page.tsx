@@ -1,18 +1,53 @@
-import type { Metadata } from 'next';
+'use client';
+
+import { useQuery } from '@tanstack/react-query';
 import {
   AlertTriangle,
+  BarChart2,
   CheckCircle2,
-  FileJson,
   GitCompare,
+  Loader2,
   MessageSquareText,
-  Save,
 } from 'lucide-react';
-import { promptRuns, qualityQueue } from '@/lib/ai-quality-data';
+import { api } from '@/lib/api';
 
-export const metadata: Metadata = { title: 'AI Quality - Capsy Dashboard' };
+const DEMO_TENANT_ID = 'tenant-demo';
+
+type ReportRow = { dimension: string; count: number; value: number };
+type ReportResponse = {
+  tenant_id: string;
+  report: string;
+  freshness_s: number;
+  rows: ReportRow[];
+};
+
+async function fetchQualityReport(): Promise<ReportResponse> {
+  const { data } = await api.get(
+    `/v1/reports/ai-quality?tenant_id=${DEMO_TENANT_ID}`,
+  );
+  return data;
+}
+
+function severityClass(value: number) {
+  if (value < 0.4) return 'rounded-full bg-red-50 px-2 py-0.5 text-[11px] text-red-700';
+  if (value < 0.7) return 'rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-amber-700';
+  return 'rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] text-emerald-700';
+}
+
+function severityLabel(value: number) {
+  if (value < 0.4) return 'high';
+  if (value < 0.7) return 'medium';
+  return 'low';
+}
 
 export default function AIQualityPage() {
-  const selected = qualityQueue[0]!;
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['report', 'ai-quality'],
+    queryFn: fetchQualityReport,
+  });
+
+  const rows = data?.rows ?? [];
+  const freshness = data?.freshness_s;
 
   return (
     <div className="space-y-6">
@@ -23,170 +58,135 @@ export default function AIQualityPage() {
             Review low-confidence AI turns, hallucination incidents, and prompt regression gates.
           </p>
         </div>
-        <button className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground">
-          <Save className="h-4 w-4" />
-          Accept correction
-        </button>
+        {freshness != null && (
+          <span className="text-xs text-muted-foreground">
+            Data freshness: {freshness}s ago
+          </span>
+        )}
       </div>
 
       <section className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
         <div className="rounded-lg border bg-card">
           <div className="flex items-center justify-between border-b px-4 py-3">
-            <h2 className="text-sm font-semibold">Human Review Queue</h2>
+            <h2 className="text-sm font-semibold">Quality by Session</h2>
             <span className="rounded-md border px-2 py-1 text-xs text-muted-foreground">
-              {qualityQueue.length} open
+              {rows.length} sessions
             </span>
           </div>
-          <div className="divide-y">
-            {qualityQueue.map((item) => (
-              <button
-                key={item.id}
-                className="grid w-full gap-1 px-4 py-3 text-left text-sm hover:bg-muted/40"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <span className="font-medium">{item.id}</span>
-                  <span className="rounded-md border px-2 py-1 text-xs">{item.severity}</span>
+
+          {isLoading && (
+            <div className="flex items-center justify-center py-12 text-muted-foreground">
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              Loading quality data…
+            </div>
+          )}
+
+          {isError && (
+            <div className="flex items-center justify-center py-12 text-sm text-destructive">
+              <AlertTriangle className="mr-2 h-4 w-4" />
+              Failed to load quality data.
+            </div>
+          )}
+
+          {!isLoading && !isError && rows.length === 0 && (
+            <div className="py-12 text-center text-sm text-muted-foreground">
+              No quality events recorded yet.
+              <p className="mt-1 text-xs">Quality facts are written after each call completes.</p>
+            </div>
+          )}
+
+          {!isLoading && !isError && rows.length > 0 && (
+            <div className="divide-y">
+              {rows.map((row) => (
+                <div
+                  key={row.dimension}
+                  className="grid w-full gap-1 px-4 py-3 text-left text-sm"
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="truncate font-medium font-mono text-xs">{row.dimension}</span>
+                    <span className={severityClass(row.value)}>
+                      {severityLabel(row.value)}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-primary transition-all"
+                        style={{ width: `${Math.round(row.value * 100)}%` }}
+                      />
+                    </div>
+                    <span className="text-xs text-muted-foreground tabular-nums">
+                      {(row.value * 100).toFixed(0)}% — {row.count} turns
+                    </span>
+                  </div>
                 </div>
-                <span className="text-muted-foreground">
-                  {item.tenant} - {item.reason}
-                </span>
-                <span className="text-xs text-muted-foreground">
-                  {item.session} - confidence {item.confidence}
-                </span>
-              </button>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="space-y-4">
           <section className="rounded-lg border bg-card p-4">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <h2 className="inline-flex items-center gap-2 text-sm font-semibold">
-                <MessageSquareText className="h-4 w-4" />
-                Reviewer Evidence
-              </h2>
-              <span className="text-xs text-muted-foreground">
-                {selected.promptVersion} - {selected.modelVersion}
-              </span>
+            <div className="mb-3 flex items-center gap-2">
+              <BarChart2 className="h-4 w-4" />
+              <h2 className="text-sm font-semibold">Aggregate Scores</h2>
             </div>
-            <div className="grid gap-4 lg:grid-cols-2">
-              <EvidenceList title="Transcript" rows={selected.transcript} />
-              <EvidenceList title="KB chunks shown to LLM" rows={selected.kbChunks} />
-            </div>
-          </section>
-
-          <section className="grid gap-4 lg:grid-cols-2">
-            <div className="rounded-lg border bg-card p-4">
-              <h2 className="mb-3 inline-flex items-center gap-2 text-sm font-semibold">
-                <FileJson className="h-4 w-4" />
-                Brain JSON
-              </h2>
-              <pre className="overflow-x-auto rounded-md bg-muted p-3 text-xs">
-                {JSON.stringify(selected.brainJson, null, 2)}
-              </pre>
-            </div>
-            <div className="rounded-lg border bg-card p-4">
-              <h2 className="mb-3 inline-flex items-center gap-2 text-sm font-semibold">
-                <AlertTriangle className="h-4 w-4" />
-                Hallucination Drill-in
-              </h2>
-              <dl className="space-y-2 text-sm">
-                {selected.blameChain.map((row) => (
-                  <div key={row.label} className="flex justify-between gap-4">
-                    <dt className="text-muted-foreground">{row.label}</dt>
-                    <dd className="font-medium">{row.value}</dd>
+            {isLoading && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+              </div>
+            )}
+            {!isLoading && rows.length > 0 && (() => {
+              const avg = rows.reduce((s, r) => s + r.value, 0) / rows.length;
+              const totalTurns = rows.reduce((s, r) => s + r.count, 0);
+              const lowConf = rows.filter((r) => r.value < 0.4).length;
+              return (
+                <dl className="grid grid-cols-3 gap-4">
+                  <div className="rounded-md border p-3 text-center">
+                    <dt className="text-xs text-muted-foreground">Avg score</dt>
+                    <dd className="mt-1 text-2xl font-semibold">{(avg * 100).toFixed(0)}%</dd>
                   </div>
-                ))}
-              </dl>
-            </div>
+                  <div className="rounded-md border p-3 text-center">
+                    <dt className="text-xs text-muted-foreground">Total turns</dt>
+                    <dd className="mt-1 text-2xl font-semibold">{totalTurns}</dd>
+                  </div>
+                  <div className="rounded-md border p-3 text-center">
+                    <dt className="text-xs text-muted-foreground">High risk</dt>
+                    <dd className="mt-1 text-2xl font-semibold text-destructive">{lowConf}</dd>
+                  </div>
+                </dl>
+              );
+            })()}
+            {!isLoading && rows.length === 0 && (
+              <p className="text-sm text-muted-foreground">No data yet.</p>
+            )}
           </section>
 
           <section className="rounded-lg border bg-card p-4">
-            <h2 className="mb-3 text-sm font-semibold">Reviewer Correction</h2>
-            <div className="grid gap-3 lg:grid-cols-3">
-              <select
-                className="h-10 rounded-md border bg-background px-3 text-sm"
-                defaultValue="handover"
-                aria-label="Correct next action"
-              >
-                <option value="handover">handover</option>
-                <option value="book_site_visit">book_site_visit</option>
-                <option value="callback">callback</option>
-              </select>
-              <select
-                className="h-10 rounded-md border bg-background px-3 text-sm"
-                defaultValue="risky"
-                aria-label="Correct risk level"
-              >
-                <option value="safe">safe</option>
-                <option value="risky">risky</option>
-                <option value="unsafe">unsafe</option>
-              </select>
-              <input
-                className="h-10 rounded-md border px-3 text-sm"
-                defaultValue="Possession timeline must be verified by sales"
-                aria-label="Correct summary"
-              />
+            <h2 className="mb-3 inline-flex items-center gap-2 text-sm font-semibold">
+              <MessageSquareText className="h-4 w-4" />
+              About Quality Scoring
+            </h2>
+            <p className="text-sm text-muted-foreground">
+              Quality scores are written to ClickHouse after each call via the{' '}
+              <code className="rounded bg-muted px-1 py-0.5 text-xs">call.completed</code> event.
+              Each session dimension is the Vobiz session ID. Score is the average confidence
+              across all turns (0–1). Low-confidence sessions (below 40%) are flagged for review.
+            </p>
+          </section>
+
+          <section className="rounded-lg border bg-card p-4">
+            <h2 className="mb-3 inline-flex items-center gap-2 text-sm font-semibold">
+              <GitCompare className="h-4 w-4" />
+              Prompt Promotion Gate
+            </h2>
+            <div className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm text-muted-foreground">
+              <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+              Active after eval-harness green suite run.
             </div>
           </section>
         </div>
       </section>
-
-      <section className="rounded-lg border bg-card p-4">
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="inline-flex items-center gap-2 text-sm font-semibold">
-            <GitCompare className="h-4 w-4" />
-            Prompt Promotion Gate
-          </h2>
-          <span className="text-xs text-muted-foreground">active only after green suite run</span>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px] text-left text-sm" aria-label="Prompt test runs">
-            <thead className="border-b text-xs uppercase text-muted-foreground">
-              <tr>
-                <th className="py-2 pr-3 font-medium">Run</th>
-                <th className="py-2 pr-3 font-medium">Prompt</th>
-                <th className="py-2 pr-3 font-medium">Model</th>
-                <th className="py-2 pr-3 font-medium">Aggregate</th>
-                <th className="py-2 pr-3 font-medium">High severity</th>
-                <th className="py-2 font-medium">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {promptRuns.map((run) => (
-                <tr key={run.id} className="border-b last:border-b-0">
-                  <td className="py-3 pr-3 font-medium">{run.id}</td>
-                  <td className="py-3 pr-3">{run.prompt}</td>
-                  <td className="py-3 pr-3">{run.model}</td>
-                  <td className="py-3 pr-3">{run.aggregate}</td>
-                  <td className="py-3 pr-3">{run.highSeverity}</td>
-                  <td className="py-3">
-                    <span className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs">
-                      <CheckCircle2 className="h-3 w-3" />
-                      {run.status}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function EvidenceList({ title, rows }: { title: string; rows: string[] }) {
-  return (
-    <div className="rounded-md border p-3">
-      <h3 className="mb-2 text-xs font-semibold uppercase text-muted-foreground">{title}</h3>
-      <div className="space-y-2">
-        {rows.map((row) => (
-          <div key={row} className="rounded-md bg-muted px-3 py-2 text-sm">
-            {row}
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
