@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,9 +26,9 @@ func main() {
 		AnalyticsURL:  envOr("ANALYTICS_URL", "http://localhost:8116"),
 		RedisAddr:     envOr("REDIS_ADDR", "localhost:6379"),
 		JWTSecret:     envOr("JWT_SECRET", "dev-secret"),
-		AllowedOrigins: []string{
+		AllowedOrigins: allowedOrigins(
 			envOr("ALLOWED_ORIGIN", "http://localhost:3000"),
-		},
+		),
 	}
 
 	srv, err := server.New(cfg, logger)
@@ -69,4 +70,17 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// allowedOrigins splits a comma-separated ALLOWED_ORIGIN env value into a slice,
+// trimming whitespace from each entry.
+func allowedOrigins(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

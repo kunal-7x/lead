@@ -26,7 +26,7 @@ export LEAD_IMPORT_URL=http://localhost:8106
 export SCHEDULER_URL=http://localhost:8107
 export CAMPAIGN_URL=http://localhost:8115
 export REDIS_ADDR=localhost:6379
-export ALLOWED_ORIGIN=${ALLOWED_ORIGIN:-http://139.59.23.204:3000}
+export ALLOWED_ORIGIN=${ALLOWED_ORIGIN:-http://139.59.89.18:3000,https://voice.famit.in,https://chat.famit.in}
 # scheduler dispatcher wiring
 export TELEPHONY_URL=http://localhost:8108
 export LEAD_IMPORT_URL=http://localhost:8106
@@ -55,6 +55,15 @@ start_go campaign    ./services/campaign/cmd/server    8115
 start_go scheduler   ./services/scheduler/cmd/server   8107
 start_go bff         ./services/bff/cmd/bff             8090
 start_go analytics-sink ./services/analytics-sink/cmd/server 8116
+
+# call-intel: post-call orchestrator (transcript→scoring→score-writeback→KB ingest + NATS consumers)
+export CALL_INTEL_ADDR=:8119
+export SCORING_URL=${SCORING_URL:-}
+export KNOWLEDGE_URL=${KNOWLEDGE_URL:-}
+export SITE_VISIT_URL=${SITE_VISIT_URL:-}
+export HANDOFF_URL=${HANDOFF_URL:-}
+# LEAD_IMPORT_URL and SCHEDULER_URL already exported above
+start_go call-intel ./services/call-intel/cmd/server 8119
 
 # Dashboard (Next.js — needs pnpm + node)
 echo "starting dashboard :3000"
