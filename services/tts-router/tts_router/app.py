@@ -324,6 +324,7 @@ async def tts_sarvam_stream_ws(websocket: WebSocket) -> None:
                 first_chunk_ms = -1
                 total_chunks = 0
                 engine_label = "sarvam_stream"
+                client_gone = False
                 try:
                     # Engine yields PCM16 8k DIRECTLY (Sarvam µ-law 8k decoded in-engine);
                     # NO resample needed — send straight to the worker.
@@ -335,37 +336,74 @@ async def tts_sarvam_stream_ws(websocket: WebSocket) -> None:
                         if first_chunk_ms < 0:
                             first_chunk_ms = int((time.time() - t0) * 1000)
                         total_chunks += 1
-                        await websocket.send_bytes(pcm_chunk)
+                        try:
+                            await websocket.send_bytes(pcm_chunk)
+                        except (WebSocketDisconnect, RuntimeError):
+                            # Client disconnected mid-stream (barge-in). Stop streaming;
+                            # do NOT fall back to REST on a closed socket.
+                            client_gone = True
+                            break
                 except _StreamTruncated as trunc:
                     # THE FIX: the WS cut the sentence short. Recover the FULL sentence
                     # via REST so the caller never loses the tail (mid-word cutoff bug).
-                    log.warning(
-                        "tts_sarvam_stream_ws TRUNCATED (chunks=%s) — REST recovery: %s",
-                        getattr(trunc, "chunks_produced", "?"), trunc,
-                    )
-                    pcm = await engine.synthesize(text, voice_id, lang, pace, temperature)
-                    if pcm:
-                        await websocket.send_bytes(pcm)
-                        if first_chunk_ms < 0:
-                            first_chunk_ms = int((time.time() - t0) * 1000)
-                        total_chunks += 1
+                    if not client_gone:
+                        log.warning(
+                            "tts_sarvam_stream_ws TRUNCATED (chunks=%s) — REST recovery: %s",
+                            getattr(trunc, "chunks_produced", "?"), trunc,
+                        )
+                        try:
+                            pcm = await engine.synthesize(text, voice_id, lang, pace, temperature)
+                            if pcm:
+                                await websocket.send_bytes(pcm)
+                                if first_chunk_ms < 0:
+                                    first_chunk_ms = int((time.time() - t0) * 1000)
+                                total_chunks += 1
+                        except (WebSocketDisconnect, RuntimeError):
+                            client_gone = True
                     engine_label = "sarvam_stream_rest_recovered"
+                except (WebSocketDisconnect, RuntimeError) as disc_exc:
+                    # Client closed the WS during synthesis (barge-in).
+                    # Distinguish "send on closed socket" from real synthesis errors.
+                    msg_lc = str(disc_exc).lower()
+                    if isinstance(disc_exc, WebSocketDisconnect) or "close message" in msg_lc or "close frame" in msg_lc:
+                        client_gone = True
+                        log.debug("tts_sarvam_stream_ws client disconnected during stream (barge-in)")
+                    else:
+                        log.warning("tts_sarvam_stream_ws session failed, falling back to REST: %s", disc_exc)
+                        try:
+                            pcm = await engine.synthesize(text, voice_id, lang, pace, temperature)
+                            if pcm:
+                                await websocket.send_bytes(pcm)
+                                first_chunk_ms = int((time.time() - t0) * 1000)
+                                total_chunks = 1
+                        except (WebSocketDisconnect, RuntimeError):
+                            client_gone = True
+                        engine_label = "sarvam_rest_fallback"
                 except Exception as synth_exc:
-                    # Session synthesis failed (both attempts exhausted) — fall back to
-                    # per-call batch REST synthesize so the caller still hears audio.
+                    # Upstream Sarvam WS synthesis failed (both attempts exhausted) — fall
+                    # back to per-call batch REST synthesize so the caller still hears audio.
                     log.warning("tts_sarvam_stream_ws session failed, falling back to REST: %s", synth_exc)
-                    pcm = await engine.synthesize(text, voice_id, lang, pace, temperature)
-                    if pcm:
-                        await websocket.send_bytes(pcm)
-                        first_chunk_ms = int((time.time() - t0) * 1000)
-                        total_chunks = 1
+                    if not client_gone:
+                        try:
+                            pcm = await engine.synthesize(text, voice_id, lang, pace, temperature)
+                            if pcm:
+                                await websocket.send_bytes(pcm)
+                                first_chunk_ms = int((time.time() - t0) * 1000)
+                                total_chunks = 1
+                        except (WebSocketDisconnect, RuntimeError):
+                            client_gone = True
                     engine_label = "sarvam_rest_fallback"
-                log.info("[diag] phase=tts_stream first_chunk_ms=%d total_chunks=%d engine=%s",
-                         first_chunk_ms, total_chunks, engine_label)
-                await websocket.send_text(
-                    json.dumps({"type": "done", "first_chunk_ms": first_chunk_ms,
-                                "total_chunks": total_chunks, "engine": engine_label})
-                )
+                log.info("[diag] phase=tts_stream first_chunk_ms=%d total_chunks=%d engine=%s client_gone=%s",
+                         first_chunk_ms, total_chunks, engine_label, client_gone)
+                if not client_gone:
+                    try:
+                        await websocket.send_text(
+                            json.dumps({"type": "done", "first_chunk_ms": first_chunk_ms,
+                                        "total_chunks": total_chunks, "engine": engine_label})
+                        )
+                    except (WebSocketDisconnect, RuntimeError):
+                        # Client disconnected after last chunk — not an error.
+                        pass
     except WebSocketDisconnect:
         pass
     except Exception as exc:

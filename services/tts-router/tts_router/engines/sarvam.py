@@ -464,8 +464,26 @@ class SarvamStreamingSession:
             self._ws_cm = None
         self._ws = None
 
+    @staticmethod
+    def _ws_is_open(ws) -> bool:
+        """True only if the websockets connection is in OPEN state (safe to send/recv)."""
+        if ws is None:
+            return False
+        state = getattr(ws, "state", None)
+        if state is not None:
+            try:
+                from websockets.connection import State  # type: ignore
+                return state is State.OPEN
+            except Exception:
+                return str(state).endswith("OPEN")
+        return getattr(ws, "close_code", None) is None
+
     async def _connect(self, voice_id: str, lang: str) -> None:
-        """Open a new Sarvam WS (via async CM), send config, start keepalive ping loop."""
+        """Open a new Sarvam WS (via async CM), send config, start keepalive ping loop.
+
+        open_timeout=8s gives enough room for cross-region TLS handshake spikes that
+        caused transient TimeoutError failures in production at open_timeout=3s.
+        """
         try:
             import websockets  # type: ignore
         except ImportError as exc:
@@ -477,9 +495,11 @@ class SarvamStreamingSession:
         # websockets.connect() returns an async CM; enter it and hold it open so
         # the connection persists across turns (not closed when we exit the CM block).
         cm = websockets.connect(
-            _ws_url(), additional_headers=headers, open_timeout=3, close_timeout=2
+            _ws_url(), additional_headers=headers, open_timeout=8, close_timeout=2
         )
         ws = await cm.__aenter__()
+        # Send config immediately after open; if the WS closed before we could
+        # (e.g. auth rejection), this raises and _connect fails cleanly.
         await ws.send(json.dumps(config))
         self._ws_cm = cm
         self._ws = ws
@@ -521,9 +541,13 @@ class SarvamStreamingSession:
 
         pace/temperature are part of the connect-time config, so a change forces a
         reconnect — guaranteeing every chunk of a turn uses the SAME prosody.
+
+        Also reconnects when the WS is non-None but no longer OPEN (e.g. Sarvam
+        closed it and the keepalive loop hasn't cleared _ws yet).
         """
+        ws_ok = self._ws_is_open(self._ws)
         if (
-            self._ws is None
+            not ws_ok
             or self._lang != lang
             or self._voice_id != voice_id
             or self._pace != pace
