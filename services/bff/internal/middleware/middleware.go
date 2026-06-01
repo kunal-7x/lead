@@ -116,10 +116,25 @@ func TenantContext(cache *tenantcache.Cache) func(http.Handler) http.Handler {
 	}
 }
 
-// subdomainSlug extracts a tenant slug from a true subdomain host such as
+// reservedHostLabels are first-labels that are NEVER tenant slugs. These are
+// the platform's own application hosts (app.famit.in, voice.*, chat.*, www.*).
+// Requests on these hosts carry the tenant in the JWT claims or the login
+// payload's workspace_id, not in the subdomain — so we must not misparse "app"
+// (etc.) as a tenant slug and 404 the primary dashboard host.
+var reservedHostLabels = map[string]bool{
+	"app":   true,
+	"voice": true,
+	"chat":  true,
+	"www":   true,
+	"api":   true,
+}
+
+// subdomainSlug extracts a tenant slug from a true tenant subdomain such as
 // "acme.evs.app" -> ("acme", true). It returns ok=false for hosts that carry
-// no tenant subdomain: IP literals (139.59.23.204), localhost, and bare
-// apex/two-label domains (evs.app). The port, if any, is stripped first.
+// no tenant subdomain: IP literals (139.59.23.204), localhost, bare apex/
+// two-label domains (evs.app), and the platform's reserved application hosts
+// (app.famit.in, voice.*, chat.*, www.*, api.*). On those, the tenant arrives
+// in the JWT or login workspace_id instead. The port, if any, is stripped first.
 func subdomainSlug(host string) (string, bool) {
 	if host == "" {
 		return "", false
@@ -134,6 +149,10 @@ func subdomainSlug(host string) (string, bool) {
 	labels := strings.Split(host, ".")
 	// Need at least slug + 2-label base domain (slug.base.tld).
 	if len(labels) < 3 || labels[0] == "" {
+		return "", false
+	}
+	// Reserved platform hosts (app.famit.in etc.) are not tenant subdomains.
+	if reservedHostLabels[strings.ToLower(labels[0])] {
 		return "", false
 	}
 	return labels[0], true
