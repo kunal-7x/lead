@@ -12,6 +12,8 @@ mkdir -p "$LOGS" "$BIN"
 
 # Load base env, then overlay (DATABASE_URL=evs, NATS, REDIS, etc).
 . /root/lead/droplet-loadenv.sh
+export JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set in deploy-env.sh}
+export JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:-$JWT_SECRET}
 
 # ---- campaign-stack port + wiring overrides (do NOT collide with voice mesh) ----
 export PORT=8101                                   # tenant-auth reads PORT
@@ -26,7 +28,7 @@ export LEAD_IMPORT_URL=http://localhost:8106
 export SCHEDULER_URL=http://localhost:8107
 export CAMPAIGN_URL=http://localhost:8115
 export REDIS_ADDR=localhost:6379
-export ALLOWED_ORIGIN=${ALLOWED_ORIGIN:-http://139.59.89.18:3000,https://voice.famit.in,https://chat.famit.in}
+export ALLOWED_ORIGIN=${ALLOWED_ORIGIN:-http://139.59.89.18:3000,https://app.famit.in,https://voice.famit.in,https://chat.famit.in}
 # scheduler dispatcher wiring
 export TELEPHONY_URL=http://localhost:8108
 export LEAD_IMPORT_URL=http://localhost:8106
@@ -71,10 +73,11 @@ fuser -k "3000/tcp" 2>/dev/null || true
 sleep 0.3
 export NEXT_TELEMETRY_DISABLED=1
 export NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-http://localhost:8090}"
+export NEXT_PUBLIC_BFF_URL="${NEXT_PUBLIC_BFF_URL:-http://localhost:8090}"
 # Build only if no .next dir
 if [ ! -d "$ROOT/apps/dashboard/.next" ]; then
   echo "building dashboard"
-  (cd "$ROOT/apps/dashboard" && pnpm build)
+  (cd "$ROOT/apps/dashboard" && NEXT_PUBLIC_BFF_URL="$NEXT_PUBLIC_BFF_URL" NEXT_PUBLIC_API_URL="$NEXT_PUBLIC_API_URL" pnpm build)
 fi
 nohup bash -c "cd $ROOT/apps/dashboard && pnpm start" > "$LOGS/dashboard.log" 2>&1 &
 echo $! > "$LOGS/dashboard.pid"
