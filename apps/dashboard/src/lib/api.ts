@@ -48,10 +48,10 @@ export function getAccessToken(): string | null {
 function tenantIdFromToken(): string | null {
   hydrate();
   if (!accessToken) return null;
-  const parts = accessToken.split(".");
-  if (parts.length < 2) return null;
+  const payload = accessToken.split(".")[1];
+  if (!payload) return null;
   try {
-    const json = atob(parts[1].replace(/-/g, "+").replace(/_/g, "/"));
+    const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
     const claims = JSON.parse(json) as { tenant_id?: string; tid?: string };
     return claims.tenant_id ?? claims.tid ?? null;
   } catch {
