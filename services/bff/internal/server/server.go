@@ -20,6 +20,7 @@ type Config struct {
 	CampaignURL    string
 	WhatsAppURL    string
 	SchedulerURL   string
+	AnalyticsURL   string
 	RedisAddr      string
 	JWTSecret      string
 	AllowedOrigins []string
@@ -38,11 +39,16 @@ func New(cfg Config, logger *slog.Logger) (http.Handler, error) {
 	if schedulerURL == "" {
 		schedulerURL = "http://localhost:8107"
 	}
+	analyticsURL := cfg.AnalyticsURL
+	if analyticsURL == "" {
+		analyticsURL = "http://localhost:8116"
+	}
 	productProxy, err := handler.NewProductProxy(map[string]string{
 		"lead_import": cfg.LeadImportURL,
 		"campaign":    cfg.CampaignURL,
 		"whatsapp":    cfg.WhatsAppURL,
 		"scheduler":   schedulerURL,
+		"analytics":   analyticsURL,
 	})
 	if err != nil {
 		return nil, err
@@ -130,6 +136,9 @@ func New(cfg Config, logger *slog.Logger) (http.Handler, error) {
 		r.Get("/v1/whatsapp/threads", productProxy.ProxyTo("whatsapp"))
 		r.Get("/v1/whatsapp/threads/{thread_id}/messages", productProxy.ProxyTo("whatsapp"))
 		r.Post("/v1/whatsapp/messages", productProxy.ProxyTo("whatsapp"))
+
+		// Analytics / reports (real ClickHouse/pgkv-backed data)
+		r.Get("/v1/reports/{report}", productProxy.ProxyTo("analytics"))
 	})
 
 	return r, nil
