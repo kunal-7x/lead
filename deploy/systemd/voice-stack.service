@@ -1,0 +1,16 @@
+[Unit]
+Description=Famit voice stack (telephony-adapter + routers + worker)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Give docker infra (pg/redis/nats) time to be healthy after a reboot
+ExecStartPre=/bin/sleep 20
+ExecStart=/bin/bash -l /root/lead/droplet-start-all.sh
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

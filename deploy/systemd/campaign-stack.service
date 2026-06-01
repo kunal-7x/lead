@@ -1,0 +1,16 @@
+[Unit]
+Description=Famit control-plane stack (tenant-auth, bff, campaign, scheduler, lead-import, call-intel, analytics-sink, dashboard)
+After=docker.service network-online.target voice-stack.service
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Wait for docker infra (pg/redis/nats) to be healthy after reboot
+ExecStartPre=/bin/sleep 25
+ExecStart=/bin/bash -l /root/lead/codebase/scripts/droplet-start-campaign-stack.sh
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target
