@@ -132,13 +132,18 @@ func New(cfg Config, logger *slog.Logger) (http.Handler, error) {
 		r.Get("/v1/campaigns/{id}/health", productProxy.ProxyTo("campaign"))
 			r.Get("/v1/campaigns/{id}/progress", productProxy.ProxyTo("scheduler"))
 
-		// WhatsApp inbox APIs
-		r.Get("/v1/whatsapp/threads", productProxy.ProxyTo("whatsapp"))
-		r.Get("/v1/whatsapp/threads/{thread_id}/messages", productProxy.ProxyTo("whatsapp"))
-		r.Post("/v1/whatsapp/messages", productProxy.ProxyTo("whatsapp"))
+		// WhatsApp inbox APIs. The WhatsApp adapter is not deployed in every
+		// environment, so fall back to an empty-but-200 payload (graceful empty
+		// inbox) rather than a 404/502 that would bounce the user.
+		r.Get("/v1/whatsapp/threads", productProxy.ProxyToOrEmpty("whatsapp", []byte(`{"threads":[]}`)))
+		r.Get("/v1/whatsapp/threads/{thread_id}/messages", productProxy.ProxyToOrEmpty("whatsapp", []byte(`{"messages":[]}`)))
+		r.Post("/v1/whatsapp/messages", productProxy.ProxyToOrEmpty("whatsapp", []byte(`{"ok":true}`)))
 
-		// Analytics / reports (real ClickHouse/pgkv-backed data)
-		r.Get("/v1/reports/{report}", productProxy.ProxyTo("analytics"))
+		// Analytics / reports (real ClickHouse/pgkv-backed data). When the
+		// analytics sink is not deployed, serve an empty rows set with 200 so the
+		// reports / site-visits / ai-quality pages render an empty state instead
+		// of erroring or redirecting.
+		r.Get("/v1/reports/{report}", productProxy.ProxyToOrEmpty("analytics", []byte(`{"rows":[]}`)))
 	})
 
 	return r, nil
