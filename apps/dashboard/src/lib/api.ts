@@ -40,6 +40,25 @@ export function getAccessToken(): string | null {
   return accessToken;
 }
 
+// Decode the tenant_id claim from the (possibly expired) access token. The
+// refresh endpoint requires tenant_id alongside the refresh token, and the
+// browser does not otherwise persist it, so we recover it from the JWT payload.
+// This is a best-effort, unverified decode used only to populate the refresh
+// request body — never for trust decisions.
+function tenantIdFromToken(): string | null {
+  hydrate();
+  if (!accessToken) return null;
+  const parts = accessToken.split(".");
+  if (parts.length < 2) return null;
+  try {
+    const json = atob(parts[1].replace(/-/g, "+").replace(/_/g, "/"));
+    const claims = JSON.parse(json) as { tenant_id?: string; tid?: string };
+    return claims.tenant_id ?? claims.tid ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export const api = axios.create({
   baseURL: "/api",
   withCredentials: true,
@@ -64,9 +83,12 @@ api.interceptors.response.use(
       hydrate();
       // Try a silent refresh using the stored refresh token.
       try {
+        const tenantId = tenantIdFromToken();
         const { data } = await axios.post(
           "/api/v1/auth/refresh",
-          refreshToken ? { refresh_token: refreshToken } : {},
+          refreshToken
+            ? { refresh_token: refreshToken, tenant_id: tenantId ?? undefined }
+            : {},
           { withCredentials: true },
         );
         if (data?.access_token) {
