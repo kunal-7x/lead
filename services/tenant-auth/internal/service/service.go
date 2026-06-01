@@ -23,10 +23,15 @@ import (
 const (
 	accessTokenTTL  = 15 * time.Minute
 	refreshTokenTTL = 7 * 24 * time.Hour
-	loginLimit      = 5
-	loginWindow     = time.Minute
-	refreshLimit    = 30
-	refreshWindow   = time.Minute
+	// loginLimit is keyed by client IP per loginWindow. Because the dashboard
+	// reaches tenant-auth through the BFF reverse proxy, every browser shares
+	// the BFF's source IP, so a low limit throttles all users at once. Raised
+	// to a testing-friendly 30/min (still blocks brute-force bursts) for the
+	// dev/test phase.
+	loginLimit    = 30
+	loginWindow   = time.Minute
+	refreshLimit  = 60
+	refreshWindow = time.Minute
 )
 
 // Service implements all TenantAuth RPCs as HTTP handlers.
