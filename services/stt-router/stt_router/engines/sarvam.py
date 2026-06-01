@@ -13,6 +13,8 @@ from stt_router.engines.base import STTEngine
 from stt_router.models import STTResult
 
 _SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
+_SARVAM_API_KEY_2 = os.getenv("SARVAM_API_KEY_2", "")
+_SARVAM_API_KEY_3 = os.getenv("SARVAM_API_KEY_3", "")
 # translate endpoint: returns transcript + translation; benchmarked faster than
 # the plain /speech-to-text endpoint on Sarvam's infra (1.5s vs 2.1s warm).
 # Switch to plain endpoint via env: SARVAM_USE_TRANSLATE=0
@@ -39,17 +41,23 @@ except ImportError:
 class SarvamEngine(STTEngine):
     """Sarvam Saarika v2 — best Hinglish/Hindi accuracy, API-only (no GPU).
 
-    Production: set SARVAM_API_KEY env var.
+    Production: set SARVAM_API_KEY, SARVAM_API_KEY_2, SARVAM_API_KEY_3 env vars.
+    Rotates across all three keys on 429 / auth errors before falling to the next
+    STT engine in the chain (groq_whisper). This triples the free-tier rate-limit.
     Audio: upsample 8kHz→16kHz before sending (Sarvam requires 16kHz PCM).
     Endpoint: speech-to-text-translate (faster than plain STT, see benchmark).
     HTTP/2: enabled when h2 package is installed (httpx[http2]) — 3x latency win.
-    Streaming: wss://api.sarvam.ai/v1/realtime/stream — deferred (see HUMAN_TASKS.md).
+    Streaming: wss://api.sarvam.ai/v1/realtime/stream — see SarvamStreamingEngine.
     """
 
     name = "sarvam"
 
     def __init__(self, api_key: str = "", timeout: float = _TIMEOUT_S) -> None:
-        self._api_key = api_key or _SARVAM_API_KEY
+        k1 = api_key or _SARVAM_API_KEY
+        k2 = _SARVAM_API_KEY_2
+        k3 = _SARVAM_API_KEY_3
+        self._keys = [k for k in (k1, k2, k3) if k] or [""]
+        self._api_key = self._keys[0]  # kept for health_check / legacy attr reads
         self._timeout = timeout
         # Single persistent client with HTTP/2 for connection reuse across calls.
         # http2=True requires 'h2' package; falls back to HTTP/1.1 if unavailable.
@@ -59,43 +67,63 @@ class SarvamEngine(STTEngine):
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         )
 
+    def _make_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            timeout=self._timeout,
+            http2=_HTTP2,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
+
     async def transcribe(self, audio: bytes, lang: str, session_id: str) -> STTResult:
         t0 = time.time()
         # Upsample 8kHz → 16kHz by linear interpolation (simple 2x)
         pcm = _upsample_8k_to_16k(audio)
-
-        headers = {"API-Subscription-Key": self._api_key}
         files = {"file": ("audio.wav", _wrap_pcm_wav(pcm, sample_rate=16000), "audio/wav")}
         data = {"language_code": _lang_code(lang), "model": "saaras:v2.5"}
 
-        # One retry on connection errors (HTTP/2 GOAWAY / server-side idle close).
-        # On connection failure: close the stale client, open a fresh one, retry once.
-        for attempt in range(2):
-            try:
-                resp = await self._client.post(_BATCH_URL, headers=headers, files=files, data=data)
-                break
-            except (httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.ConnectError) as exc:
-                if attempt == 0:
-                    # Recycle the client to clear any broken HTTP/2 connection state
-                    try:
-                        await self._client.aclose()
-                    except Exception:
-                        pass
-                    self._client = httpx.AsyncClient(
-                        timeout=self._timeout,
-                        http2=_HTTP2,
-                        limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
-                    )
-                else:
-                    raise  # propagate on second failure
+        last_exc: Exception | None = None
+        for key in self._keys:
+            headers = {"API-Subscription-Key": key}
+            # One retry on connection errors (HTTP/2 GOAWAY / server-side idle close).
+            # On connection failure: close the stale client, open a fresh one, retry once.
+            for attempt in range(2):
+                try:
+                    resp = await self._client.post(_BATCH_URL, headers=headers, files=files, data=data)
+                    break
+                except (httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.ConnectError) as exc:
+                    if attempt == 0:
+                        # Recycle the client to clear any broken HTTP/2 connection state
+                        try:
+                            await self._client.aclose()
+                        except Exception:
+                            pass
+                        self._client = self._make_client()
+                    else:
+                        last_exc = exc
+                        resp = None  # type: ignore[assignment]
+                        break  # move to next key
+                        raise  # propagate on second failure
+            else:
+                if last_exc is not None:
+                    continue  # connection failed twice — try next key
 
-        resp.raise_for_status()
-        body = resp.json()
+            # resp is set here if the connection succeeded
+            if resp is None:
+                continue
+            if resp.status_code == 429 or resp.status_code == 401:
+                last_exc = RuntimeError(f"Sarvam {resp.status_code} on key index {self._keys.index(key)}")
+                continue  # try next key
+            resp.raise_for_status()
+            body = resp.json()
+            text = body.get("transcript", "")
+            confidence = float(body.get("confidence", 0.9))
+            latency_ms = int((time.time() - t0) * 1000)
+            return self._make_result(text, confidence, lang, t0, latency_ms)
 
-        text = body.get("transcript", "")
-        confidence = float(body.get("confidence", 0.9))
-        latency_ms = int((time.time() - t0) * 1000)
-        return self._make_result(text, confidence, lang, t0, latency_ms)
+        # All keys exhausted
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("All Sarvam keys failed")
 
     async def health_check(self) -> bool:
         if not self._api_key:
@@ -193,7 +221,8 @@ class SarvamStreamingEngine:
     name = "sarvam_streaming"
 
     def __init__(self, api_key: str = "") -> None:
-        self._api_key = api_key or _SARVAM_API_KEY
+        # Use the first non-empty key from the rotation pool for streaming
+        self._api_key = api_key or _SARVAM_API_KEY or _SARVAM_API_KEY_2 or _SARVAM_API_KEY_3 or ""
         # Reconnect backoff state per instance
         self._backoff_s: float = 0.5
 

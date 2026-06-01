@@ -207,11 +207,12 @@ class LLMRouter:
             active = DEFAULT_MODEL
         chain = _build_chain(active, list(self._backends.keys()))
 
-        # Try streaming-capable backend first (groq_llama/scout primary, cerebras_llama fallback, openrouter last)
+        # Try streaming-capable backend first (groq_llama/scout primary, cerebras_llama fallback)
+        # openrouter removed — 404 errors (misconfigured model slug); 3 Groq keys + Cerebras covers fallback
         stream_backend = None
         for model_name in chain:
             backend = self._backends.get(model_name)
-            if backend is not None and backend.name in ("groq_llama", "cerebras_llama", "openrouter"):
+            if backend is not None and backend.name in ("groq_llama", "cerebras_llama"):
                 stream_backend = (model_name, backend)
                 break
 
@@ -312,10 +313,11 @@ class LLMRouter:
 
         # Try each streaming-capable backend in chain order.
         # On 429 or any error, skip that model and advance to the next one.
-        # Within groq_llama(scout), 2-key round-robin absorbs 429 before escalating.
-        # Chain order: groq_llama(scout) → cerebras_llama → openrouter.
+        # Within groq_llama(scout), 3-key round-robin absorbs 429 before escalating.
+        # Chain order: groq_llama(scout) → cerebras_llama.
+        # openrouter removed: 404 errors (misconfigured model slug); not needed with 3 Groq keys.
         # groq_instant removed from chain (low token limits).
-        _STREAMING_CAPABLE = ("groq_llama", "cerebras_llama", "openrouter")
+        _STREAMING_CAPABLE = ("groq_llama", "cerebras_llama")
         import sys as _sys
         brain = None
         for model_name in chain:
@@ -367,18 +369,18 @@ def _format_kb(chunks) -> str:
 
 
 _PREFERRED_ORDER = [
-    "groq_llama",       # scout (meta-llama/llama-4-scout-17b-16e-instruct) — 2-key round-robin
+    "groq_llama",       # scout (meta-llama/llama-4-scout-17b-16e-instruct) — 3-key round-robin
     "cerebras_llama",   # gpt-oss-120b reasoning_effort=low — batch fallback
-    "openrouter",       # last resort
+    # openrouter removed: was returning 404 (misconfigured model slug); 3 Groq keys + Cerebras covers fallback
 ]
 
 
 def _build_chain(active: str, available: list[str]) -> list[str]:
     """Active model first, then remaining in preferred fallback order.
 
-    Preferred order: groq_llama(scout) → cerebras_llama → openrouter.
-    groq_instant removed from chain (low token limits, rate-limits fast).
-    2-key round-robin inside GroqLlamaBackend handles Groq 429 before escalating.
+    Preferred order: groq_llama(scout) → cerebras_llama.
+    groq_instant and openrouter removed from chain.
+    3-key round-robin inside GroqLlamaBackend handles Groq 429 before escalating.
     Models not in the preferred list come last (in their registration order).
     """
     rest_ordered = []

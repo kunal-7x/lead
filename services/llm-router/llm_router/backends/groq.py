@@ -12,33 +12,35 @@ from llm_router.models import BrainOutput, LLMRequest
 
 _GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 _GROQ_API_KEY_2 = os.getenv("GROQ_API_KEY_2", "")
+_GROQ_API_KEY_3 = os.getenv("GROQ_API_KEY_3", "")
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _SCOUT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 _INSTANT_MODEL = "llama-3.1-8b-instant"
 _TIMEOUT = 20.0
 
 
-def _build_key_cycle(primary: str, secondary: str) -> list[str]:
-    """Return a list of non-empty keys; primary first."""
-    keys = [k for k in (primary, secondary) if k]
-    return keys or [""]
+def _build_key_cycle(*keys: str) -> list[str]:
+    """Return a list of non-empty keys in supplied order."""
+    result = [k for k in keys if k]
+    return result or [""]
 
 
 class GroqLlamaBackend(LLMBackend):
     """Groq Llama 4 Scout — primary default backend, ~594-750 tok/s, 131k ctx.
 
-    Uses two Groq keys in round-robin (GROQ_API_KEY + GROQ_API_KEY_2).
-    On 429 from key-1 the same model is retried with key-2 before falling
-    to the next chain member, effectively doubling the free-tier headroom.
+    Uses three Groq keys in round-robin (GROQ_API_KEY + GROQ_API_KEY_2 + GROQ_API_KEY_3).
+    On 429 from one key the next key is tried before falling to the next chain member,
+    effectively tripling the free-tier rate-limit headroom.
 
-    Production: set GROQ_API_KEY (and optionally GROQ_API_KEY_2) env vars.
+    Production: set GROQ_API_KEY, GROQ_API_KEY_2, GROQ_API_KEY_3 env vars.
     """
     name = "groq_llama"
 
-    def __init__(self, api_key: str = "", api_key_2: str = "", timeout: float = _TIMEOUT) -> None:
+    def __init__(self, api_key: str = "", api_key_2: str = "", api_key_3: str = "", timeout: float = _TIMEOUT) -> None:
         k1 = api_key or _GROQ_API_KEY
         k2 = api_key_2 or _GROQ_API_KEY_2
-        self._keys = _build_key_cycle(k1, k2)
+        k3 = api_key_3 or _GROQ_API_KEY_3
+        self._keys = _build_key_cycle(k1, k2, k3)
         # Stateful round-robin counter (index into self._keys)
         self._key_index = 0
         self._api_key = self._keys[0]  # kept for health_check / legacy attr reads
@@ -108,6 +110,6 @@ class GroqInstantBackend(GroqLlamaBackend):
     """
     name = "groq_instant"
 
-    def __init__(self, api_key: str = "", api_key_2: str = "", timeout: float = _TIMEOUT) -> None:
-        super().__init__(api_key=api_key, api_key_2=api_key_2, timeout=timeout)
+    def __init__(self, api_key: str = "", api_key_2: str = "", api_key_3: str = "", timeout: float = _TIMEOUT) -> None:
+        super().__init__(api_key=api_key, api_key_2=api_key_2, api_key_3=api_key_3, timeout=timeout)
         self._model = _INSTANT_MODEL
