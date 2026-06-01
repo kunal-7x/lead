@@ -22,6 +22,7 @@ func main() {
 		CampaignURL:   envOr("CAMPAIGN_URL", "http://localhost:8112"),
 		WhatsAppURL:   envOr("WHATSAPP_URL", "http://localhost:8119"),
 		SchedulerURL:  envOr("SCHEDULER_URL", "http://localhost:8107"),
+		AnalyticsURL:  envOr("ANALYTICS_URL", "http://localhost:8116"),
 		RedisAddr:     envOr("REDIS_ADDR", "localhost:6379"),
 		JWTSecret:     envOr("JWT_SECRET", "dev-secret"),
 		AllowedOrigins: []string{
