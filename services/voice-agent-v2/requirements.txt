@@ -1,0 +1,32 @@
+# voice-agent-v2 pinned requirements
+# Generated from installed venv (pipecat-ai==1.3.0, Python 3.14.3 / Windows)
+#
+# Install: uv pip install -r requirements.txt
+# Or:      pip install -r requirements.txt
+#
+# silero extra (Silero VAD via ONNX) is bundled with pipecat-ai[silero] —
+# it uses onnxruntime (NOT torch), so it installs cleanly on Windows.
+# torch is NOT required.
+
+# Core
+pipecat-ai[livekit,elevenlabs,silero,deepgram]==1.3.0
+
+# LiveKit SDK (JWT token generation + room management)
+livekit==1.1.8
+livekit-api==1.1.0
+
+# STT
+deepgram-sdk==6.1.1
+
+# ONNX runtime (Silero VAD, pulled by pipecat-ai[silero])
+onnxruntime==1.24.4
+
+# Config / utils
+pydantic==2.13.4
+python-dotenv==1.2.2
+httpx>=0.27.0
+redis>=8.0.0
+
+# Dev / test
+pytest==9.0.3
+pytest-asyncio==1.4.0
