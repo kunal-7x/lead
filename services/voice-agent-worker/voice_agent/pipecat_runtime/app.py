@@ -19,7 +19,7 @@ import logging
 import os
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 
 from voice_agent.events_nats import NATSEventPublisher
 from voice_agent.models import SessionContext
@@ -62,9 +62,19 @@ async def healthz() -> dict:
     return {"status": "ok", "runtime": "pipecat", "flag": _settings.voice_runtime}
 
 
-@app.get("/pipecat/answer")
-async def answer(call_id: str = "") -> Response:
-    """Return the Vobiz Answer XML. ``call_id`` is the Vobiz/internal call id."""
+@app.api_route("/pipecat/answer", methods=["GET", "POST"])
+async def answer(call_id: str = "", request: Request = None) -> Response:
+    """Return the Vobiz Answer XML. Accepts GET and POST (Vobiz POSTs to answer_url)."""
+    # Vobiz POSTs the call details as form-data; extract call_uuid if call_id not in query.
+    if not call_id and request is not None:
+        try:
+            form = await request.form()
+            call_id = (
+                form.get("CallUUID") or form.get("call_id") or
+                form.get("From") or ""
+            )
+        except Exception:  # noqa: BLE001
+            pass
     xml = build_answer_xml(_settings.public_ws_base, call_id)
     return Response(content=xml, media_type="application/xml")
 
@@ -157,9 +167,10 @@ async def pipecat_ws(websocket: WebSocket, call_id: str) -> None:
     # scaffold/tests import this module without pipecat installed).
     from voice_agent.pipecat_runtime.pipeline import build_pipeline
 
-    task = None
+    # build_pipeline returns (PipelineWorker, WorkerRunner) in pipecat 1.3
+    worker = None
     try:
-        task, runner = await build_pipeline(
+        worker, runner = await build_pipeline(
             ctx=ctx,
             websocket=websocket,
             settings=_settings,
@@ -167,15 +178,15 @@ async def pipecat_ws(websocket: WebSocket, call_id: str) -> None:
             stream_id=stream_id,
             call_id=call_id,
         )
-        await runner.run(task)
+        await runner.run(worker)
     except WebSocketDisconnect:
         logger.info("pipecat_ws disconnected call_id=%s", call_id)
     except Exception:  # noqa: BLE001
         logger.exception("pipecat_ws pipeline error call_id=%s", call_id)
     finally:
-        if task is not None:
+        if worker is not None:
             try:
-                await task.cancel()
+                await worker.cancel()
             except Exception:  # noqa: BLE001
                 pass
 

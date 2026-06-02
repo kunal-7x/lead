@@ -72,15 +72,20 @@ def _build_serializer(stream_id: str, call_id: str):
 def _build_stt(settings: PipecatSettings, ctx: SessionContext):
     """Native Sarvam STT (bypasses stt-router — keepalive WS).
 
-    API-CHECK: pipecat.services.sarvam.stt.SarvamSTTService ctor kwargs
-    (api_key, model, language/params). Verify against pipecat-ai==1.3.*.
+    SarvamSTTService ctor (verified pipecat-ai==1.3.*):
+      api_key, model (deprecated → use settings), mode (transcribe|translate|
+      verbatim|translit|codemix), sample_rate, input_audio_codec, settings.
+    No `language` param; language is embedded in `mode` or model default.
+    For Hindi+English codemix use mode="codemix".
     """
     from pipecat.services.sarvam.stt import SarvamSTTService  # type: ignore
 
+    # mode="codemix" handles Hindi+English mixed speech (hi-en).
+    # sample_rate left as None → Sarvam default 16 kHz (transport resamples from 8k).
     return SarvamSTTService(
         api_key=settings.sarvam_api_key,
-        model=settings.sarvam_stt_model,           # saaras:v3
-        language=ctx.lang or "hi-IN",              # API-CHECK: param name (language vs lang)
+        model=settings.sarvam_stt_model,   # saaras:v3
+        mode="codemix",                    # hi-en codemix
     )
 
 
@@ -120,17 +125,15 @@ def _build_tts(settings: PipecatSettings, ctx: SessionContext):
 
 
 def _build_transport(websocket, serializer, settings: PipecatSettings):
-    """FastAPI WS transport with VAD + Smart-Turn v3 + 8 kHz audio in/out.
+    """FastAPI WS transport — pipecat 1.3 API.
 
-    API-CHECK: pipecat.transports.websocket.fastapi.{FastAPIWebsocketTransport,
-    FastAPIWebsocketParams}; pipecat.audio.vad.silero.SileroVADAnalyzer;
-    pipecat.audio.turn.smart_turn.local_smart_turn_v3.LocalSmartTurnAnalyzerV3.
-    v1.0 removed vad_enabled flags — pass analyzer objects only.
+    FastAPIWebsocketParams (verified 1.3.*) inherits from TransportParams:
+      audio_in_enabled, audio_out_enabled, audio_in_sample_rate,
+      audio_out_sample_rate (all on TransportParams).
+    FastAPIWebsocketParams adds: add_wav_header, serializer, session_timeout.
+    VAD/turn are NOT transport params in 1.3 — inject VADProcessor + turn
+    strategy in the pipeline instead (see build_pipeline).
     """
-    from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import (  # type: ignore
-        LocalSmartTurnAnalyzerV3,
-    )
-    from pipecat.audio.vad.silero import SileroVADAnalyzer  # type: ignore
     from pipecat.transports.websocket.fastapi import (  # type: ignore
         FastAPIWebsocketParams,
         FastAPIWebsocketTransport,
@@ -141,10 +144,9 @@ def _build_transport(websocket, serializer, settings: PipecatSettings):
         audio_in_enabled=True,
         audio_out_enabled=True,
         add_wav_header=False,
-        vad_analyzer=SileroVADAnalyzer(),
-        turn_analyzer=LocalSmartTurnAnalyzerV3(),
+        audio_in_sample_rate=8000,                         # Vobiz sends µ-law 8k
+        audio_out_sample_rate=settings.output_sample_rate,  # 8k out
         session_timeout=settings.session_timeout_s,
-        audio_out_sample_rate=settings.output_sample_rate,  # API-CHECK: 8k out param name
     )
     return FastAPIWebsocketTransport(websocket=websocket, params=params)
 
@@ -158,27 +160,21 @@ async def build_pipeline(
     call_id: str,
     turn_store=None,
 ):
-    """Build + return (PipelineTask, PipelineRunner) for one call.
+    """Build + return (PipelineWorker, WorkerRunner) for one call.
 
-    Imports the heavy pipecat symbols lazily. Raises if pipecat is not installed —
-    the caller (app.pipecat_ws) logs and closes the socket.
+    Pipecat 1.3 API (verified on box):
+    - PipelineTask/PipelineRunner are deprecated — use PipelineWorker/WorkerRunner.
+    - VAD is a VADProcessor in the pipeline (NOT a transport param).
+    - Turn detection is the default TurnAnalyzerUserTurnStopStrategy (SmartTurnV3).
+    - allow_interruptions/interruption_strategies removed from PipelineParams.
+    - PipelineParams fields: audio_out_sample_rate, enable_metrics, etc.
+    - WorkerRunner.run(worker) drives the pipeline.
     """
-    # API-CHECK: pipeline/task/runner module paths + PipelineParams fields
-    # (allow_interruptions, interruption_strategies, enable_metrics).
+    from pipecat.audio.vad.silero import SileroVADAnalyzer  # type: ignore
     from pipecat.pipeline.pipeline import Pipeline  # type: ignore
-    from pipecat.pipeline.runner import PipelineRunner  # type: ignore
-    from pipecat.pipeline.task import PipelineParams, PipelineTask  # type: ignore
-
-    # API-CHECK: MinWordsInterruptionStrategy import location. Documented under
-    # pipecat.audio.interruptions; some builds expose it via pipecat.processors.
-    try:
-        from pipecat.audio.interruptions.min_words_interruption_strategy import (  # type: ignore
-            MinWordsInterruptionStrategy,
-        )
-    except Exception:  # noqa: BLE001
-        from pipecat.processors.aggregators.llm_response import (  # type: ignore  # noqa: F401
-            MinWordsInterruptionStrategy,
-        )
+    from pipecat.pipeline.task import PipelineParams, PipelineWorker  # type: ignore
+    from pipecat.processors.audio.vad_processor import VADProcessor  # type: ignore
+    from pipecat.workers.runner import WorkerRunner  # type: ignore
 
     call_ctx = CallContext(session=ctx, settings=settings)
 
@@ -188,12 +184,17 @@ async def build_pipeline(
     tts, provider = _build_tts(settings, ctx)
     logger.info("pipecat pipeline tts_provider=%s call_id=%s", provider, call_id)
 
+    # VADProcessor replaces the old vad_analyzer transport param (pipecat 1.3).
+    # Sits between transport.input() and STT to drive barge-in + turn detection.
+    vad = VADProcessor(vad_analyzer=SileroVADAnalyzer())
+
     cso = CsoProcessor(call_ctx)
     llm = LlmRouterProcessor(call_ctx)
     actions = ActionsProcessor(call_ctx, publisher, turn_store=turn_store)
 
     pipeline = Pipeline([
         transport.input(),
+        vad,         # Silero VAD → drives UserSpeakingFrame / turn detection
         stt,
         cso,
         llm,
@@ -202,14 +203,14 @@ async def build_pipeline(
         transport.output(),
     ])
 
-    task = PipelineTask(
+    worker = PipelineWorker(
         pipeline,
         params=PipelineParams(
-            allow_interruptions=True,
-            interruption_strategies=[MinWordsInterruptionStrategy(min_words=2)],
             enable_metrics=True,
-            audio_out_sample_rate=settings.output_sample_rate,  # API-CHECK: task-level 8k param
+            audio_out_sample_rate=settings.output_sample_rate,  # 8k for Vobiz
         ),
+        enable_rtvi=False,   # No RTVI overlay; also avoids RTVIProcessor pipeline walk
+        enable_turn_tracking=False,  # Turn tracking not needed for Vobiz
     )
-    runner = PipelineRunner(handle_sigint=False)
-    return task, runner
+    runner = WorkerRunner(handle_sigint=False)
+    return worker, runner

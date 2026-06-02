@@ -31,7 +31,7 @@ from voice_agent.pipecat_runtime.config import PipecatSettings
 try:  # pragma: no cover - import shim exercised only with pipecat installed
     from pipecat.frames.frames import (  # type: ignore
         Frame,
-        StartInterruptionFrame,
+        InterruptionFrame as StartInterruptionFrame,  # pipecat 1.3: renamed
         TranscriptionFrame,
     )
     from pipecat.processors.frame_processor import (  # type: ignore

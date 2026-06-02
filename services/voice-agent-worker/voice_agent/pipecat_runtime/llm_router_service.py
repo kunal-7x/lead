@@ -38,7 +38,7 @@ try:  # pragma: no cover - exercised only with pipecat installed
         Frame,
         LLMFullResponseEndFrame,
         LLMFullResponseStartFrame,
-        StartInterruptionFrame,
+        InterruptionFrame as StartInterruptionFrame,  # pipecat 1.3: renamed
         TextFrame,
         TranscriptionFrame,
     )
