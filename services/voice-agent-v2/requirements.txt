@@ -9,14 +9,13 @@
 # torch is NOT required.
 
 # Core
-pipecat-ai[livekit,elevenlabs,silero,deepgram]==1.3.0
+pipecat-ai[livekit,elevenlabs,silero,sarvam]==1.3.0
 
 # LiveKit SDK (JWT token generation + room management)
 livekit==1.1.8
 livekit-api==1.1.0
 
-# STT
-deepgram-sdk==6.1.1
+# STT (sarvamai SDK pulled by pipecat-ai[sarvam] above)
 
 # ONNX runtime (Silero VAD, pulled by pipecat-ai[silero])
 onnxruntime==1.24.4

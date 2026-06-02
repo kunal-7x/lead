@@ -24,7 +24,7 @@ def test_real_imports_resolve():
     from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport  # noqa: F401
     from pipecat.audio.vad.silero import SileroVADAnalyzer  # noqa: F401
     from pipecat.processors.audio.vad_processor import VADProcessor  # noqa: F401
-    from pipecat.services.deepgram.stt import DeepgramSTTService  # noqa: F401
+    from pipecat.services.sarvam.stt import SarvamSTTService  # noqa: F401
     from pipecat.services.elevenlabs.tts import ElevenLabsTTSService  # noqa: F401
     from pipecat.frames.frames import TextFrame, TranscriptionFrame, EndFrame  # noqa: F401
     from pipecat.processors.frame_processor import FrameDirection, FrameProcessor  # noqa: F401
@@ -52,7 +52,7 @@ async def test_build_pipeline_assembles_without_error(monkeypatch):
     # Use a 32+ byte secret to avoid InsecureKeyLengthWarning from JWT lib
     monkeypatch.setenv("LIVEKIT_API_SECRET", "devsecret_padded_to_32_bytes_here!")
     monkeypatch.setenv("LIVEKIT_ROOM_NAME", "test-room")
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dummy-deepgram-key")
+    monkeypatch.setenv("SARVAM_API_KEY", "dummy-sarvam-key")
     monkeypatch.setenv("ELEVENLABS_API_KEY", "dummy-elevenlabs-key")
     monkeypatch.setenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 

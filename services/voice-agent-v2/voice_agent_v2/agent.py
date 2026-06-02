@@ -132,16 +132,26 @@ def _build_transport(settings):
 # ── STT builder ──────────────────────────────────────────────────────────────
 
 def _build_stt(settings):
-    """Build DeepgramSTTService.
+    """Build SarvamSTTService (saaras:v3, codemix/Hinglish mode by default).
 
-    REAL API (verified):
-      from pipecat.services.deepgram.stt import DeepgramSTTService
-      DeepgramSTTService(api_key=..., sample_rate=..., language=...)
+    REAL API (verified against pipecat-ai[sarvam]==1.3.0 + sarvamai==0.1.28):
+      from pipecat.services.sarvam.stt import SarvamSTTService
+      SarvamSTTService(api_key=..., model=..., mode=..., sample_rate=...)
+
+    model  — saaras:v3  (supports mode + vad_params; auto-detects language)
+    mode   — "codemix"  (Hinglish / English-Hindi code-switch recognition)
+             Override via SARVAM_STT_MODE env var ("transcribe" for pure Hindi).
     """
-    from pipecat.services.deepgram.stt import DeepgramSTTService
+    from pipecat.services.sarvam.stt import SarvamSTTService
 
-    return DeepgramSTTService(
-        api_key=settings.deepgram_api_key or "dummy-key",
+    model = getattr(settings, "sarvam_stt_model", "saaras:v3") or "saaras:v3"
+    mode = getattr(settings, "sarvam_stt_mode", "codemix") or "codemix"
+
+    stt_settings = SarvamSTTService.Settings(model=model)
+    return SarvamSTTService(
+        api_key=settings.sarvam_api_key or "dummy-sarvam-key",
+        mode=mode,
+        settings=stt_settings,
         sample_rate=settings.audio_in_sample_rate,
     )
 

@@ -50,10 +50,10 @@ class AgentSettings:
     livekit_api_secret: str = ""
     livekit_room_name: str = "agent-room"
 
-    # ── STT ─────────────────────────────────────────────────────────────────────
-    deepgram_api_key: str = ""
-    deepgram_model: str = "nova-2"
-    deepgram_language: str = "en-IN"
+    # ── STT (Sarvam) ─────────────────────────────────────────────────────────────
+    sarvam_api_key: str = ""
+    sarvam_stt_model: str = "saaras:v3"
+    sarvam_stt_mode: str = "codemix"   # codemix = Hinglish/code-switch mode
 
     # ── TTS ─────────────────────────────────────────────────────────────────────
     elevenlabs_api_key: str = ""
@@ -86,9 +86,9 @@ class AgentSettings:
             livekit_api_key=os.getenv("LIVEKIT_API_KEY", ""),
             livekit_api_secret=os.getenv("LIVEKIT_API_SECRET", ""),
             livekit_room_name=os.getenv("LIVEKIT_ROOM_NAME", "agent-room"),
-            deepgram_api_key=os.getenv("DEEPGRAM_API_KEY", ""),
-            deepgram_model=os.getenv("DEEPGRAM_MODEL", "nova-2"),
-            deepgram_language=os.getenv("DEEPGRAM_LANGUAGE", "en-IN"),
+            sarvam_api_key=os.getenv("SARVAM_API_KEY", ""),
+            sarvam_stt_model=os.getenv("SARVAM_STT_MODEL", "saaras:v3"),
+            sarvam_stt_mode=os.getenv("SARVAM_STT_MODE", "codemix"),
             elevenlabs_api_key=os.getenv("ELEVENLABS_API_KEY", ""),
             elevenlabs_voice_id=os.getenv("ELEVENLABS_VOICE_ID", ""),
             elevenlabs_model=os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5"),
