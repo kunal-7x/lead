@@ -67,34 +67,22 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-# ── Placeholder LLM processor ─────────────────────────────────────────────────
+# ── Placeholder LLM processor (kept for tests / fallback reference) ───────────
 
 def _build_echo_llm():
-    """Build a placeholder LLM FrameProcessor that echoes transcripts as TextFrames.
+    """Echo placeholder — DEPRECATED. Pipeline now uses LlmRouterProcessor.
 
-    This is intentionally minimal — it lets the pipeline assemble and flow
-    audio through without a real LLM call. The real LlmRouterProcessor
-    (with single streaming call + no turn fragmentation + transcript forwarding)
-    is the NEXT unit.
+    Kept so existing test_echo_llm_processor_is_frame_processor still passes.
     """
     from pipecat.frames.frames import TextFrame, TranscriptionFrame
     from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
     class EchoLLMProcessor(FrameProcessor):
-        """Echo the caller's transcription back as a TextFrame for TTS.
-
-        In production this will be replaced by the LlmRouterProcessor that
-        calls llm-router via a single streaming HTTP call and forwards
-        transcripts correctly.
-        """
-
         async def process_frame(self, frame: Any, direction: FrameDirection) -> None:
             await self.push_frame(frame, direction)
             if isinstance(frame, TranscriptionFrame) and frame.finalized:
                 logger.info("echo-llm transcript=%r", frame.text)
-                # Echo back as speech
-                echo_text = f"You said: {frame.text}"
-                await self.push_frame(TextFrame(text=echo_text), direction)
+                await self.push_frame(TextFrame(text=f"You said: {frame.text}"), direction)
 
     return EchoLLMProcessor()
 
@@ -232,17 +220,19 @@ def build_pipeline(settings, ctx):
     from pipecat.pipeline.worker import PipelineParams
     from pipecat.workers.runner import WorkerRunner
 
+    from voice_agent_v2.llm_router_processor import LlmRouterProcessor
+
     transport = _build_transport(settings)
     vad = _build_vad()
     stt = _build_stt(settings)
-    llm_placeholder = _build_echo_llm()
+    llm = LlmRouterProcessor(ctx=ctx, settings=settings)
     tts = _build_tts(settings, ctx)
 
     pipeline = Pipeline([
         transport.input(),      # LiveKit audio in
         vad,                    # Silero VAD → UserSpeakingFrame, turn detection
         stt,                    # Deepgram STT → TranscriptionFrame
-        llm_placeholder,        # Echo placeholder → TextFrame (next unit: LlmRouterProcessor)
+        llm,                    # LlmRouterProcessor → stream_text SSE → TextFrame
         tts,                    # ElevenLabs TTS → AudioRawFrame
         transport.output(),     # LiveKit audio out
     ])
