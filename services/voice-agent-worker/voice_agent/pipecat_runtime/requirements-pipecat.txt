@@ -1,0 +1,30 @@
+# Pipecat runtime deps — SEPARATE from the old worker's pyproject so the legacy
+# worker is never forced to install the heavy pipecat/torch/onnx stack.
+# Install on the droplet only: pip install -r requirements-pipecat.txt
+#
+# Pin pipecat-ai to the 1.3.* line (mid-2026 API the design doc was researched
+# against). The extras pull the native Silero VAD, Sarvam STT/TTS, ElevenLabs
+# TTS, and the FastAPI websocket transport.
+pipecat-ai[silero,sarvam,elevenlabs,websocket]==1.3.*
+
+# Vobiz frame serializer (Plivo-family µ-law shapes). Falls back to the bundled
+# pipecat PlivoFrameSerializer if this is unavailable in the target index.
+pipecat-vobiz>=0.0.3
+
+# Smart Turn v3 ships bundled with pipecat-ai's turn extra (LocalSmartTurnAnalyzerV3,
+# CPU/ONNX). onnxruntime is pulled transitively; pinned here for reproducibility.
+onnxruntime>=1.17.0
+
+# Sarvam SDK — >=0.1.25 fixes saaras:v3 / bulbul:v3 prompt+mode handling.
+sarvamai>=0.1.25
+
+# Shared infra deps (already used by the old worker; restated so this file is
+# self-contained for a clean droplet venv).
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+websockets>=12.0
+pydantic>=2.6.0
+httpx>=0.27.0
+redis[asyncio]>=5.0.0
+nats-py>=2.6.0
+numpy>=1.26.0
