@@ -5,6 +5,11 @@
 # (LIVEKIT_KEYS, REDIS_HOST, REDIS_PASSWORD), which livekit-server reads
 # natively. Those env vars are sourced from /opt/livekit/.env (chmod 600 on the
 # box) and are never committed. Safe to commit as-is.
+#
+# SIP/media-enable unit: use_external_ip is now true and the box's public IP is
+# advertised so RTP candidates are routable for outbound PSTN SIP calls via
+# Vobiz. Inbound exposure is still locked down by UFW (allowlisted to Vobiz IPs
+# only); WebRTC mux 7882 remains NOT published to the host.
 
 port: 7880
 
@@ -17,9 +22,12 @@ rtc:
   # the host in this unit (no host port mapping in docker-compose.yml).
   udp_port: 7882
   tcp_port: 7881
-  use_external_ip: false
-  # No public IP advertised in this unit; media path stays internal until the
-  # SIP/media ports are allowlisted in the next unit.
+  use_external_ip: true
+  # Advertise the box's public IPv4 so media (RTP) candidates are reachable for
+  # SIP/PSTN calls. 7882 is still NOT published to the host (closed) in this
+  # unit — SIP media flows through the livekit/sip RTP range (see sip.yaml),
+  # which is the only media path opened (allowlisted to Vobiz).
+  node_ip: 168.144.153.145
 
 logging:
   level: info

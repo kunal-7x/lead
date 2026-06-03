@@ -1,11 +1,13 @@
-# LiveKit self-hosted voice stack — LOCALHOST-ONLY deploy unit.
+# LiveKit self-hosted voice stack — SIP/media-enable deploy unit.
 #
 # SECURITY POSTURE (this unit):
-#   Nothing in this stack is exposed to the public internet. Every published
-#   port is bound to 127.0.0.1 on the host. UFW remains default-deny inbound
-#   with only SSH/22 allowed. The SIP signaling port (5060) and RTP media
-#   range are NOT published to the host at all in this unit — they stay
-#   container-internal. Opening allowlisted SIP/media ports is a LATER unit.
+#   API/WS (7880) and Redis (6379) stay bound to 127.0.0.1 (loopback only).
+#   WebRTC mux 7882 stays UNPUBLISHED (closed). SIP signaling (5060/udp) and a
+#   NARROW RTP media range (10000-10200/udp) ARE published to the host so the
+#   Vobiz outbound SIP trunk can reach them — but they are reachable ONLY from
+#   Vobiz IPs, enforced by UFW (default-deny inbound + scoped
+#   `ufw allow from <vobiz-ip>`). NO port is opened to 0.0.0.0/anywhere.
+#   Globally, SSH/22 remains the only world-reachable port.
 #
 # Secrets (${LIVEKIT_API_KEY}, ${LIVEKIT_API_SECRET}, ${REDIS_PASSWORD}) are
 # supplied ONLY via /opt/livekit/.env on the box (chmod 600). They are never
@@ -80,11 +82,16 @@ services:
     # Only the placeholder template sip.yaml is committed.
     volumes:
       - ./sip.runtime.yaml:/sip/config.yaml:ro
+    ports:
+      # SIP signaling + NARROW RTP media range, published to the host so the
+      # Vobiz outbound trunk can reach them. Access is restricted to Vobiz IPs
+      # ONLY by UFW (default-deny inbound + scoped `ufw allow from <vobiz-ip>`).
+      # These bindings are 0.0.0.0 at the docker level on purpose — UFW is the
+      # allowlist enforcer; nothing here is open to the public internet.
+      - "5060:5060/udp"
+      - "10000-10200:10000-10200/udp"
     networks:
       - livekit
-    # NOTE: sip_port 5060 and the RTP range are intentionally NOT published to
-    # the host in this unit — container-internal only. Publishing/allowlisting
-    # them is the NEXT unit.
 
 networks:
   livekit:

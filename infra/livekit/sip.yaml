@@ -4,10 +4,10 @@
 # /opt/livekit/.env (chmod 600 on the box). This file contains ${ENV_VAR}
 # placeholders only and is safe to commit.
 #
-# IMPORTANT (this unit): sip_port (5060) and the RTP range are NOT published to
-# the host in docker-compose.yml — they are container-internal only. Opening
-# and allowlisting them is the NEXT unit. The box stays externally closed
-# except SSH/22.
+# SIP/media-enable unit: sip_port (5060/udp) and a NARROW RTP range
+# (10000-10200/udp) are now published to the host in docker-compose.yml and
+# allowlisted via UFW to Vobiz IPs ONLY. No port is opened to 0.0.0.0. The box
+# remains default-deny inbound; only SSH/22 is globally reachable.
 
 # WebSocket URL to the LiveKit server. Over the private compose bridge the
 # server is reachable by service name. On the host, 7880 is published on
@@ -21,15 +21,17 @@ redis:
   address: redis:6379
   password: ${REDIS_PASSWORD}
 
-# SIP signaling port (NOT published to host in this unit).
+# SIP signaling port (published to host + UFW-allowlisted to Vobiz only).
 sip_port: 5060
 
-# RTP media port range (NOT published to host in this unit).
-rtp_port: 10000-20000
+# RTP media port range — NARROWED to 200 ports (was 10000-20000). Published to
+# host + UFW-allowlisted to Vobiz only. Caps the externally reachable media
+# surface to 201 UDP ports.
+rtp_port: 10000-10200
 
-# Do not advertise/use an external IP in this unit; media path stays internal
-# until ports are allowlisted in the next unit.
-use_external_ip: false
+# Advertise the box's public IPv4 so SDP/RTP candidates are routable for the
+# outbound PSTN SIP path to Vobiz.
+use_external_ip: true
 
 logging:
   level: info
