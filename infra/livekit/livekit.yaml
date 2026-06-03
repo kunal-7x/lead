@@ -1,0 +1,31 @@
+# LiveKit server config — localhost-only deploy unit.
+#
+# This file is structural only and contains NO secrets. The API key/secret map
+# and the Redis host/password are supplied at runtime via environment variables
+# (LIVEKIT_KEYS, REDIS_HOST, REDIS_PASSWORD), which livekit-server reads
+# natively. Those env vars are sourced from /opt/livekit/.env (chmod 600 on the
+# box) and are never committed. Safe to commit as-is.
+
+port: 7880
+
+# The HTTP/WS API listens inside the container; on the host this port is
+# published ONLY on 127.0.0.1 (see docker-compose.yml), so it is never exposed
+# externally. UFW additionally denies all inbound except SSH/22.
+
+rtc:
+  # Single UDP mux port for WebRTC media. Configured here but NOT published to
+  # the host in this unit (no host port mapping in docker-compose.yml).
+  udp_port: 7882
+  tcp_port: 7881
+  use_external_ip: false
+  # No public IP advertised in this unit; media path stays internal until the
+  # SIP/media ports are allowlisted in the next unit.
+
+logging:
+  level: info
+  json: false
+
+# NOTE on secrets (provided via env, NOT in this file):
+#   LIVEKIT_KEYS   -> "<LIVEKIT_API_KEY>: <LIVEKIT_API_SECRET>"  (maps to --keys)
+#   REDIS_HOST     -> "redis:6379"  (service name on the private compose bridge)
+#   REDIS_PASSWORD -> redis auth password

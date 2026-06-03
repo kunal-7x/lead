@@ -1,0 +1,36 @@
+# LiveKit SIP service config — localhost-only deploy unit.
+#
+# Secrets are injected at runtime from environment variables sourced from
+# /opt/livekit/.env (chmod 600 on the box). This file contains ${ENV_VAR}
+# placeholders only and is safe to commit.
+#
+# IMPORTANT (this unit): sip_port (5060) and the RTP range are NOT published to
+# the host in docker-compose.yml — they are container-internal only. Opening
+# and allowlisting them is the NEXT unit. The box stays externally closed
+# except SSH/22.
+
+# WebSocket URL to the LiveKit server. Over the private compose bridge the
+# server is reachable by service name. On the host, 7880 is published on
+# 127.0.0.1 only.
+ws_url: ws://livekit-server:7880
+
+api_key: ${LIVEKIT_API_KEY}
+api_secret: ${LIVEKIT_API_SECRET}
+
+redis:
+  address: redis:6379
+  password: ${REDIS_PASSWORD}
+
+# SIP signaling port (NOT published to host in this unit).
+sip_port: 5060
+
+# RTP media port range (NOT published to host in this unit).
+rtp_port: 10000-20000
+
+# Do not advertise/use an external IP in this unit; media path stays internal
+# until ports are allowlisted in the next unit.
+use_external_ip: false
+
+logging:
+  level: info
+  json: false

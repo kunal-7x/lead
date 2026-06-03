@@ -1,0 +1,91 @@
+# LiveKit self-hosted voice stack — LOCALHOST-ONLY deploy unit.
+#
+# SECURITY POSTURE (this unit):
+#   Nothing in this stack is exposed to the public internet. Every published
+#   port is bound to 127.0.0.1 on the host. UFW remains default-deny inbound
+#   with only SSH/22 allowed. The SIP signaling port (5060) and RTP media
+#   range are NOT published to the host at all in this unit — they stay
+#   container-internal. Opening allowlisted SIP/media ports is a LATER unit.
+#
+# Secrets (${LIVEKIT_API_KEY}, ${LIVEKIT_API_SECRET}, ${REDIS_PASSWORD}) are
+# supplied ONLY via /opt/livekit/.env on the box (chmod 600). They are never
+# committed. This file ships with ${ENV_VAR} placeholders only.
+#
+# Networking model: a private bridge network (`livekit`). Containers reach each
+# other by service name. Host-facing ports are published bound to 127.0.0.1
+# ONLY, so the services are reachable from the box itself (loopback) but never
+# from any external interface.
+
+services:
+  redis:
+    image: redis:7
+    container_name: livekit-redis
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--save", "60", "1", "--appendonly", "no"]
+    ports:
+      # Loopback-only host binding. Reachable as 127.0.0.1:6379 on the box.
+      - "127.0.0.1:6379:6379"
+    networks:
+      - livekit
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  livekit-server:
+    image: livekit/livekit-server:v1.8
+    container_name: livekit-server
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      # livekit-server reads these env vars natively (--keys / --redis-host /
+      # --redis-password). Keeping secrets in env, not in the mounted YAML.
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+      REDIS_HOST: "redis:6379"
+      REDIS_PASSWORD: "${REDIS_PASSWORD}"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    ports:
+      # Main API/WS (7880): loopback-only host binding. NOT 0.0.0.0.
+      - "127.0.0.1:7880:7880"
+      # NOTE: WebRTC UDP mux (7882) is configured in livekit.yaml but is
+      # deliberately NOT published to the host in this unit.
+    networks:
+      - livekit
+
+  sip:
+    image: livekit/sip:latest
+    container_name: livekit-sip
+    restart: unless-stopped
+    depends_on:
+      - livekit-server
+      - redis
+    environment:
+      LIVEKIT_API_KEY: "${LIVEKIT_API_KEY}"
+      LIVEKIT_API_SECRET: "${LIVEKIT_API_SECRET}"
+      REDIS_PASSWORD: "${REDIS_PASSWORD}"
+    # The image entrypoint is fixed to `livekit-sip --config=/sip/config.yaml`,
+    # so the config is mounted at that path. NOTE: the livekit/sip binary does
+    # NOT expand ${ENV_VAR} placeholders inside its YAML, so we mount a rendered
+    # runtime file (sip.runtime.yaml) produced on the box from the committed
+    # template sip.yaml via:
+    #     set -a; . /opt/livekit/.env; set +a
+    #     envsubst < /opt/livekit/sip.yaml > /opt/livekit/sip.runtime.yaml
+    #     chmod 600 /opt/livekit/sip.runtime.yaml
+    # sip.runtime.yaml contains real secrets and is git-ignored / never committed.
+    # Only the placeholder template sip.yaml is committed.
+    volumes:
+      - ./sip.runtime.yaml:/sip/config.yaml:ro
+    networks:
+      - livekit
+    # NOTE: sip_port 5060 and the RTP range are intentionally NOT published to
+    # the host in this unit — container-internal only. Publishing/allowlisting
+    # them is the NEXT unit.
+
+networks:
+  livekit:
+    driver: bridge
